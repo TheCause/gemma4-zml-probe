@@ -89,3 +89,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.D.4 — ZML RoPE K-only (k_proj + k_norm + rope), producer layer 13 sliding.
+zig_binary(
+    name = "gemma4_k_rope",
+    main = "gemma4_k_rope.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

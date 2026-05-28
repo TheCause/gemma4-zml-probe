@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D EN COURS (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm PASS, 28 mai 2026 soir-nuit). E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D EN COURS (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K PASS, 28 mai 2026 soir-nuit). D.5 + E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -461,7 +461,7 @@ Sous-sous-gates :
 | **P5.2.D.1** | ZML k_proj uniquement (single dot, reduce .h) | **PASS** |
 | **P5.2.D.2** | ZML v_proj uniquement (single dot, reduce .h) | **PASS** |
 | **P5.2.D.3** | ZML k_norm (reshape + rmsNorm + mul) | **PASS** |
-| P5.2.D.4 | ZML RoPE K (helper natif `zml.nn.rope` sliding) | pending |
+| **P5.2.D.4** | ZML RoPE K (helper natif `zml.nn.rope` sliding) | **PASS** |
 | P5.2.D.5 | ZML KV slot mock (cache write factice) | pending |
 
 ---
@@ -661,10 +661,76 @@ Porter la projection linéaire `v_proj` en ZML pour layer 13 (sliding writer), e
 
 ---
 
-## P5.2.D.4 → P5.2.E (à venir)
+## P5.2.D.4 — ZML RoPE K-only producer layer 13 (PASS, 28 mai 2026)
 
-D.3 PASS = pipeline `k_proj + reshape + RMSNorm + mul` validé pour layer 13 (sliding writer) avec écart numérique 5.36e-7 (sub-tolerance 1e-4, marge ~186 000×).
+### Objectif
+Étendre D.3 (k_proj + k_norm, PASS) avec la rotation positionnelle RoPE sur K via le helper natif `zml.nn.rope` (mirror C.3 q_rope, branche K). V hors scope (non rotée en Gemma 4). Comparer contre l'oracle PyTorch fp32 `k_after_rope` du fixture D.0.
 
-Prochaine sous-sous-gate : **P5.2.D.4** = ZML RoPE sur K (helper natif `zml.nn.rope`, layer_type sliding, theta=10000, partial_rotary=1.0 — pas le mode `proportional` réservé à la full attention layer 14). Tags requis `.s` et `.hd` côté ZML — vérifier si `.kvh` vs `.hd` impose une adaptation des tags ou si on renomme `.d → .hd` à l'entrée du helper rope. Référence : `fixtures/p5_2_d0_kv_oracle_layer13.pt["k_after_rope"]`.
+### Périmètre strict
+- **Pipeline ZML** :
+  ```zig
+  k_after_proj = hidden_input.dot(k_proj_weight, .h)                  (reuse D.1)
+  k_4d         = k_after_proj.reshape({1,4,1,256})
+                   .withTags(.{.b, .s, .kvh, .hd})                    (tag .hd direct,
+                                                                       requis par rope)
+  k_normalized = zml.nn.rmsNorm(k_4d, .hd, RMS_EPS=1e-6)
+  k_after_norm = k_normalized.mul(k_norm_weight.broad(shape))         (pattern Llama)
+  k_after_rope = zml.nn.rope(k_after_norm, null,
+                   .{ .layout=.sequential,
+                      .scaling=.{.default=.{.rope_theta=10000}} })
+  ```
+- **Diff vs D.3** : tag head_dim retagué directement à `.hd` (au lieu de `.d`) pour répondre à l'exigence du helper `zml.nn.rope` (qui requiert `.s` et `.hd`).
+- **Diff vs C.3** : `n_kv=1` (vs `n_heads=8`), tag head_count `.kvh` (vs `.nh`), shape sortie `[1,4,1,256]` (vs `[1,4,8,256]`).
+- **5 tenseurs chargés** depuis `fixtures/p5_2_d4_k_rope_layer13.safetensors` (slim re-export D.0 via `scripts/18_p5_2_d4_export_fixture.py`) : `hidden_input`, `k_proj_weight`, `k_norm_weight`, `k_after_norm` (oracle, sanity inline pos0/pos3), `k_after_rope` (oracle, gate principal).
+- **Interdits stricts** : v_proj, v_norm, transpose `[B,n_kv,S,head_dim]`, cache slot, attention scores, matmul QK, softmax, sliding mask, layer 14 full attention (proportional RoPE).
+
+### Sanity inline (ZML vs k_norm oracle)
+- pos 0 (identité attendue, cos=1 sin=0) : `|k_rope_zml[0,0,0,:] - k_norm_oracle[0,0,0,:]|_max = 4.47e-7` ✓ (sous-tolérance, "identité aux résidus matmul près")
+- pos 3 (RoPE active attendue) : `|k_rope_zml[0,3,0,:] - k_norm_oracle[0,3,0,:]|_max = 0.264` ✓ (>>1e-3, conforme oracle PyTorch 2.638e-1)
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/18_p5_2_d4_export_fixture.py` | export safetensors slim depuis le `.pt` D.0 (5 tenseurs) |
+| `fixtures/p5_2_d4_k_rope_layer13.safetensors` | 5 tenseurs (input + 2 poids + 2 oracles) ~1.6 MB |
+| `fixtures/p5_2_d4_k_rope_layer13_manifest.json` | shapes/dtypes + pipeline + interdits + rope_sanity |
+| `zml_runner/gemma4_k_rope.zig` | runner ZML (mirror C.3 q_rope, n_kv=1, tag `.kvh`) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_k_rope` |
+| `logs/P5_2_D4_k_rope.log` | sortie `bazel run` |
+
+### Résultats numériques observés
+- Forward result shape : `{b=1, s=4, kvh=1, hd=256, f32}` ✓
+- Block A `[0,0,0,:8]` pos 0 (identity) : max_diff **6.57e-8**
+- Block B `[0,3,0,:8]` pos 3 (active) : max_diff **1.34e-7**
+- Scan global 1024 fp32 : **max_abs 5.36e-7 à flat_index 894 (s=3, kvh=0, d=126)**, mean_abs 6.01e-8
+- Tolérance 1e-4 → marge ~186 000×
+
+### Finding mathématique (D.4)
+- `max_abs` ET `flat_index` (894, s=3, d=126) sont **strictement identiques à D.3 k_norm**.
+- La rotation RoPE étant **orthogonale**, elle préserve la norme L2 et le résidu absolu reste inchangé — les 1024 valeurs sont juste réorganisées par paires (real, imag) sans amplification.
+- C'est la preuve expérimentale que `layout=.sequential + scaling=.default + theta=10000` reproduisent **bit-equivalent** `apply_rotary_pos_emb` Gemma 4 sliding. Aucune erreur supplémentaire n'est introduite par la couche RoPE — la chaîne D.1→D.3→D.4 saturée par le résidu matmul D.1.
+- Possible interprétation : si une future sous-gate (D.5 ou layer 14 full) introduit un `max_abs > 5.36e-7`, ce sera nécessairement dû à une nouvelle source d'erreur (transpose, cache write, full RoPE proportional), pas à un effet d'accumulation.
+
+### Critères de clôture P5.2.D.4
+- [x] Build bazel PASS sur 3090
+- [x] Run produit `k_after_rope_zml [1,4,1,256]`
+- [x] Sanity pos 0 = identité (4.47e-7 < tolerance 1e-4)
+- [x] Sanity pos 3 = RoPE active (0.264 > 1e-3, conforme oracle 0.264)
+- [x] 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,3,0,:8]` rapportés vs oracle
+- [x] Scan global 1024 valeurs : max_abs 5.36e-7 < tolerance 1e-4
+- [x] mean_abs 6.01e-8
+- [x] max_abs et argmax strictement conservés depuis D.3 (RoPE orthogonale)
+- [x] Aucun v_proj, aucun v_norm, aucun transpose, aucun cache, aucune attention
+- [x] Log archivé `logs/P5_2_D4_k_rope.log`
+
+**Tag** : `p5.2-d4-zml-rope-k-pass`
+
+---
+
+## P5.2.D.5 → P5.2.E (à venir)
+
+D.4 PASS = pipeline `k_proj + k_norm + RoPE K` validé pour layer 13 (sliding writer) avec écart numérique 5.36e-7 (sub-tolerance 1e-4, marge ~186 000×). Le résidu est saturé par D.1 ; RoPE orthogonale n'amplifie pas.
+
+Prochaine sous-sous-gate : **P5.2.D.5** = ZML KV slot mock. Package `k_after_rope` + `v_after_proj` dans un cache slot factice (writer) sans appliquer encore l'attention. Stop discipliné : pas d'enchaînement automatique, attendre cadrage explicite avant D.5.
 
 P5.2.E suivra avec le sliding mask au compute.

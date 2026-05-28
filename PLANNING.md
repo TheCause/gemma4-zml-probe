@@ -2,12 +2,12 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## Etat 28 mai 2026 (P5.2.D.3 PASS — k_norm producer layer 13)
+## Etat 28 mai 2026 (P5.2.D.4 PASS — RoPE K producer layer 13)
 
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
 **P4.4.2 ✅** gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ I ✅ **J ✅**
-**P5.0 ✅ · P5.1 ✅ · P5.2.A ✅ · P5.2.B ✅ · P5.2.C ✅ complet (C.0/C.1/C.2/C.3) · P5.2.D 🔄 (D.0 ✅ D.1 ✅ D.2 ✅ D.3 ✅, D.4/D.5 pending)**
-Tag courant : `p5.2-d3-zml-k-norm-pass`.
+**P5.0 ✅ · P5.1 ✅ · P5.2.A ✅ · P5.2.B ✅ · P5.2.C ✅ complet (C.0/C.1/C.2/C.3) · P5.2.D 🔄 (D.0 ✅ D.1 ✅ D.2 ✅ D.3 ✅ D.4 ✅, D.5 pending)**
+Tag courant : `p5.2-d4-zml-rope-k-pass`.
 
 > **Gemma 4 E2B PLE minimal ZML validated end-to-end.**
 
