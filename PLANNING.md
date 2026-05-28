@@ -2,39 +2,34 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## Etat 28 mai 2026 (fin de session)
+## Etat 28 mai 2026 (P4.4.2 PLE-only CLOSED)
 
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
-P4.4.2 gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ **I ✅** (A→G bit-exact, H max_diff 1.49e-8, I max_diff 1.49e-8 — l'add n'ajoute pas de drift)
-Tag courant : `gate/P4.4.2-gate-I-pass` (commit `52f70a3`).
+**P4.4.2 ✅** gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ I ✅ **J ✅**
+Tag courant : `gate/P4.4.2-gate-J-pass`.
 
-Gate H a verrouillé la première réduction numérique sensible (variance → rsqrt → mul weight pur Gemma 4, pattern Llama vs Qwen3.5). Gate I a confirmé que la fusion des deux branches PLE (token_identity de Gate D + context_normalized de Gate H) reproduit numpy fp32 à 1 ULP — l'addition element-wise ne dégrade rien au-delà du résidu rsqrt de H. Sur 4 points fixes, blocks B/C/D bit-exact, block A à 1 ULP fp32 strictement hérité de H.
+> **Gemma 4 E2B PLE minimal ZML validated end-to-end.**
 
-**Next session: Gate J only — `.scale(INV_SQRT_2)` final + comparaison à `ple_reference_final` chargé depuis le fixture.**
+Synthèse numérique P4.4.2 :
+- A→G : tous bit-exact PJRT CPU vs numpy fp32 (`max_diff = 0.0`).
+- H (rmsNorm + weight) : 1.49e-8 vs numpy fp32 — 1 ULP fp32 sur 2 blocks, bit-exact sur 2 autres.
+- I (fusion add) : 1.49e-8 — heritage exact de H, l'add n'ajoute aucun drift.
+- J (scale 1/√2 + comparaison fixture) :
+  - 4 blocks max_diff : **1.79e-7** vs fixture fp32 (`ple_reference_final.npy`).
+  - Scan global 35840 valeurs : max_abs **1.526e-5** (flat_index 10756), mean_abs **1.85e-7**.
+  - Tolérance 1e-4, marge ~6500×.
+  - Résidu confirmé = matmul PJRT-CPU Eigen-like vs PyTorch BLAS (P4.3 observait 1.53e-5 numpy vs PyTorch, on retrouve à l'octet près).
 
-Frontière Gate J : dernier scale + premier oracle de bout en bout. Différence avec Gates B→I (référence calculée à la volée en numpy fp32) : la cible est le tenseur `ple_reference_final` déjà matérialisé dans le buffer ZML, produit en P3 via PyTorch fp32 (matmul BLAS). Risque numérique principal : matmul `[4,1536] @ [1536,8960]` peut diverger ~1e-5 entre PJRT CPU (Eigen) et PyTorch (BLAS différent) — c'est ce qu'on a observé en P4.3 (`max_abs = 1.53e-5` numpy vs PyTorch). Donc Gate J ne sera **probablement pas bit-exact** ; tolerance cible 1e-4 (cohérent avec gates précédents), attendu ~1e-5.
+Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne PLE reproduit PyTorch à <2e-7. Le PLE-only ZML minimal est **validé end-to-end** pour gemma-4-E2B-it sur l'input `'ZML test prompt'`.
 
-### Contrat Gate J (préparé)
+**Next session: P5 (YOCO / Shared KV) — débloqué, non démarré.**
 
-```text
-input  : sortie Gate I (token_identity + context_normalized)
-op     : .scale(INV_SQRT_2) avec INV_SQRT_2 = 0.7071067811865475 (déjà défini ligne 38)
-output : ple_final  [b=1, s=4, l=35, d=256]
-target : fixture `ple_reference_final` (chargé en buffer, déclaré symboliquement
-         dans PleFixture, jamais comparé jusqu'à présent)
-mode   : comparaison globale (5 blocs flat) + comparaison tenseur entier
-         via toHostBuffer + numpy.allclose (rtol/atol matchés sur diff)
-attendu: max_diff ≤ 1e-4, probable 1e-5 (matmul PJRT-CPU vs PyTorch BLAS)
-tag    : gate/P4.4.2-gate-J-pass
-```
+### Connaissance capitalisée pour P5 et au-delà
 
-Choix d'implémentation pour Gate J : on a déjà `model.ple_reference_final` dans le buffer device. Deux options :
-1. Charger les 35 840 valeurs du fixture en host, faire `max(abs(actual - expected))` côté Zig — simple mais log volumineux.
-2. Étendre le forward à renvoyer un tuple (ple_final, ple_reference_final) et comparer en host. Plus propre, mais demande de vérifier la syntaxe ZML pour forward multi-output.
-
-Aller en (1) en première passe — c'est le pattern déjà utilisé pour les blocks A→I, juste appliqué à tout le tenseur en plus des 5 blocs strategiques. Si la moindre divergence dépasse 1e-4, isoler le matmul (Gate E) en faisant tourner deux fois la même chaîne avec/sans Eigen, ou comparer Gate E vs PyTorch directement.
-
-Gate J ferme P4.4.2 et débloque P5 (YOCO).
+1. **Piège ZML #1 — reshape perd les tags** : `reshape(.{...})` retourne shape anonyme. Re-tagger via `.withTags(.{ ... })` avant toute op qui cible un axe par tag (rmsNorm, mul/add cross-tagged).
+2. **Piège ZML #2 — mul/add ne broadcastent pas implicitement** : `weight.broad(other.shape())` obligatoire (pattern Llama `model.zig:391`).
+3. **Choix RMSNorm verrouillé** : pattern Llama `normalized.mul(weight)`. Variante Qwen3.5 `normalized.mul(1+weight)` interdite pour Gemma 4.
+4. **Numérique attendu** : matmul PJRT-CPU vs PyTorch BLAS introduit ~1.5e-5 résidu. Pour valider une couche entière vs référence PyTorch, viser tolérance 1e-4 ; pour valider la couche vs numpy fp32 reproduit localement, viser bit-exact ou 1 ULP.
 
 ## Planning gemma4-zml-probe
 
