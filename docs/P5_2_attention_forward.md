@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) + P5.2.C.1 (ZML q_proj) PASS (28 mai 2026). C.2-C.3, D, E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) + P5.2.C.1 (q_proj) + P5.2.C.2 (q_norm) PASS (28 mai 2026). C.3, D, E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -189,7 +189,7 @@ Pas de partage de module Zig avec `gemma4_policy_lookup.zig` — sous-gates **in
 |---|---|---|
 | **P5.2.C.0** | PyTorch oracle Q-only reader, layer 15 sliding, no K/V | **PASS** |
 | **P5.2.C.1** | ZML q_proj (single dot, reduce .h) | **PASS** |
-| P5.2.C.2 | ZML q_norm | pending |
+| **P5.2.C.2** | ZML q_norm (reshape + rmsNorm + mul) | **PASS** |
 | P5.2.C.3 | ZML RoPE Q-only | pending |
 
 ---
@@ -304,6 +304,66 @@ Porter la projection linéaire `q_proj` en ZML pour layer 15 (sliding reader), e
 
 ---
 
-## P5.2.C.2 → C.3, P5.2.D → P5.2.E (à venir)
+---
 
-Voir mémoire `project_gemma4_zml_probe.md` pour la roadmap détaillée. Une sous-sous-gate à la fois, garde-fou strict. P5.2.C.2 ajoutera le `q_norm` (RMSNorm pattern Llama `normalized.mul(weight)`) au-dessus de `q_proj`, comparer vs `q_after_norm`.
+## P5.2.C.2 — ZML q_norm reader layer 15 (PASS, 28 mai 2026)
+
+### Objectif
+Étendre P5.2.C.1 (q_proj seul PASS) avec le pipeline q_norm pattern Llama (`normalized.mul(weight)`), comparer contre l'oracle `q_after_norm` du fixture C.0.
+
+### Périmètre strict
+- **Pipeline ZML** :
+  ```zig
+  q_after_proj  = hidden_input.dot(q_proj_weight, .h)            // reuse C.1
+  q_4d          = q_after_proj.reshape({1,4,8,256})              // perd les tags
+                    .withTags(.{.b, .s, .n, .d})                  // re-tag (piège #1)
+  q_normalized  = zml.nn.rmsNorm(q_4d, .d, 1e-6)
+  q_after_norm  = q_normalized.mul(q_norm_weight.broad(q_normalized.shape()))
+  ```
+- **4 tenseurs chargés** : `hidden_input`, `q_proj_weight`, `q_norm_weight`, `q_after_norm` (oracle).
+- **Interdits stricts** : RoPE, transpose, K/V projection, attention scores, softmax, cache, sliding mask.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `zml_runner/gemma4_q_norm.zig` | runner ZML (4 tenseurs du fixture C.0, étend C.1) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_q_norm` |
+| `logs/P5_2_C2_q_norm.log` | sortie `bazel run` ~76 lignes |
+| `docs/P5_2_attention_forward.md` | ce document (section C.2) |
+
+### Validation
+**4 blocks fixed-point** (extraits oracle, hardcoded) :
+- Block A `[0,0,0,:8]` flat_offset=0    — max_diff=3.81e-6
+- Block B `[0,0,7,:8]` flat_offset=1792 — max_diff=1.19e-6
+- Block C `[0,3,0,:8]` flat_offset=6144 — max_diff=1.43e-6
+- Block D `[0,3,7,:8]` flat_offset=7936 — max_diff=4.77e-6
+- **4 blocks max_diff = 4.77e-6**
+
+**Scan global 8192 valeurs** :
+- max_abs = **6.676e-6** à `flat_index=1926 (s=0, n=7, d=134)`
+- mean_abs = **4.91e-7**
+
+**Tolerance** : 1e-4 → marge ~15× sous le seuil. **Observation** : max_abs C.2 (6.68e-6) **plus petit** que max_abs C.1 (1.14e-5). La RMSNorm divise par `sqrt(mean(x²)+eps)` ≈ 1.7, ce qui réduit le résidu propagé d'environ le même facteur.
+
+**Sanity layout** : position du max C.2 (s=0, n=7, d=134) = même position absolue que C.1 (flat_index 1926, qui était s=0, o=1926 = 7×256 + 134). Cohérence parfaite du reshape `[B,S,O] → [B,S,N,D]`.
+
+### Notes capitalisées
+- **Piège #1 (reshape sans tags)** : `reshape({...})` perd les tags ZML — **toujours** suivre par `.withTags(.{.b, .s, .n, .d})` avant op tag-based. Vérifié encore une fois en C.2.
+- **Piège #2 (mul broadcast implicite)** : `q_norm_weight [d=256]` × `q_normalized [b,s,n,d]` nécessite `.broad(target.shape())` explicite. Pas de broadcast NumPy-like auto.
+- **Piège #3 (pattern Llama vs Qwen)** : Gemma 4 utilise `normalized.mul(weight)` (Llama), pas `(1+weight)` (Qwen). Cf P4.4.2 Gate H.
+
+### Critères de clôture P5.2.C.2
+- [x] Build bazel PASS
+- [x] Run produit `q_after_norm_zml [1,4,8,256]`
+- [x] 4/4 fixed-point blocks PASS (max_diff < 5e-6)
+- [x] Scan global 8192 valeurs : max_abs 6.68e-6 (sous tolerance 1e-4)
+- [x] Aucun RoPE, aucun transpose, aucun K/V, aucune attention
+- [x] Log archivé `logs/P5_2_C2_q_norm.log`
+
+**Tag** : `p5.2-c2-zml-q-norm-pass`
+
+---
+
+## P5.2.C.3, P5.2.D → P5.2.E (à venir)
+
+Voir mémoire `project_gemma4_zml_probe.md`. P5.2.C.3 ajoutera la RoPE Q-only (cos/sin du fixture, `apply_rotary_pos_emb`-équivalent ZML) au-dessus de q_norm, comparer vs `q_after_rope`. À cadrer en session dédiée — c'est la dernière sous-sous-gate de C avant d'attaquer D (K/V producer path).

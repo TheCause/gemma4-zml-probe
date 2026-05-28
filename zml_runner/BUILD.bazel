@@ -34,3 +34,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.C.2 — ZML q_norm (q_proj + reshape + rmsNorm + mul), reader layer 15.
+zig_binary(
+    name = "gemma4_q_norm",
+    main = "gemma4_q_norm.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
