@@ -3,8 +3,9 @@
 // Gate A : charger ple_fixture.safetensors, declarer les 5 tenseurs symboliques,
 //          materialiser via zml.io.load. PASS.
 // Gate B : forward = embed_tokens_slice.scale(sqrt(1536)). PASS bit-exact.
-// Gate C : forward = embed_tokens_per_layer_slice.scale(16.0).
-//          Memes APIs que Gate B, autre tenseur, autre scalaire.
+// Gate C : forward = embed_tokens_per_layer_slice.scale(16.0). PASS bit-exact.
+// Gate D : forward = embed_tokens_per_layer_slice.scale(16.0).reshape({1,4,35,256}).
+//          Validation structurelle du layout via 5 blocs d'indices couvrant le 4D.
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -33,20 +34,43 @@ const INV_SQRT_H: f32 = 0.02551551815399144;
 const INV_SQRT_2: f32 = 0.7071067811865475;
 const RMS_EPS: f32 = 1.0e-6;
 
-// Reference Gate C : embed_tokens_per_layer_slice[0, :8] * 16.0
-// Calculee cote M1 via numpy fp32 (cf fixtures/embed_tokens_per_layer_slice.npy).
-// Gate B reference conservee en commentaire pour trace (cf tag gate/P4.4.2-gate-B-pass).
-const GATE_C_EXPECTED: [8]f32 = .{
-    0.16796875,
-    0.04345703125,
-    -2.1875,
-    -0.0213623046875,
-    0.1494140625,
-    -0.02490234375,
-    1.953125,
-    -0.65625,
+// Reference Gate D : (embed_tokens_per_layer_slice * 16.0).reshape(1,4,35,256)
+// 5 blocs d'indices couvrant le 4D ; flat_offset = b*(S*L*D) + s*(L*D) + l*D + d
+// Calculee cote M1 via numpy fp32, layout consistency check FLAT == ref[idx] valide.
+const GateDBlock = struct {
+    label: []const u8,
+    flat_offset: usize,
+    expected: []const f32,
 };
-const GATE_C_TOLERANCE: f32 = 1.0e-4;
+
+const GATE_D_BLOCKS = [_]GateDBlock{
+    .{
+        .label = "A [0,0,0,0:8]",
+        .flat_offset = 0,
+        .expected = &.{ 0.16796875, 0.04345703125, -2.1875, -0.0213623046875, 0.1494140625, -0.02490234375, 1.953125, -0.65625 },
+    },
+    .{
+        .label = "B [0,0,0,252:256]",
+        .flat_offset = 252,
+        .expected = &.{ 0.1318359375, -0.486328125, -0.78125, 0.173828125 },
+    },
+    .{
+        .label = "C [0,0,1,0:8]",
+        .flat_offset = 256,
+        .expected = &.{ 0.4296875, 0.2294921875, -0.1416015625, -2.375, -1.0390625, 1.1328125, -0.2294921875, -2.984375 },
+    },
+    .{
+        .label = "D [0,0,34,0:8]",
+        .flat_offset = 8704,
+        .expected = &.{ 0.33203125, -0.64453125, 0.2890625, 0.2421875, 2.0625, -0.625, -0.1767578125, 1.171875 },
+    },
+    .{
+        .label = "E [0,1,0,0:8]",
+        .flat_offset = 8960,
+        .expected = &.{ -0.71875, 1.125, 2.109375, 0.2451171875, 2.703125, -0.5390625, -1.2890625, -1.0078125 },
+    },
+};
+const GATE_D_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -110,10 +134,10 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate C forward : scale par sqrt(D) = 16.0 sur embed_tokens_per_layer_slice.
-    /// Toujours pas de dot, pas de reshape, pas de rmsnorm.
+    /// Gate D forward : scale(16) puis reshape vers [1, 4, 35, 256].
+    /// Toujours pas de dot, pas de rmsnorm, pas d'addition.
     pub fn forward(self: PleFixture) zml.Tensor {
-        return self.embed_tokens_per_layer_slice.scale(SQRT_D);
+        return self.embed_tokens_per_layer_slice.scale(SQRT_D).reshape(.{ 1, 4, 35, 256 });
     }
 };
 
@@ -157,8 +181,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate C: compile + run forward (scale by sqrt(D) = 16) ===
-    log.info("Gate C: compiling forward (scale by sqrt(256) = {d:.6})...", .{SQRT_D});
+    // === Gate D: compile + run forward (scale by 16 + reshape [1,4,35,256]) ===
+    log.info("Gate D: compiling forward (scale(16) + reshape [1,4,35,256])...", .{});
     var exe = try platform.compile(
         allocator,
         io,
@@ -187,20 +211,27 @@ pub fn main(init: std.process.Init) !void {
     defer slice.free(allocator);
 
     const data = slice.items(f32);
-    log.info("First 8 values vs expected (numpy fp32 ref):", .{});
-    var max_diff: f32 = 0.0;
-    for (0..8) |i| {
-        const expected = GATE_C_EXPECTED[i];
-        const actual = data[i];
-        const diff = @abs(actual - expected);
-        if (diff > max_diff) max_diff = diff;
-        log.info("  [0, {}]: actual={d:.10} expected={d:.10} diff={e:.3}", .{ i, actual, expected, diff });
-    }
-    log.info("Gate C max_diff over first 8: {e:.6} (tolerance {e:.1})", .{ max_diff, GATE_C_TOLERANCE });
+    log.info("Validating 5 layout blocks vs numpy fp32 ref (reshape [1,4,35,256] row-major):", .{});
 
-    if (max_diff > GATE_C_TOLERANCE) {
-        log.err("BLOCK: Gate C max_diff exceeds tolerance", .{});
-        return error.GateCFailed;
+    var max_diff_global: f32 = 0.0;
+    for (GATE_D_BLOCKS) |block| {
+        var block_max: f32 = 0.0;
+        log.info("  Block {s} (flat_offset={}):", .{ block.label, block.flat_offset });
+        for (block.expected, 0..) |expected, i| {
+            const actual = data[block.flat_offset + i];
+            const diff = @abs(actual - expected);
+            if (diff > block_max) block_max = diff;
+            log.info("    +{:>3}: actual={d:.10} expected={d:.10} diff={e:.3}", .{ i, actual, expected, diff });
+        }
+        log.info("    block max_diff: {e:.6}", .{block_max});
+        if (block_max > max_diff_global) max_diff_global = block_max;
     }
-    log.info("Gate C PASS: scale(16.0) matches numpy reference", .{});
+
+    log.info("Gate D global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_D_TOLERANCE });
+
+    if (max_diff_global > GATE_D_TOLERANCE) {
+        log.err("BLOCK: Gate D max_diff exceeds tolerance", .{});
+        return error.GateDFailed;
+    }
+    log.info("Gate D PASS: scale(16) + reshape [1,4,35,256] matches numpy reference (row-major layout confirmed)", .{});
 }
