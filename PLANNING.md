@@ -2,11 +2,15 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## Etat 28 mai 2026
+## Etat 28 mai 2026 (fin de session)
 
-P-1 ✅ · P2 ✅ · P3 ✅ (PASS BF16-aware, `token_identity` bit-exact) · P4-prep ✅ (fixture autonome 53 Mo) · P4.3 ✅ (selfcheck Python autonome, seuils `max_abs ≤ 1e-4` / `mean_abs ≤ 1e-6`) · P4.4.0 ✅ (fixture safetensors 52.80 MiB) · P4.4.1 ✅ (API ZML décodée, cf. mémoire).
-Tag courant : `gate/P4.4.0-safetensors-fixture-pass` (commit `1baeca5`).
-Prochain focus : **P4.4.2** mini-runner ZML PLE-only (`gemma4_ple_fixture.zig`).
+P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
+P4.4.2 gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ (tous bit-exact PJRT CPU vs numpy fp32)
+Tag courant : `gate/P4.4.2-gate-G-pass` (commit `1f07852`).
+
+**Next session: Gate H only — RMSNorm pure weight, no (1+weight), compare context_normalized.**
+
+Frontière naturelle : Gate H introduit la première opération à risque sémantique (réduction variance, rsqrt, choix Llama vs Qwen3.5 pour le `* weight`). À traiter seul, sans enchaîner I/J.
 
 ## Planning gemma4-zml-probe
 
