@@ -10,6 +10,10 @@
 // Gate F : ajoute .scale(1/sqrt(1536)) apres le dot. PASS bit-exact.
 // Gate G : ajoute .reshape(.{1, 4, 35, 256}) en fin de chaine.
 //          Reshape structurel pur, attendu bit-exact (8960 = 35*256).
+// Gate H : RMSNorm(context_4d, axe .d) puis mul(per_layer_projection_norm.weight).
+//          Pattern Llama : normalized.mul(weight). PAS Qwen (1+weight).
+//          Reference numpy fp32 (Gates E/F/G upstream tous bit-exact).
+//          Tolerance 1e-4 (BF16-aware : ULP BF16 ~3e-3, on vise plus serre).
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -47,37 +51,40 @@ const GateBlock = struct {
     expected: []const f32,
 };
 
-const GATE_G_BLOCKS = [_]GateBlock{
+// Reference Gate H : context_normalized = rmsNorm(context_4d, .d, 1e-6) * weight
+// Calculee depuis fixtures fp32 numpy (cf. logs/gate_h_reference.txt).
+// Shape [1, 4, 35, 256] row-major, flat 35840.
+const GATE_H_BLOCKS = [_]GateBlock{
     .{
         .label = "A [0,0,0,:4]",
         .flat_offset = 0,
         .expected = &.{
-            -0.3701806664466858, 0.018873091787099838, 0.013589124195277691, 0.15025092661380768,
+            -0.1860489398, 0.0802083090, 0.0478436537, 0.1345958859,
         },
     },
     .{
         .label = "B [0,0,34,:4]",
         .flat_offset = 8704,
         .expected = &.{
-            0.17525550723075867, 0.02555924654006958, 0.007640661206096411, -0.08560387045145035,
+            0.1558856219, 0.1922406703, 0.0476085246, -0.1357153356,
         },
     },
     .{
         .label = "C [0,3,0,:4]",
         .flat_offset = 26880,
         .expected = &.{
-            -0.45402923226356506, -0.061500586569309235, -0.034166369587183, 0.27390238642692566,
+            -0.2109971642, -0.2416767627, -0.1112272069, 0.2268766165,
         },
     },
     .{
         .label = "D [0,3,34,:4]",
         .flat_offset = 35584,
         .expected = &.{
-            0.06385242938995361, -0.008235679008066654, -0.00948276650160551, 0.06604278832674026,
+            0.0852049515, -0.0929286629, -0.0886424705, 0.1570774913,
         },
     },
 };
-const GATE_G_TOLERANCE: f32 = 1.0e-4;
+const GATE_H_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -141,13 +148,20 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate G forward : meme chaine que Gate F + reshape final vers [1,4,35,256].
-    /// Resultat : Tensor({1, 4, 35, 256, f32}).
+    /// Gate H forward : Gate G + Gemma4 RMSNorm sur axe .d puis * weight.
+    /// Pattern Llama-style : normalized.mul(weight). PAS Qwen (1+weight).
+    /// Resultat : Tensor({b=1, s=4, l=35, d=256, f32}).
     pub fn forward(self: PleFixture) zml.Tensor {
         const inputs_embeds = self.embed_tokens_slice.scale(SQRT_H);
         const context_proj = inputs_embeds.dot(self.per_layer_model_projection, .h);
         const context_scaled = context_proj.scale(INV_SQRT_H);
-        return context_scaled.reshape(.{ 1, 4, 35, 256 });
+        // reshape positionnel = perte des tags (cf. Gate D). On re-tag pour rmsNorm.
+        const context_4d = context_scaled
+            .reshape(.{ 1, 4, 35, 256 })
+            .withTags(.{ .b, .s, .l, .d });
+        const normalized = zml.nn.rmsNorm(context_4d, .d, RMS_EPS);
+        // weight {.d} broadcasted to {b,s,l,d} — pattern Llama.
+        return normalized.mul(self.per_layer_projection_norm.broad(normalized.shape()));
     }
 };
 
@@ -191,8 +205,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate G: scale + dot + scale + reshape [1,4,35,256] ===
-    log.info("Gate G: compiling forward (Gate F + reshape [1,4,35,256])...", .{});
+    // === Gate H: Gate G + rmsNorm(.d, eps) * per_layer_projection_norm.weight ===
+    log.info("Gate H: compiling forward (Gate G + Gemma4 RMSNorm + weight mul)...", .{});
     var exe = try platform.compile(
         allocator,
         io,
@@ -224,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("Validating 4 fixed-point 4D blocks vs numpy fp32 ref:", .{});
 
     var max_diff_global: f32 = 0.0;
-    for (GATE_G_BLOCKS) |block| {
+    for (GATE_H_BLOCKS) |block| {
         var block_max: f32 = 0.0;
         log.info("  Block {s} (flat_offset={}):", .{ block.label, block.flat_offset });
         for (block.expected, 0..) |expected, i| {
@@ -237,11 +251,11 @@ pub fn main(init: std.process.Init) !void {
         if (block_max > max_diff_global) max_diff_global = block_max;
     }
 
-    log.info("Gate G global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_G_TOLERANCE });
+    log.info("Gate H global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_H_TOLERANCE });
 
-    if (max_diff_global > GATE_G_TOLERANCE) {
-        log.err("BLOCK: Gate G max_diff exceeds tolerance", .{});
-        return error.GateGFailed;
+    if (max_diff_global > GATE_H_TOLERANCE) {
+        log.err("BLOCK: Gate H max_diff exceeds tolerance", .{});
+        return error.GateHFailed;
     }
-    log.info("Gate G PASS: context_scaled.reshape([1,4,35,256]) matches numpy reference", .{});
+    log.info("Gate H PASS: rmsNorm(.d, eps) * weight matches numpy reference", .{});
 }
