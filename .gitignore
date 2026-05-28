@@ -1,0 +1,11 @@
+# Venvs / caches Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Poids HF lourds (downloadable depuis le repo distant)
+weights/
+
+# Variables d env locales
+.env
