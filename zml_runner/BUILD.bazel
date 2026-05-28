@@ -16,3 +16,10 @@ zig_binary(
     main = "gemma4_policy_lookup.zig",
     visibility = ["//visibility:public"],
 )
+
+# P5.2.B — producer/read routing mock host-side, sans dependance ZML.
+zig_binary(
+    name = "gemma4_routing_mock",
+    main = "gemma4_routing_mock.zig",
+    visibility = ["//visibility:public"],
+)
