@@ -7,9 +7,9 @@
 // Gate D : forward = embed_tokens_per_layer_slice.scale(16.0).reshape({1,4,35,256}). PASS.
 // Gate E : forward = (embed_tokens_slice.scale(sqrt(1536)))
 //                    .dot(per_layer_model_projection, .h). PASS bit-exact.
-// Gate F : ajoute .scale(1/sqrt(1536)) apres le dot.
-//          context_scaled = context_proj * INV_SQRT_H.
-//          Toujours pas de reshape, pas de rmsnorm.
+// Gate F : ajoute .scale(1/sqrt(1536)) apres le dot. PASS bit-exact.
+// Gate G : ajoute .reshape(.{1, 4, 35, 256}) en fin de chaine.
+//          Reshape structurel pur, attendu bit-exact (8960 = 35*256).
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -47,49 +47,37 @@ const GateBlock = struct {
     expected: []const f32,
 };
 
-const GATE_F_BLOCKS = [_]GateBlock{
+const GATE_G_BLOCKS = [_]GateBlock{
     .{
-        .label = "A [0, 0:8]",
+        .label = "A [0,0,0,:4]",
         .flat_offset = 0,
         .expected = &.{
             -0.3701806664466858, 0.018873091787099838, 0.013589124195277691, 0.15025092661380768,
-            0.07879049330949783, -0.2266412079334259, -0.049442194402217865, 0.040296513587236404,
         },
     },
     .{
-        .label = "B [0, 255:263]",
-        .flat_offset = 255,
+        .label = "B [0,0,34,:4]",
+        .flat_offset = 8704,
         .expected = &.{
-            -0.5515657067298889, -0.18700061738491058, -0.08512131869792938, 0.09595407545566559,
-            -0.2180565446615219, 0.24011623859405518, -0.22540313005447388, -0.023091372102499008,
+            0.17525550723075867, 0.02555924654006958, 0.007640661206096411, -0.08560387045145035,
         },
     },
     .{
-        .label = "C [0, 8952:8960]",
-        .flat_offset = 8952,
+        .label = "C [0,3,0,:4]",
+        .flat_offset = 26880,
         .expected = &.{
-            0.038720518350601196, -0.3203299045562744, -0.032808203250169754, -0.023142557591199875,
-            -0.027749860659241676, -0.01926911063492298, -0.004224673379212618, 0.14686381816864014,
+            -0.45402923226356506, -0.061500586569309235, -0.034166369587183, 0.27390238642692566,
         },
     },
     .{
-        .label = "D [1, 0:8]",
-        .flat_offset = 8960,
+        .label = "D [0,3,34,:4]",
+        .flat_offset = 35584,
         .expected = &.{
-            -0.4754802882671356, -0.007106372155249119, 0.06471488624811172, 0.24352103471755981,
-            0.09363850206136703, -0.2992176115512848, -0.0505719929933548, -0.009212813340127468,
-        },
-    },
-    .{
-        .label = "E [3, 8952:8960]",
-        .flat_offset = 35832,
-        .expected = &.{
-            0.01903591677546501, -0.23062092065811157, -0.06775687634944916, -0.09522943198680878,
-            0.03517763689160347, 0.03412840887904167, 0.03436551243066788, 0.0333789698779583,
+            0.06385242938995361, -0.008235679008066654, -0.00948276650160551, 0.06604278832674026,
         },
     },
 };
-const GATE_F_TOLERANCE: f32 = 1.0e-4;
+const GATE_G_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -153,14 +141,13 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate F forward : inputs_embeds = embed_tokens_slice * sqrt(H)
-    ///                  context_proj = inputs_embeds @ per_layer_model_projection.T
-    ///                  context_scaled = context_proj * (1/sqrt(H))
-    /// Resultat : Tensor({s=4, lp=8960, f32}).
+    /// Gate G forward : meme chaine que Gate F + reshape final vers [1,4,35,256].
+    /// Resultat : Tensor({1, 4, 35, 256, f32}).
     pub fn forward(self: PleFixture) zml.Tensor {
         const inputs_embeds = self.embed_tokens_slice.scale(SQRT_H);
         const context_proj = inputs_embeds.dot(self.per_layer_model_projection, .h);
-        return context_proj.scale(INV_SQRT_H);
+        const context_scaled = context_proj.scale(INV_SQRT_H);
+        return context_scaled.reshape(.{ 1, 4, 35, 256 });
     }
 };
 
@@ -204,8 +191,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate F: scale(sqrt(H)) + dot(proj, .h) + scale(1/sqrt(H)) ===
-    log.info("Gate F: compiling forward (scale(sqrt(H)) + dot(proj, .h) + scale(1/sqrt(H)))...", .{});
+    // === Gate G: scale + dot + scale + reshape [1,4,35,256] ===
+    log.info("Gate G: compiling forward (Gate F + reshape [1,4,35,256])...", .{});
     var exe = try platform.compile(
         allocator,
         io,
@@ -234,10 +221,10 @@ pub fn main(init: std.process.Init) !void {
     defer slice.free(allocator);
 
     const data = slice.items(f32);
-    log.info("Validating 5 context_scaled blocks vs numpy fp32 ref:", .{});
+    log.info("Validating 4 fixed-point 4D blocks vs numpy fp32 ref:", .{});
 
     var max_diff_global: f32 = 0.0;
-    for (GATE_F_BLOCKS) |block| {
+    for (GATE_G_BLOCKS) |block| {
         var block_max: f32 = 0.0;
         log.info("  Block {s} (flat_offset={}):", .{ block.label, block.flat_offset });
         for (block.expected, 0..) |expected, i| {
@@ -250,11 +237,11 @@ pub fn main(init: std.process.Init) !void {
         if (block_max > max_diff_global) max_diff_global = block_max;
     }
 
-    log.info("Gate F global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_F_TOLERANCE });
+    log.info("Gate G global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_G_TOLERANCE });
 
-    if (max_diff_global > GATE_F_TOLERANCE) {
-        log.err("BLOCK: Gate F max_diff exceeds tolerance", .{});
-        return error.GateFFailed;
+    if (max_diff_global > GATE_G_TOLERANCE) {
+        log.err("BLOCK: Gate G max_diff exceeds tolerance", .{});
+        return error.GateGFailed;
     }
-    log.info("Gate F PASS: context_scaled matches numpy reference", .{});
+    log.info("Gate G PASS: context_scaled.reshape([1,4,35,256]) matches numpy reference", .{});
 }
