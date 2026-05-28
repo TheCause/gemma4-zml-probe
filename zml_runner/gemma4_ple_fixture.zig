@@ -13,7 +13,11 @@
 // Gate H : RMSNorm(context_4d, axe .d) puis mul(per_layer_projection_norm.weight).
 //          Pattern Llama : normalized.mul(weight). PAS Qwen (1+weight).
 //          Reference numpy fp32 (Gates E/F/G upstream tous bit-exact).
-//          Tolerance 1e-4 (BF16-aware : ULP BF16 ~3e-3, on vise plus serre).
+//          max_diff = 1.49e-8 (tolerance 1e-4, ~7000x sous le seuil). PASS.
+// Gate I : token_identity.add(context_normalized). Fusion pure des 2 branches PLE.
+//          Branche A = sortie Gate D (re-taggee), branche B = sortie Gate H.
+//          PAS de /√2 ici (reserve Gate J avec comparaison ple_reference_final).
+//          Attendu : bit-exact ou ~1 ULP fp32 (add element-wise pur).
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -51,40 +55,45 @@ const GateBlock = struct {
     expected: []const f32,
 };
 
-// Reference Gate H : context_normalized = rmsNorm(context_4d, .d, 1e-6) * weight
-// Calculee depuis fixtures fp32 numpy (cf. logs/gate_h_reference.txt).
+// Reference Gate I : ple_sum = token_identity + context_normalized
+// Branche A : embed_tokens_per_layer_slice * sqrt(D) (=16) reshape [1,4,35,256]
+// Branche B : sortie Gate H (context_normalized).
+// Calculee depuis fixtures fp32 numpy.
 // Shape [1, 4, 35, 256] row-major, flat 35840.
-const GATE_H_BLOCKS = [_]GateBlock{
+// PAS de /√2 ici (reserve Gate J).
+const GATE_I_BLOCKS = [_]GateBlock{
     .{
         .label = "A [0,0,0,:4]",
         .flat_offset = 0,
         .expected = &.{
-            -0.1860489398, 0.0802083090, 0.0478436537, 0.1345958859,
+            -0.0180801898, 0.1236653402, -2.1396563053, 0.1132335812,
         },
     },
     .{
         .label = "B [0,0,34,:4]",
         .flat_offset = 8704,
         .expected = &.{
-            0.1558856219, 0.1922406703, 0.0476085246, -0.1357153356,
+            0.4879168868, -0.4522905946, 0.3366710246, 0.1064721644,
         },
     },
     .{
         .label = "C [0,3,0,:4]",
         .flat_offset = 26880,
         .expected = &.{
-            -0.2109971642, -0.2416767627, -0.1112272069, 0.2268766165,
+            0.5936903358, 0.1411357373, 2.3106477261, 1.3987516165,
         },
     },
     .{
         .label = "D [0,3,34,:4]",
         .flat_offset = 35584,
         .expected = &.{
-            0.0852049515, -0.0929286629, -0.0886424705, 0.1570774913,
+            0.6750487089, 0.5984776020, 2.0676076412, -0.4640162587,
         },
     },
 };
-const GATE_H_TOLERANCE: f32 = 1.0e-4;
+// Add element-wise pur en aval d'un Gate H 1.49e-8 -> attendu ~1 ULP fp32.
+// On garde la barre 1e-4 (cohérente avec gates précédents), un PASS strict ≪ 1e-7.
+const GATE_I_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -148,20 +157,32 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate H forward : Gate G + Gemma4 RMSNorm sur axe .d puis * weight.
-    /// Pattern Llama-style : normalized.mul(weight). PAS Qwen (1+weight).
+    /// Gate I forward : fusion pure des 2 branches PLE.
+    /// Branche A (Gate D) : embed_tokens_per_layer_slice * sqrt(D) reshape + retag
+    /// Branche B (Gate H) : context_normalized = rmsNorm(context_4d, .d) * weight
+    /// PAS de /√2 ici (reserve Gate J).
     /// Resultat : Tensor({b=1, s=4, l=35, d=256, f32}).
     pub fn forward(self: PleFixture) zml.Tensor {
+        // Branche A — token_identity (Gate D), reshape perd les tags -> re-tag.
+        const token_identity = self.embed_tokens_per_layer_slice
+            .scale(SQRT_D)
+            .reshape(.{ 1, 4, 35, 256 })
+            .withTags(.{ .b, .s, .l, .d });
+
+        // Branche B — context_normalized (Gate H), idem re-tag pour rmsNorm.
         const inputs_embeds = self.embed_tokens_slice.scale(SQRT_H);
         const context_proj = inputs_embeds.dot(self.per_layer_model_projection, .h);
         const context_scaled = context_proj.scale(INV_SQRT_H);
-        // reshape positionnel = perte des tags (cf. Gate D). On re-tag pour rmsNorm.
         const context_4d = context_scaled
             .reshape(.{ 1, 4, 35, 256 })
             .withTags(.{ .b, .s, .l, .d });
         const normalized = zml.nn.rmsNorm(context_4d, .d, RMS_EPS);
-        // weight {.d} broadcasted to {b,s,l,d} — pattern Llama.
-        return normalized.mul(self.per_layer_projection_norm.broad(normalized.shape()));
+        const context_normalized = normalized.mul(
+            self.per_layer_projection_norm.broad(normalized.shape()),
+        );
+
+        // Gate I — addition pure element-wise (les 2 branches partagent tags + shape).
+        return token_identity.add(context_normalized);
     }
 };
 
@@ -205,8 +226,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate H: Gate G + rmsNorm(.d, eps) * per_layer_projection_norm.weight ===
-    log.info("Gate H: compiling forward (Gate G + Gemma4 RMSNorm + weight mul)...", .{});
+    // === Gate I: token_identity.add(context_normalized), fusion pure des 2 branches PLE ===
+    log.info("Gate I: compiling forward (Gate D branche A + Gate H branche B, add pur)...", .{});
     var exe = try platform.compile(
         allocator,
         io,
@@ -238,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("Validating 4 fixed-point 4D blocks vs numpy fp32 ref:", .{});
 
     var max_diff_global: f32 = 0.0;
-    for (GATE_H_BLOCKS) |block| {
+    for (GATE_I_BLOCKS) |block| {
         var block_max: f32 = 0.0;
         log.info("  Block {s} (flat_offset={}):", .{ block.label, block.flat_offset });
         for (block.expected, 0..) |expected, i| {
@@ -251,11 +272,11 @@ pub fn main(init: std.process.Init) !void {
         if (block_max > max_diff_global) max_diff_global = block_max;
     }
 
-    log.info("Gate H global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_H_TOLERANCE });
+    log.info("Gate I global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_I_TOLERANCE });
 
-    if (max_diff_global > GATE_H_TOLERANCE) {
-        log.err("BLOCK: Gate H max_diff exceeds tolerance", .{});
-        return error.GateHFailed;
+    if (max_diff_global > GATE_I_TOLERANCE) {
+        log.err("BLOCK: Gate I max_diff exceeds tolerance", .{});
+        return error.GateIFailed;
     }
-    log.info("Gate H PASS: rmsNorm(.d, eps) * weight matches numpy reference", .{});
+    log.info("Gate I PASS: token_identity + context_normalized matches numpy reference", .{});
 }
