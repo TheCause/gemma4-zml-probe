@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D EN COURS (D.0 oracle + D.1 k_proj PASS, 28 mai 2026 soir). E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D EN COURS (D.0 oracle + D.1 k_proj + D.2 v_proj PASS, 28 mai 2026 soir-nuit). E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -459,7 +459,7 @@ Sous-sous-gates :
 |---|---|---|
 | **P5.2.D.0** | PyTorch oracle K/V producer+writer layer 13 sliding | **PASS** |
 | **P5.2.D.1** | ZML k_proj uniquement (single dot, reduce .h) | **PASS** |
-| P5.2.D.2 | ZML v_proj uniquement (single dot, reduce .h) | pending |
+| **P5.2.D.2** | ZML v_proj uniquement (single dot, reduce .h) | **PASS** |
 | P5.2.D.3 | ZML k_norm (reshape + rmsNorm + mul) | pending |
 | P5.2.D.4 | ZML RoPE K (helper natif `zml.nn.rope` sliding) | pending |
 | P5.2.D.5 | ZML KV slot mock (cache write factice) | pending |
@@ -559,10 +559,59 @@ Porter la projection linéaire `k_proj` en ZML pour layer 13 (sliding writer), e
 
 ---
 
-## P5.2.D.2 → P5.2.E (à venir)
+## P5.2.D.2 — ZML v_proj producer layer 13 (PASS, 28 mai 2026)
 
-D.1 PASS = projection K validée pour layer 13 (sliding writer) avec écart numérique 5.48e-6 (sub-tolerance 1e-4).
+### Objectif
+Porter la projection linéaire `v_proj` en ZML pour layer 13 (sliding writer), exécuter le forward sur `hidden_input` du fixture D.0, comparer le résultat byte-équivalent contre l'oracle `v_after_proj`. Miroir strict de D.1, branche V.
 
-Prochaine sous-sous-gate : **P5.2.D.2** = ZML `v_proj` uniquement. Même forme que k_proj (output `[1,4,256]`), autre branche du dot. Stop discipliné : pas d'enchaînement automatique, attendre cadrage explicite avant D.2.
+### Périmètre strict
+- **Pipeline ZML** : un seul `dot` réduisant `.h`, identique à D.1 sur l'autre branche :
+  ```zig
+  v_after_proj_zml = hidden_input.dot(v_proj_weight, .h)
+  // [.b=1, .s=4, .h=1536] dot [.kv=256, .h=1536] -> [.b=1, .s=4, .kv=256]
+  ```
+- **Tag axe sortie** : `.kv` (convention identique à D.1).
+- **3 tenseurs chargés** depuis `fixtures/p5_2_d2_v_proj_layer13.safetensors` (fixture slim re-exportée depuis le `.pt` D.0 par `scripts/16_p5_2_d2_export_fixture.py`) : `hidden_input`, `v_proj_weight`, `v_after_proj` (oracle).
+- **Sanity export** : assertion `v_proj_weight != k_proj_weight` côté Python pour éviter une confusion silencieuse de branche.
+- **Interdits stricts** : k_proj, k_norm, v_norm (absent du checkpoint Gemma 4), RoPE, reshape `[B,S,n_kv,head_dim]`, transpose `[B,n_kv,S,head_dim]`, cache slot, attention scores, matmul QK, softmax, sliding mask.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/16_p5_2_d2_export_fixture.py` | export safetensors slim depuis le `.pt` D.0 (3 tenseurs branche V) |
+| `fixtures/p5_2_d2_v_proj_layer13.safetensors` | 3 tenseurs (input + 1 poids + oracle) ~1.6 MB |
+| `fixtures/p5_2_d2_v_proj_layer13_manifest.json` | shapes/dtypes + pipeline + interdits |
+| `zml_runner/gemma4_v_proj.zig` | runner ZML (miroir gemma4_k_proj.zig, branche V) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_v_proj` avec deps `//bazel` + `//zml` |
+| `logs/P5_2_D2_v_proj.log` | sortie `bazel run` |
+
+### Résultats numériques observés
+- Forward result shape : `{b=1, s=4, kv=256, f32}` ✓
+- Block A [0,0,:8] max_diff : **1.67e-6**
+- Block B [0,1,:8] max_diff : **1.31e-6**
+- Block C [0,3,:8] max_diff : **8.34e-7**
+- Scan global 1024 fp32 : **max_abs 5.25e-6 à flat_index 842 (s=3, d=74)**, mean_abs 5.69e-7
+- Tolérance 1e-4 → marge ~19 000×
+- Quasi-identique à D.1 k_proj en magnitude (5.48e-6 vs 5.25e-6) — confirmation que le résidu est intrinsèque au matmul PJRT-CPU Eigen-like vs PyTorch BLAS sur la réduction `.h=1536`, indépendant des poids spécifiques.
+
+### Critères de clôture P5.2.D.2
+- [x] Build bazel PASS sur 3090
+- [x] Run produit `v_after_proj_zml [1,4,256]`
+- [x] 3/3 fixed-point blocks `[0,0,:8]`, `[0,1,:8]`, `[0,3,:8]` rapportés vs oracle
+- [x] Scan global 1024 valeurs : max_abs 5.25e-6 < tolerance 1e-4
+- [x] mean_abs 5.69e-7 (résidu matmul attendu)
+- [x] Sanity export : `v_proj_weight != k_proj_weight`
+- [x] Aucun k_proj, aucun k_norm, aucun RoPE, aucun reshape, aucun transpose, aucun cache, aucune attention
+- [x] Log archivé `logs/P5_2_D2_v_proj.log`
+
+**Tag** : `p5.2-d2-zml-v-proj-pass`
+
+---
+
+## P5.2.D.3 → P5.2.E (à venir)
+
+D.1 + D.2 PASS = les deux projections K/V validées pour layer 13 (sliding writer) avec écart numérique ~5e-6 (sub-tolerance 1e-4).
+
+Prochaine sous-sous-gate : **P5.2.D.3** = ZML `k_norm`. Retour au pattern RMSNorm Llama (`normalized.mul(weight.broad(x.shape()))`) déjà éprouvé en C.2 q_norm, mais sur le tenseur K reshapé `[B,S,n_kv=1,head_dim=256]`. Attention pièges ZML #1 (reshape perd les tags → `.withTags(...)`) et #2 (`mul`/`add` ne broadcastent pas implicitement → `weight.broad(shape)`). V n'est PAS normé en Gemma 4.
 
 P5.2.E suivra avec le sliding mask au compute.
