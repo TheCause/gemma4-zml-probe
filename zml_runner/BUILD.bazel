@@ -56,3 +56,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.D.1 — ZML k_proj uniquement (producer layer 13 sliding, writer).
+zig_binary(
+    name = "gemma4_k_proj",
+    main = "gemma4_k_proj.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
