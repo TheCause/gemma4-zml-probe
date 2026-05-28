@@ -9,3 +9,10 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.A — policy lookup host-side, sans dependance ZML (pure std).
+zig_binary(
+    name = "gemma4_policy_lookup",
+    main = "gemma4_policy_lookup.zig",
+    visibility = ["//visibility:public"],
+)
