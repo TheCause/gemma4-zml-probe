@@ -6,9 +6,10 @@
 // Gate C : forward = embed_tokens_per_layer_slice.scale(16.0). PASS bit-exact.
 // Gate D : forward = embed_tokens_per_layer_slice.scale(16.0).reshape({1,4,35,256}). PASS.
 // Gate E : forward = (embed_tokens_slice.scale(sqrt(1536)))
-//                    .dot(per_layer_model_projection, .h)
-//          Premier matmul. Resultat attendu shape {s=4, lp=8960}.
-//          Pas de scale 1/sqrt(H), pas de reshape, pas de rmsnorm.
+//                    .dot(per_layer_model_projection, .h). PASS bit-exact.
+// Gate F : ajoute .scale(1/sqrt(1536)) apres le dot.
+//          context_scaled = context_proj * INV_SQRT_H.
+//          Toujours pas de reshape, pas de rmsnorm.
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -37,59 +38,58 @@ const INV_SQRT_H: f32 = 0.02551551815399144;
 const INV_SQRT_2: f32 = 0.7071067811865475;
 const RMS_EPS: f32 = 1.0e-6;
 
-// Reference Gate E : (embed_tokens_slice * sqrt(1536)) @ per_layer_model_projection.T
+// Reference Gate F : ((embed * sqrt(1536)) @ proj.T) * (1/sqrt(1536))
 // Result shape [s=4, lp=8960] row-major, flat 35840.
-// 5 blocs strategiques (token 0 deb/mid/fin, token 1 deb, token 3 fin).
-// Pre-calcule cote M1 via numpy fp32.
+// Memes 5 blocs strategiques que Gate E, valeurs / sqrt(1536) ~= / 39.19.
 const GateBlock = struct {
     label: []const u8,
     flat_offset: usize,
     expected: []const f32,
 };
 
-const GATE_E_BLOCKS = [_]GateBlock{
+const GATE_F_BLOCKS = [_]GateBlock{
     .{
         .label = "A [0, 0:8]",
         .flat_offset = 0,
         .expected = &.{
-            -14.50805950164795, 0.7396711111068726, 0.532582700252533, 5.888609409332275,
-            3.0879440307617188, -8.882484436035156, -1.937730312347412, 1.5792943239212036,
+            -0.3701806664466858, 0.018873091787099838, 0.013589124195277691, 0.15025092661380768,
+            0.07879049330949783, -0.2266412079334259, -0.049442194402217865, 0.040296513587236404,
         },
     },
     .{
         .label = "B [0, 255:263]",
         .flat_offset = 255,
         .expected = &.{
-            -21.616872787475586, -7.328896999359131, -3.3360605239868164, 3.7606163024902344,
-            -8.546035766601562, 9.410595893859863, -8.833962440490723, -0.9049932360649109,
+            -0.5515657067298889, -0.18700061738491058, -0.08512131869792938, 0.09595407545566559,
+            -0.2180565446615219, 0.24011623859405518, -0.22540313005447388, -0.023091372102499008,
         },
     },
     .{
         .label = "C [0, 8952:8960]",
         .flat_offset = 8952,
         .expected = &.{
-            1.5175281763076782, -12.554316520690918, -1.2858136892318726, -0.9069992899894714,
-            -1.087567925453186, -0.7551918029785156, -0.16557270288467407, 5.755862712860107,
+            0.038720518350601196, -0.3203299045562744, -0.032808203250169754, -0.023142557591199875,
+            -0.027749860659241676, -0.01926911063492298, -0.004224673379212618, 0.14686381816864014,
         },
     },
     .{
         .label = "D [1, 0:8]",
         .flat_offset = 8960,
         .expected = &.{
-            -18.634944915771484, -0.27851176261901855, 2.536295175552368, 9.544035911560059,
-            3.6698646545410156, -11.726886749267578, -1.9820091724395752, -0.3610670566558838,
+            -0.4754802882671356, -0.007106372155249119, 0.06471488624811172, 0.24352103471755981,
+            0.09363850206136703, -0.2992176115512848, -0.0505719929933548, -0.009212813340127468,
         },
     },
     .{
         .label = "E [3, 8952:8960]",
         .flat_offset = 35832,
         .expected = &.{
-            0.7460525035858154, -9.038456916809082, -2.6555161476135254, -3.7322161197662354,
-            1.3786760568618774, 1.337554931640625, 1.346847414970398, 1.3081830739974976,
+            0.01903591677546501, -0.23062092065811157, -0.06775687634944916, -0.09522943198680878,
+            0.03517763689160347, 0.03412840887904167, 0.03436551243066788, 0.0333789698779583,
         },
     },
 };
-const GATE_E_TOLERANCE: f32 = 1.0e-4;
+const GATE_F_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -153,13 +153,14 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate E forward : inputs_embeds = embed_tokens_slice * sqrt(H)
+    /// Gate F forward : inputs_embeds = embed_tokens_slice * sqrt(H)
     ///                  context_proj = inputs_embeds @ per_layer_model_projection.T
-    /// Le tag .h dans .dot(W, .h) contracte sur la dim hidden=1536.
+    ///                  context_scaled = context_proj * (1/sqrt(H))
     /// Resultat : Tensor({s=4, lp=8960, f32}).
     pub fn forward(self: PleFixture) zml.Tensor {
         const inputs_embeds = self.embed_tokens_slice.scale(SQRT_H);
-        return inputs_embeds.dot(self.per_layer_model_projection, .h);
+        const context_proj = inputs_embeds.dot(self.per_layer_model_projection, .h);
+        return context_proj.scale(INV_SQRT_H);
     }
 };
 
@@ -203,8 +204,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate E: compile + run forward (inputs_embeds @ proj over .h) ===
-    log.info("Gate E: compiling forward (scale(sqrt(H)) + dot(proj, .h))...", .{});
+    // === Gate F: scale(sqrt(H)) + dot(proj, .h) + scale(1/sqrt(H)) ===
+    log.info("Gate F: compiling forward (scale(sqrt(H)) + dot(proj, .h) + scale(1/sqrt(H)))...", .{});
     var exe = try platform.compile(
         allocator,
         io,
@@ -233,27 +234,27 @@ pub fn main(init: std.process.Init) !void {
     defer slice.free(allocator);
 
     const data = slice.items(f32);
-    log.info("Validating 5 dot-product blocks vs numpy fp32 ref:", .{});
+    log.info("Validating 5 context_scaled blocks vs numpy fp32 ref:", .{});
 
     var max_diff_global: f32 = 0.0;
-    for (GATE_E_BLOCKS) |block| {
+    for (GATE_F_BLOCKS) |block| {
         var block_max: f32 = 0.0;
         log.info("  Block {s} (flat_offset={}):", .{ block.label, block.flat_offset });
         for (block.expected, 0..) |expected, i| {
             const actual = data[block.flat_offset + i];
             const diff = @abs(actual - expected);
             if (diff > block_max) block_max = diff;
-            log.info("    +{:>3}: actual={d:.6} expected={d:.6} diff={e:.3}", .{ i, actual, expected, diff });
+            log.info("    +{:>3}: actual={d:.8} expected={d:.8} diff={e:.3}", .{ i, actual, expected, diff });
         }
         log.info("    block max_diff: {e:.6}", .{block_max});
         if (block_max > max_diff_global) max_diff_global = block_max;
     }
 
-    log.info("Gate E global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_E_TOLERANCE });
+    log.info("Gate F global max_diff: {e:.6} (tolerance {e:.1})", .{ max_diff_global, GATE_F_TOLERANCE });
 
-    if (max_diff_global > GATE_E_TOLERANCE) {
-        log.err("BLOCK: Gate E max_diff exceeds tolerance", .{});
-        return error.GateEFailed;
+    if (max_diff_global > GATE_F_TOLERANCE) {
+        log.err("BLOCK: Gate F max_diff exceeds tolerance", .{});
+        return error.GateFFailed;
     }
-    log.info("Gate E PASS: scale(sqrt(H)) + dot(proj, .h) matches numpy reference", .{});
+    log.info("Gate F PASS: context_scaled matches numpy reference", .{});
 }
