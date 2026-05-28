@@ -1,7 +1,10 @@
 // P4.4.2 — Mini-runner ZML PLE-only pour gemma-4-E2B-it.
 //
 // Gate A : charger ple_fixture.safetensors, declarer les 5 tenseurs symboliques,
-// materialiser via zml.io.load, afficher les shapes. Pas de forward calcule.
+//          materialiser via zml.io.load. PASS.
+// Gate B : forward minimal = embed_tokens_slice.scale(sqrt(1536)).
+//          Compiler, executer, ramener host, comparer aux 8 premieres valeurs
+//          de reference (calculees en numpy cote M1).
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -22,10 +25,29 @@ const S: i64 = 4;
 const L: i64 = 35;
 const H: i64 = 1536;
 const D: i64 = 256;
-// Tag .lp = layers * ple_dim packed = 8960 (eviter .packed = keyword Zig)
+
+// Constantes de scaling P4.4.2
+const SQRT_H: f32 = 39.191835884530846;
+const SQRT_D: f32 = 16.0;
+const INV_SQRT_H: f32 = 0.02551551815399144;
+const INV_SQRT_2: f32 = 0.7071067811865475;
+const RMS_EPS: f32 = 1.0e-6;
+
+// Reference Gate B : embed_tokens_slice[0, :8] * sqrt(1536)
+// Calculee cote M1 via numpy fp32 (cf fixtures/embed_tokens_slice.npy).
+const GATE_B_EXPECTED: [8]f32 = .{
+    1.191255807876587,
+    1.2247449159622192,
+    -0.047841597348451614,
+    0.6889190077781677,
+    -1.7701390981674194,
+    -1.071651816368103,
+    1.4256796836853027,
+    -1.387406349182129,
+};
+const GATE_B_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
-/// Les 5 tenseurs sont declares avec leurs shapes natives (post-export numpy).
 const PleFixture = struct {
     embed_tokens_slice: zml.Tensor,
     embed_tokens_per_layer_slice: zml.Tensor,
@@ -86,6 +108,11 @@ const PleFixture = struct {
         self.per_layer_projection_norm.deinit();
         self.ple_reference_final.deinit();
     }
+
+    /// Gate B forward : scale par sqrt(H). Pas de dot, pas de reshape, pas de rmsnorm.
+    pub fn forward(self: PleFixture) zml.Tensor {
+        return self.embed_tokens_slice.scale(SQRT_H);
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -100,20 +127,16 @@ pub fn main(init: std.process.Init) !void {
     }
     const fixture_path = process_args[1];
 
-    log.info("Gate A: loading PLE fixture from {s}", .{fixture_path});
+    log.info("Loading PLE fixture from {s}", .{fixture_path});
 
-    // 1. Read tensor metadata from safetensors
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
     defer registry.deinit();
 
-    // 2. Init store
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // 3. Init model symbolic
     const model: PleFixture = .init(store.view());
 
-    // 4. Print symbolic shapes (pre-materialization)
     log.info("Symbolic shapes:", .{});
     log.info("  embed_tokens_slice           : {f}", .{model.embed_tokens_slice});
     log.info("  embed_tokens_per_layer_slice : {f}", .{model.embed_tokens_per_layer_slice});
@@ -121,16 +144,61 @@ pub fn main(init: std.process.Init) !void {
     log.info("  per_layer_projection_norm    : {f}", .{model.per_layer_projection_norm});
     log.info("  ple_reference_final          : {f}", .{model.ple_reference_final});
 
-    // 5. Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
 
-    // 6. Materialize buffers (host -> device)
+    // === Gate A: materialize buffers ===
     log.info("Materializing buffers...", .{});
     var buffers = try model.load(arena.allocator(), io, platform, &store, &.{replicated_sharding});
     defer PleFixture.unloadBuffers(&buffers);
+    log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    log.info("PASS: 5 tensors loaded into device buffers", .{});
+    // === Gate B: compile + run forward (scale by sqrt(H)) ===
+    log.info("Gate B: compiling forward (scale by sqrt(1536) = {d:.6})...", .{SQRT_H});
+    var exe = try platform.compile(
+        allocator,
+        io,
+        model,
+        .forward,
+        .{},
+        .{ .shardings = &.{replicated_sharding} },
+    );
+    defer exe.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+
+    args.set(.{buffers});
+    exe.call(args, &results);
+
+    var result: zml.Buffer = results.get(zml.Buffer);
+    defer result.deinit();
+
+    log.info("Forward result shape: {f}", .{result.shape()});
+
+    var slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+
+    const data = slice.items(f32);
+    log.info("First 8 values vs expected (numpy fp32 ref):", .{});
+    var max_diff: f32 = 0.0;
+    for (0..8) |i| {
+        const expected = GATE_B_EXPECTED[i];
+        const actual = data[i];
+        const diff = @abs(actual - expected);
+        if (diff > max_diff) max_diff = diff;
+        log.info("  [0, {}]: actual={d:.10} expected={d:.10} diff={e:.3}", .{ i, actual, expected, diff });
+    }
+    log.info("Gate B max_diff over first 8: {e:.6} (tolerance {e:.1})", .{ max_diff, GATE_B_TOLERANCE });
+
+    if (max_diff > GATE_B_TOLERANCE) {
+        log.err("BLOCK: Gate B max_diff exceeds tolerance", .{});
+        return error.GateBFailed;
+    }
+    log.info("Gate B PASS: scale(sqrt(1536)) matches numpy reference", .{});
 }
