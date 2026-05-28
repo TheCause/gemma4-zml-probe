@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS (28 mai 2026). C-E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) PASS (28 mai 2026). C.1-C.3, D, E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -180,6 +180,81 @@ Pas de partage de module Zig avec `gemma4_policy_lookup.zig` — sous-gates **in
 
 ---
 
-## P5.2.C → P5.2.E (à venir)
+---
 
-Voir mémoire `project_gemma4_zml_probe.md` pour la roadmap détaillée. Une sous-gate à la fois, garde-fou strict. P5.2.C ouvrira le premier contact avec Q-only reader (q_proj + q_norm + RoPE sur Q seulement) — frontière nouvelle, à cadrer dans une session dédiée.
+## P5.2.C — Q-only reader path (en cours, 4 sous-sous-gates)
+
+### Découpage
+| Sous-sous-gate | Périmètre | État |
+|---|---|---|
+| **P5.2.C.0** | PyTorch oracle Q-only reader, layer 15 sliding, no K/V | **PASS** |
+| P5.2.C.1 | ZML q_proj | pending |
+| P5.2.C.2 | ZML q_norm | pending |
+| P5.2.C.3 | ZML RoPE Q-only | pending |
+
+---
+
+## P5.2.C.0 — PyTorch oracle Q-only reader layer 15 sliding (PASS, 28 mai 2026)
+
+### Objectif
+Premier calcul réel après 5 gates de cartographie/routing pure : produire un oracle PyTorch fp32 du chemin Q (q_proj → q_norm → RoPE → transpose) pour la layer 15 (premier reader sliding). Sérialiser comme fixture safetensors pour valider P5.2.C.1/2/3 ZML byte-par-byte ensuite.
+
+### Périmètre strict
+- **Cible** : layer 15 (sliding reader, `is_reader=True`, `first_kv_shared_layer_idx=15`).
+- **Input** : synthétique déterministe `torch.manual_seed(1337)`, shape `[B=1, S=4, H=1536]`.
+- **Poids chargés** : `q_proj.weight [2048, 1536]` et `q_norm.weight [256]` depuis `weights/model.safetensors` (pas de chargement du modèle complet — économie RAM).
+- **Modules instanciés** :
+  - `torch.nn.Linear(1536, 2048, bias=False)` pour q_proj
+  - `Gemma4RMSNorm(256, eps=1e-6)` pour q_norm
+  - `Gemma4TextRotaryEmbedding(text_config)` pour rotary (pas de poids, pure compute)
+- **Interdits stricts** : k_proj, v_proj, k_norm, v_norm, attention scores, matmul QK, softmax, cache, sliding mask.
+
+### Pipeline (miroir verbatim `Gemma4TextAttention.forward` L811-L824)
+```
+A) q_after_proj  = q_proj(hidden_input)                                         [B,S,n_heads*head_dim] = [1,4,2048]
+B) q_view        = q_after_proj.view(B,S,n_heads,head_dim)
+   q_after_norm  = q_norm(q_view)                                                [B,S,n_heads,head_dim] = [1,4,8,256]
+C) (cos, sin)    = rotary(hidden_input, position_ids=arange(S), layer_type="sliding_attention")
+   q_after_rope  = apply_rotary_pos_emb(q_after_norm, cos, sin, unsqueeze_dim=2) [1,4,8,256]
+D) q_final       = q_after_rope.transpose(1,2).contiguous()                      [1,8,4,256]
+```
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/14_q_only_reader_oracle.py` | générateur oracle (Python, depuis raw safetensors) |
+| `fixtures/q_only_reader_layer15.safetensors` | 9 tenseurs (input + 2 poids + 2 rotary + 4 intermédiaires Q) ~12.7 MB |
+| `fixtures/q_only_reader_layer15_manifest.json` | shapes/dtypes + spec refs + pipeline + interdits |
+| `logs/14_q_only_reader_oracle.log` | sortie + sanity stats |
+
+### Sanity stats (sortie observée)
+```
+q_after_proj   mean=-7.286e-03  std= 1.296e+00  min=-7.93  max= 9.62
+q_after_norm   mean=-5.657e-03  std= 9.922e-01  min=-5.69  max= 6.65
+q_after_rope   mean=-1.683e-02  std= 9.921e-01  min=-5.79  max= 6.65
+q_final        mean=-1.683e-02  std= 9.921e-01  min=-5.79  max= 6.65
+```
+
+**Sanity RoPE** : à position 0, RoPE est identité (cos=1, sin=0) → `q_after_norm[0,0,...] == q_after_rope[0,0,...]`. À position 3 (last), RoPE rotate activement : `cos[0,3,0:4] = [-0.99, -0.94, -0.86, -0.75]`, `sin[0,3,0:4] = [0.14, 0.34, 0.52, 0.66]`, delta_max entre norm et rope = **6.97** → RoPE bien actif.
+
+### Notes capitalisées
+- **Prefixe checkpoint multi-modal** : Gemma 4 E2B est multi-modal (`vision_tower` + `audio_tower` + `language_model`). Les poids `language_model` sont préfixés `model.language_model.layers.X.self_attn...` — **pas** `model.layers.X.self_attn...` (qui n'existe pas). À retenir pour tous les futurs scripts pure-safetensors.
+- **Poids K/V présents sur disque pour layer 15** (cf P5.0 § 4 nota bene). Le runtime Python Transformers les ignore via `_keys_to_ignore_on_load_unexpected` — mais ils sont accessibles via `safe_open` direct. Utile si oracle inclut K/V plus tard.
+- **`safe_open`** s'importe depuis `safetensors` (pas `safetensors.torch`) — Pyright le warn correctement.
+- **Pas de chargement du modèle complet** : économie RAM massive (8GB vs ~50MB), reproductible, isole le pipeline Q.
+
+### Critères de clôture P5.2.C.0
+- [x] Script lit `model.language_model.layers.15.self_attn.{q_proj,q_norm}.weight` depuis safetensors
+- [x] Pipeline complet exécuté sans erreur (q_proj → q_norm → RoPE → transpose)
+- [x] Sanity RoPE : identité à position 0, rotation active à position 3
+- [x] Shapes attendues : `q_after_proj [1,4,2048]`, `q_after_norm [1,4,8,256]`, `q_after_rope [1,4,8,256]`, `q_final [1,8,4,256]`
+- [x] Fixture safetensors écrit (~12.7 MB)
+- [x] Manifest JSON écrit avec spec_refs + pipeline + interdits
+
+**Tag** : `p5.2-c0-pytorch-oracle-pass`
+
+---
+
+## P5.2.C.1 → C.3, P5.2.D → P5.2.E (à venir)
+
+Voir mémoire `project_gemma4_zml_probe.md` pour la roadmap détaillée. Une sous-sous-gate à la fois, garde-fou strict. P5.2.C.1 = portage ZML de `q_proj` avec comparaison byte-équivalente vs `q_after_proj` du fixture C.0.

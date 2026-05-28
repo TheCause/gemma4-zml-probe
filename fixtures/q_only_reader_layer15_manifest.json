@@ -1,0 +1,118 @@
+{
+  "source": "P5.2.C.0 PyTorch oracle Q-only reader layer 15 sliding",
+  "spec_refs": [
+    "transformers/models/gemma4/modeling_gemma4.py L811-L824 (Gemma4TextAttention.forward Q path)"
+  ],
+  "layer_idx": 15,
+  "layer_type": "sliding_attention",
+  "is_reader": true,
+  "seed": 1337,
+  "batch_size": 1,
+  "seq_len": 4,
+  "config": {
+    "num_hidden_layers": 35,
+    "num_kv_shared_layers": 20,
+    "first_kv_shared_layer_idx": 15,
+    "head_dim": 256,
+    "num_attention_heads": 8,
+    "hidden_size": 1536,
+    "rms_norm_eps": 1e-06,
+    "sliding_window": 512,
+    "rope_parameters_sliding": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    }
+  },
+  "tensors": {
+    "hidden_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "q_proj_weight": {
+      "shape": [
+        2048,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "q_norm_weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "float32"
+    },
+    "rotary_cos": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "rotary_sin": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "q_after_proj": {
+      "shape": [
+        1,
+        4,
+        2048
+      ],
+      "dtype": "float32"
+    },
+    "q_after_norm": {
+      "shape": [
+        1,
+        4,
+        8,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "q_after_rope": {
+      "shape": [
+        1,
+        4,
+        8,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "q_final": {
+      "shape": [
+        1,
+        8,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    }
+  },
+  "pipeline": [
+    "hidden_input [B,S,H]",
+    "A) q_after_proj = q_proj(hidden_input) [B,S,n_heads*head_dim]",
+    "B) q_view = q_after_proj.view(B,S,n_heads,head_dim) ; q_after_norm = q_norm(q_view) [B,S,n_heads,head_dim]",
+    "C) (cos, sin) = rotary(hidden_input, position_ids=arange(S), layer_type='sliding_attention') ; q_after_rope = apply_rotary_pos_emb(q_after_norm, cos, sin, unsqueeze_dim=2)",
+    "D) q_final = q_after_rope.transpose(1,2).contiguous() [B,n_heads,S,head_dim]"
+  ],
+  "interdits_p5_2_c0": [
+    "k_proj",
+    "v_proj",
+    "k_norm",
+    "v_norm",
+    "attention scores",
+    "matmul QK",
+    "softmax",
+    "cache",
+    "sliding mask"
+  ]
+}
