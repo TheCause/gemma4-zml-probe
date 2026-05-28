@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) + P5.2.C.1 (q_proj) + P5.2.C.2 (q_norm) PASS (28 mai 2026). C.3, D, E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026). D, E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -190,7 +190,7 @@ Pas de partage de module Zig avec `gemma4_policy_lookup.zig` — sous-gates **in
 | **P5.2.C.0** | PyTorch oracle Q-only reader, layer 15 sliding, no K/V | **PASS** |
 | **P5.2.C.1** | ZML q_proj (single dot, reduce .h) | **PASS** |
 | **P5.2.C.2** | ZML q_norm (reshape + rmsNorm + mul) | **PASS** |
-| P5.2.C.3 | ZML RoPE Q-only | pending |
+| **P5.2.C.3** | ZML RoPE Q-only (helper natif `zml.nn.rope`) | **PASS** |
 
 ---
 
@@ -364,6 +364,93 @@ Porter la projection linéaire `q_proj` en ZML pour layer 15 (sliding reader), e
 
 ---
 
-## P5.2.C.3, P5.2.D → P5.2.E (à venir)
+---
 
-Voir mémoire `project_gemma4_zml_probe.md`. P5.2.C.3 ajoutera la RoPE Q-only (cos/sin du fixture, `apply_rotary_pos_emb`-équivalent ZML) au-dessus de q_norm, comparer vs `q_after_rope`. À cadrer en session dédiée — c'est la dernière sous-sous-gate de C avant d'attaquer D (K/V producer path).
+## P5.2.C.3 — ZML RoPE Q-only reader layer 15 (PASS, 28 mai 2026)
+
+### Objectif
+Étendre P5.2.C.2 avec la rotation positionnelle RoPE sur Q seulement. Comparer contre l'oracle `q_after_rope` du fixture C.0. **Ferme P5.2.C complet** : chemin Q-only validé end-to-end pour une layer reader sliding.
+
+### Décision design (inspection préalable du pattern ZML)
+Avant codage, inspection de `zml/nn.zig` et `examples/llm/models/llama/model.zig` :
+- **Helper natif** : `zml.nn.rope(x, pos_idx, opts)` (L270 de nn.zig). Pas besoin d'implémentation manuelle.
+- **Conventions** :
+  - x doit avoir tags `.s` et `.hd` (head_dim even).
+  - `pos_idx` optionnel ; `null` → default `arange(0, x.dim(.s))` tag `.s`.
+  - Layout : `.sequential` (HF) ou `.interleaved` (GGUF). Gemma 4 = HF style.
+  - Scaling : union avec `.default { rope_theta }`, `.llama3`, `.yarn`, `.linear`. Gemma 4 sliding = `.default { 10_000 }`.
+- **Math equivalence** : ZML `y_real = x_real*cos - x_imag*sin ; y_imag = x_real*sin + x_imag*cos` ≡ HF `q*cos + rotate_half(q)*sin` (avec cos/sin dupliqués). Preuve algébrique : pour split-half, les deux formules donnent exactement les mêmes coordonnées.
+- **inv_freq** : ZML `theta^(-n/N_half)` ≡ PyTorch `1/base^(2n/head_dim)`. Identité mathématique.
+- **Décision** : utiliser `zml.nn.rope` directement, **pas** consommer `rotary_cos`/`rotary_sin` du fixture. Si bytes-équivalents, on prouve aussi que les `inv_freq` ZML et PyTorch convergent en fp32.
+
+### Périmètre strict
+- **Pipeline ZML** :
+  ```zig
+  q_after_proj  = hidden_input.dot(q_proj_weight, .h)              // C.1
+  q_4d          = q_after_proj.reshape({1,4,8,256})
+                    .withTags(.{.b, .s, .nh, .hd})                  // piège #1
+  q_normalized  = zml.nn.rmsNorm(q_4d, .hd, 1e-6)
+  q_after_norm  = q_normalized.mul(q_norm_weight.broad(...))        // C.2 (pattern Llama)
+  q_after_rope  = zml.nn.rope(q_after_norm, null, .{
+                    .layout = .sequential,
+                    .scaling = .{ .default = .{ .rope_theta = 10_000 } },
+                  })
+  ```
+- **4 tenseurs chargés** : `hidden_input`, `q_proj_weight`, `q_norm_weight`, `q_after_rope` (oracle).
+- **Tags** : passage de `.{.b,.s,.n,.d}` (C.2) à `.{.b,.s,.nh,.hd}` (C.3) — ZML rope helper requiert `.hd` strictement.
+- **Interdits stricts** : transpose final `[.b,.nh,.s,.hd]`, K/V projection, attention scores, softmax, cache, sliding mask.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `zml_runner/gemma4_q_rope.zig` | runner ZML (utilise `zml.nn.rope` natif) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_q_rope` |
+| `logs/P5_2_C3_q_rope.log` | sortie `bazel run` ~76 lignes |
+| `docs/P5_2_attention_forward.md` | ce document (section C.3) |
+
+### Validation
+**4 blocks fixed-point** :
+- Block A `[0,0,0,:8]` pos=0 — max_diff=**3.81e-6** (= C.2 bloc A, RoPE identité confirmée à pos 0)
+- Block B `[0,0,7,:8]` pos=0 — max_diff=**1.19e-6** (= C.2 bloc B)
+- Block C `[0,3,0,:8]` pos=3 — max_diff=**1.79e-6** (RoPE active, valeurs ≠ q_after_norm)
+- Block D `[0,3,7,:8]` pos=3 — max_diff=**3.10e-6**
+- **4 blocks max_diff = 3.81e-6**
+
+**Scan global 8192 valeurs** :
+- max_abs = **6.676e-6** à `flat_index=1926 (s=0, n=7, d=134)` — **identique à C.2**
+- mean_abs = **4.96e-7**
+- Tolerance 1e-4 → marge ~15× sous le seuil
+
+### Observations majeures
+- **RoPE est orthogonale par paires** : rotation `(cos θ, -sin θ ; sin θ, cos θ)` préserve la norme L2 de chaque paire `(x_real, x_imag)`. Donc max_abs C.3 = max_abs C.2 exactement. Aucun bruit propagé par la rotation.
+- **Position du max conservée** depuis C.1 : `flat_index 1926` ↔ `(s=0, o=1926)` ↔ `(s=0, n=7, d=134)` ↔ `(s=0, nh=7, hd=134)` (1926 = 7×256 + 134). L'erreur arithmétique vient strictement du matmul de C.1, propagée sans amplification ni atténuation à travers q_norm + RoPE.
+- **ZML rope natif ≡ PyTorch `apply_rotary_pos_emb` à 1e-5 près** sans utiliser les cos/sin pré-calculés du fixture. Donc les `inv_freq` ZML (fp32 `exp(-log(theta)*n/N)`) convergent avec PyTorch (`1/pow(theta, 2n/D)`) sous le seuil.
+
+### Notes capitalisées
+- **`zml.nn.rope` est l'helper canonique** — ne pas réimplementer manuellement.
+- **Convention tag stricte** : `zml.nn.rope` requiert `.s` et `.hd`. Si layout source utilise d'autres noms (`.d`, `.head_dim`...), renommer via `.rename(...)` ou utiliser `.withTags(...)` après reshape.
+- **`pos_idx = null`** est suffisant pour prefill ; pour decode incrémental, passer `arange + token_index.broad(...)` (cf llama L502-L505).
+- **Layout `.sequential`** = HF (split-half), `.interleaved` = GGUF. Pour Gemma 4 / Llama / Mistral / Qwen ChatML, toujours `.sequential`.
+
+### Critères de clôture P5.2.C.3 (et de C complet)
+- [x] Build bazel PASS
+- [x] Run produit `q_after_rope_zml [1,4,8,256]`
+- [x] 4/4 fixed-point blocks PASS (max_diff bloc max = 3.81e-6)
+- [x] Scan global 8192 valeurs : max_abs 6.68e-6 (= C.2, RoPE orthogonale)
+- [x] Position 0 : RoPE identité confirmée (block A et B == C.2)
+- [x] Position 3 : RoPE active (block C et D ≠ q_after_norm correspondants)
+- [x] ZML inv_freq ≡ PyTorch inv_freq sous tolerance
+- [x] Aucun transpose, aucun K/V, aucune attention
+- [x] Log archivé `logs/P5_2_C3_q_rope.log`
+
+**Tag** : `p5.2-c3-zml-rope-q-only-pass`
+
+---
+
+## P5.2.D → P5.2.E (à venir)
+
+P5.2.C COMPLET = chemin Q-only validé pour une layer reader sliding (layer 15) end-to-end avec écart numérique stable à 6.68e-6 (sub-tolerance 1e-4).
+
+Prochaine session : **P5.2.D** = K/V producer path. C'est la première layer producer (layers 0..14) — instancie les K/V modules (k_proj + v_proj + k_norm + v_norm + RoPE sur K). Cible recommandée : layer 13 (writer sliding) ou layer 14 (writer full). Frontière nouvelle parce qu'on touche aux **poids producer** (présents dans safetensors pour toutes les 35 layers, mais utilisés runtime uniquement par les 15 premiers). Cadrage en session dédiée requis.
+
+P5.2.E suivra avec le sliding mask au compute.

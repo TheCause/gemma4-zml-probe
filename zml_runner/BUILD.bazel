@@ -45,3 +45,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.C.3 — ZML RoPE Q-only (q_proj + q_norm + rope), reader layer 15 sliding.
+zig_binary(
+    name = "gemma4_q_rope",
+    main = "gemma4_q_rope.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
