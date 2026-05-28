@@ -1,6 +1,6 @@
 # P5.0 — Gemma 4 E2B YOCO / Shared KV cartography
 
-**Status** : DRAFT (étapes 1-3 faites le 28 mai 2026 ; étape 4 vLLM pour prochaine session)
+**Status** : DRAFT — étapes 1-4 faites le 28 mai 2026 ; **P5.0 = 9/9 questions répondues**, prêt à fermer.
 **Scope** : architecture only, no ZML code.
 
 ## 1. Inputs
@@ -190,47 +190,218 @@ Gating connexe sur `is_kv_shared_layer` et `store_full_length_kv` :
 
 ## 6. vLLM source trace
 
-**À faire prochaine session.** Cibles :
-- `Gemma4SelfDecoderLayers` (wrapper première moitié YOCO).
-- `Gemma4Model` (entrée).
-- `_run_decoder_layers` (split YOCO en pratique).
-- `kv_sharing_fast_prefill` (drapeau).
-- Où se positionne le PLE par rapport au split YOCO (probablement avant).
+### 6.1 Source inspected
+- vLLM version : **main @ `75f6945c`** (28 mai 2026, fetched via `gh api repos/vllm-project/vllm/contents/...`).
+- File : `vllm/model_executor/models/gemma4.py` (1721 lignes).
+- vLLM NON installé localement (ni dans aucun venv 3090) → lecture publique uniquement, conforme à la consigne « ne pas installer pour cette phase ».
+- Logs : `logs/12_vllm_gemma4_source_trace.txt` (1721 lignes annotées d'un header de provenance), `logs/12_vllm_gemma4_grep.txt` (103 hits).
+- Modules connexes mentionnés mais non extraits : `vllm/model_executor/layers/attention.py` (classe `Attention`), `vllm/v1/attention/backends/utils.py` (`KVSharingFastPrefillMetadata`). Non nécessaires pour fermer Q9.
 
-Si vLLM n'est pas installé, lecture publique seulement — ne pas installer pour cette phase.
+### 6.2 Self/Cross split
+**Question** : vLLM conserve-t-il 15 producers / 20 readers ?
 
-## 7. Prefill lifecycle hypothesis
+**Finding** : **OUI, exactement** la même formule qu'en Transformers. La cartographie producers/readers est strictement identique.
 
-**À renseigner après étape 5.** Esquisse provisoire :
+**Evidence** (gemma4.py lignes 469-477) :
+```python
+first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers  # 35 - 20 = 15
+if layer_idx >= first_kv_shared_layer_idx:
+    self.is_kv_shared_layer = True
+    prev_layers = config.layer_types[:first_kv_shared_layer_idx]
+    current_layer_type = config.layer_types[layer_idx]
+    kv_shared_layer_index = len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
+```
+- Layers 0..14 = producers (instancient `qkv_proj`, calculent K/V, écrivent dans le cache pool).
+- Layers 15..34 = readers (`is_kv_shared_layer = True`).
+- Pour E2B : 2 sources de lecture seulement — layer 14 pour `full_attention`, layer 13 pour `sliding_attention` (identique aux 2 writers Transformers).
 
-1. Tokenisation → ids
-2. Embeddings principal + PLE (P4.4.2, validé) → `inputs_embeds` + `per_layer_inputs`
-3. Décodage couche par couche :
-   - Couches "source" (à identifier) calculent et écrivent leurs K/V dans un buffer partagé indexé par couche cible.
-   - Couches "consumer" sautent leur propre calcul K/V et lisent depuis le buffer.
-4. Comportement full vs sliding dans chaque couche (truncation cache, masque).
+### 6.3 Shared KV representation
+**Question** : vLLM représente-t-il seulement 2 shared KV states par type, comme Transformers ?
 
-## 8. Decode lifecycle hypothesis
+**Finding** : **NON, mécanisme fondamentalement différent**. Pas de buffer `shared_kv_states` éphémère par-forward. vLLM utilise un **string-pointer** statique vers la layer cible, résolu par le **backend d'attention** au niveau du **kv_cache pool**.
 
-**À renseigner après étape 5.** À tracer :
-- Mise à jour cache token par token côté source.
-- Diffusion vers consumers (pointeur unique vs copie ?).
-- Sliding window truncation côté sliding layers.
-- Position token dans le cache.
+**Evidence** (lignes 486-509) :
+```python
+kv_sharing_target_layer_name = (
+    f"{param_name_before_layers}.layers."
+    f"{kv_shared_layer_index}.self_attn.attn"
+)
+...
+self.attn = Attention(
+    ...,
+    kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+    prefix=f"{prefix}.attn",
+)
+```
+Et dans `forward` (lignes 528-542) :
+```python
+if not self.is_kv_shared_layer:
+    # apply K norm + RoPE on K, V norm
+    ...
+else:
+    # Shared: only apply RoPE to Q (drop K, V calculation entirely)
+    q = self.rotary_emb(positions, q, k)[0]
 
-## 9. ZML implications (provisoire)
+attn_output = self.attn(q, k, v)  # backend reads target layer's K/V cache
+```
 
-Sans code encore. Contraintes anticipées :
+**Comparaison** :
+| Mécanisme | Transformers 5.9 | vLLM main |
+|---|---|---|
+| Stockage shared K/V | `UserDict()` éphémère, créé par-forward (ligne 134 de `modeling_gemma4.py`) | Pas de buffer Python ; sharing au niveau du `kv_cache` pool backend |
+| Indirection | Lecture/écriture explicite Python (`shared_kv_states[layer_type] = ...`) | String pointer statique (`kv_sharing_target_layer_name`) résolu par backend |
+| Granularité | 2 entrées max par forward (`full_attention`, `sliding_attention`) | N pointers vers M slots cache (N=20 readers, M=2 sources E2B) — résolution implicite |
+| `qkv_proj` shared layer | Pas instanciée (`if not self.is_kv_shared_layer:` ligne 790) | Instanciée (`QKVParallelLinear` ligne 416) mais K/V calculés puis ignorés (le backend lit les K/V de la target) |
+| RoPE sur K shared | N/A (K pas calculé) | N/A (K calculé puis ignoré, RoPE Q-only ligne 540) |
 
-- Le cache K/V ne peut pas être un simple `[L, B, S, H_kv, D]` uniforme : les positions "source" doivent être écrites, les positions "consumer" doivent pointer vers une source.
-- Deux régimes de cache par couche : `full_attention` (cache croissant jusqu'à fin) vs `sliding_attention` (cache borné à 512).
-- `shared_kv_states` est probablement une struct ZML dédiée (pas une simple paire `k, v`).
-- Standard de comparaison (réutilisable, validé en Gate J) :
-  ```zig
-  var ref_slice = try buffers.<reference_tensor>.toSliceAlloc(allocator, io);
-  defer ref_slice.free(allocator);
-  ```
-- Les 3 pièges ZML capitalisés en P4.4.2 (reshape perd tags, mul/add ne broadcast pas, pattern Llama vs Qwen) restent valables.
+**Subtilité** : vLLM **calcule** quand même `qkv_proj(hidden_states)` pour les shared layers (ligne 520), puis split en `q, k, v` mais **n'utilise pas** k/v. Coût compute marginal mais pas zéro — un `qkv_proj` complet vs un `q_proj` seul aurait été plus efficient. C'est un choix de simplicité d'API (unifier le forward producer/consumer).
+
+### 6.4 Fast prefill
+**Question** : le `kv_sharing_fast_prefill` change-t-il le layout logique ?
+
+**Finding** : **NON, c'est une optimisation orthogonale du compute path**, pas un changement de structure de cache. Le sharing K/V (string pointer) marche identiquement avec ou sans fast prefill. Le fast prefill change seulement **où** les couches s'exécutent (deux subgraphs compilés) et **sur quels tokens** la cross-decoder tourne.
+
+**Evidence** :
+- `cache_config.kv_sharing_fast_prefill` est un toggle (ligne 1106), pas une condition de structure cache.
+- Le `kv_sharing_target_layer_name` est setté à `__init__` (ligne 486) **indépendamment** du flag fast_prefill — donc le sharing K/V est actif dans les deux chemins.
+- Quand `fast_prefill_enabled == True` :
+  - `Gemma4SelfDecoderLayers` (lignes 793-923, décoré `@support_torch_compile(enable_if=...)`) compile embedding + PLE + layers 0..14 dans **un graphe**.
+  - `Gemma4CrossDecoderLayers` (lignes 929-958) compile layers 15..34 dans **un autre graphe**.
+  - `fast_prefill_forward` (lignes 1196-1279) :
+    1. Self-decoder forward sur **tous** les `num_tokens` tokens.
+    2. Récupère `logits_indices_padded` (positions où on a besoin de logits — typiquement la dernière position en prefill).
+    3. Copie `self_decoder_hidden_states[logits_indices_padded]` dans `self.hidden_states[:num_padded]`.
+    4. Cross-decoder forward sur **seulement** `num_padded` positions (avec le sharing K/V actif via le pool).
+  - **Gain attendu** : en prefill long (ex. 4k tokens), self-decoder fait 15 layers × 4k tokens, cross-decoder fait 20 layers × **1 token** au lieu de 20 × 4k. ≈ 80% de FLOPs économisés sur la 2ème moitié.
+- Quand `fast_prefill_enabled == False` (chemin normal, lignes 1301-1349) : boucle séquentielle sur les 35 layers, comme Transformers. Le sharing K/V reste actif (via pointer).
+
+**Implication ZML** : pas besoin de répliquer le fast_prefill pour atteindre la parité Gemma 4. Le sharing K/V seul suffit pour la correction. Fast prefill = optimisation perf optionnelle, à reporter à P5.2+ si jamais.
+
+### 6.5 Sliding/full separation
+**Question** : comment vLLM sépare sliding/full dans le cache ?
+
+**Finding** : **pas de séparation au niveau du cache lui-même**. Le cache pool stocke les K/V de chaque producer layer indépendamment de son `layer_type`. Le sliding window est **appliqué côté backend** via `per_layer_sliding_window` au moment du compute attention (masque), pas via troncation du cache.
+
+**Evidence** (lignes 442-443, 506) :
+```python
+self.is_sliding = layer_type == "sliding_attention"
+sliding_window = config.sliding_window if self.is_sliding else None
+...
+self.attn = Attention(
+    ...,
+    per_layer_sliding_window=sliding_window,  # applied at attention compute, not cache
+    kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+)
+```
+- Le sharing K/V est **intra-type** : layer 19 (full) → target layer 14 (full) ; layer 15 (sliding) → target layer 13 (sliding). Garanti par `prev_layers[::-1].index(current_layer_type)` (ligne 476).
+- Le cache du producer 13 (sliding) **stocke tous les tokens** ; le masque sliding 512 est appliqué au compute par chaque reader sliding individuellement. **Cohérent avec Transformers `store_full_length_kv`** (cf § 5.8).
+
+### 6.6 Implication for ZML cache layout (Q9 close)
+**Question Q9** : quel layout statique devient raisonnable ?
+
+**Finding** : **layout A** (suivre Transformers : 15 slots producer-cache + 2 slots shared) ET **layout B** (cache uniforme `[L=35,...]` avec aliasing) sont tous deux compatibles avec la sémantique. **vLLM réalise effectivement le layout B mais sous une forme dégénérée** : son cache pool a 35 logical layer slots mais **seuls 15 sont alloués/écrits** ; les 20 slots des shared layers sont **redirections par string pointer** vers les slots des producers. C'est un "layout B avec pointeurs", pas un "layout B avec aliasing par layer_type".
+
+**Décision pour ZML statique** :
+
+**Adopter le layout A explicite** — plus simple à compiler en Zig, pas de gestion de pointeurs dynamiques :
+
+```
+KV cache:
+  producer_kv[15]            // layers 0..14
+                             // chaque slot shape: [B, S_max, n_kv_heads, head_dim]
+                             // full-length (pas de troncation sliding au niveau cache)
+                             // 7 slots sliding (layers 0,1,2,3,5,6,7,...) + 7 slots full + bias
+                             // Note: les 15 producers contiennent 11 sliding + 4 full pour E2B
+                             //   (cf § 3 layer_types : full = [4, 9, 14], sliding = autres)
+
+Per-layer access table (15+20=35 entries, calculée à l'init depuis layer_types) :
+  access[i] for i in 0..14    = ("write", i)
+  access[i] for i in 15..34   = ("read", target_idx)
+                                  où target_idx = 14 si layer_types[i] == "full_attention"
+                                                  13 si layer_types[i] == "sliding_attention"
+
+Sliding window mask :
+  appliqué dans le compute attention par chaque layer
+  shared layers : appliquent leur propre fenêtre 512 sur le cache full-length du target
+                  comme Transformers et vLLM le font
+
+État éphémère par-forward : zéro.
+  - Pas de UserDict (style Transformers) : redondant si on a la table d'accès.
+  - Pas de string pointers dynamiques (style vLLM) : statiques, calculés à l'init.
+```
+
+**Coût statique** :
+- Mémoire : 15 slots de cache K/V (vs 35 naïf), ratio **15/35 ≈ 43% du cache d'une variante non-YOCO de même architecture**.
+- Compute producer : identique à un transformer standard.
+- Compute consumer : `q_proj` + RoPE Q-only + attention sur target cache. **Pas de qkv_proj sur les 20 shared layers** (gain par rapport à vLLM qui calcule puis jette ; en ZML on peut sauter complètement). Économie ≈ 2/3 du compute QKV global.
+
+**Compatibilité multi-régimes** :
+- ✅ Prefill normal : tous les producers calculent et écrivent leur slot ; tous les readers lisent leur slot cible.
+- ✅ Decode token T+1 : producers font 1-token append à leur slot ; readers lisent le slot cible à jour.
+- ❌ Fast prefill (vLLM `kv_sharing_fast_prefill`) : non implémenté. Pas requis pour parité Gemma 4 correcte. À considérer P5.2+ si bench montre un goulot.
+
+**Validation prochaine** : implémenter ce layout en P5.1 avec un seul oracle de référence (sortie PyTorch fp32 = `logits`) sur prompt fixe court → comparer ZML vs PyTorch via le pattern Gate de P4.4.2.
+
+## 7. Prefill lifecycle (fermé via § 5 + § 6)
+
+1. Tokenisation → `input_ids` shape `[B, T]`.
+2. Embeddings principal + PLE (P4.4.2, validé) → `inputs_embeds` + `per_layer_inputs`.
+3. Décodage couche par couche, layers 0..34 séquentiellement (chemin "normal" sans fast prefill) :
+   - **Layers 0..14 (producers)** : `qkv_proj` complet → split q/k/v → q_norm + k_norm + v_norm + RoPE(q,k) → écrivent K/V dans `producer_kv[layer_idx]` (full-length, pas de troncation) → attention compute avec sliding_window appliqué via masque si layer_type=sliding → o_proj.
+   - **Layers 15..34 (readers)** : `q_proj` seul (ou `qkv_proj` puis drop k,v comme vLLM) → q_norm + RoPE(q) → attention compute en lisant K/V depuis `producer_kv[target_idx]` (target_idx = 14 pour full, 13 pour sliding) → masque sliding 512 appliqué si layer_type=sliding → o_proj.
+4. Post-layer : pre/post layernorms, MLP (ou MoE si layer.enable_moe_block), PLE residual (`per_layer_input_gate` + `per_layer_projection`), layer_scalar.
+5. Final RMSNorm + lm_head → logits.
+
+**Particularité prefill** : tous les tokens sont traités en parallèle. Les producers remplissent `producer_kv` à pleine longueur T. Les readers attaquent directement le cache complet. Une seule passe forward sur tous les tokens.
+
+## 8. Decode lifecycle (fermé via § 5 + § 6)
+
+Pour le token T+1 (après prefill de T tokens) :
+
+1. Embedding + PLE du **nouveau token seul** (shape `[B, 1, H]`).
+2. Layers 0..34 séquentielles, chacune avec `seq_len=1` pour le compute :
+   - **Producers** : recalculent q/k/v sur le token seul, **append** au slot `producer_kv[layer_idx]` (taille passe de T à T+1).
+   - **Readers** : recalculent q seul, lisent `producer_kv[target_idx]` (taille T+1) tel quel.
+3. Le cache `producer_kv` est l'unique état persistant inter-tokens. Pas de buffer éphémère shared.
+4. Sliding mask par layer sliding : limite l'attention aux derniers 512 tokens du cache (cache reste full, masque coupe).
+
+**Coût marginal par token decode** : 15 producers × 1-token qkv + 20 readers × 1-token q + 35 layers attention compute (sur cache T+1, avec masque sliding pour 28 layers et masque full pour 7).
+
+## 9. ZML cache layout — Q9 FERMÉE
+
+Voir § 6.6 pour la décision. Récap exécutable :
+
+```
+struct KVCache {
+  // 15 slots producer, alloués une fois
+  producer_kv: [15]struct {
+    K: Tensor([B, S_max, n_kv_heads, head_dim], fp16/bf16),
+    V: Tensor([B, S_max, n_kv_heads, head_dim], fp16/bf16),
+  },
+  current_len: usize,  // longueur logique courante (commune aux 15 slots)
+}
+
+// Table d'accès statique, calculée à l'init depuis config.layer_types
+fn cache_target(layer_idx: usize, layer_types: []const LayerType) usize {
+  if (layer_idx < 15) return layer_idx;
+  const t = layer_types[layer_idx];
+  // Pour E2B : full_attention → 14, sliding_attention → 13
+  // En général : dernière occurrence de `t` dans layer_types[0..15]
+  // (précalculée à l'init, pas runtime)
+  return last_occurrence_of(t, layer_types[0..15]);
+}
+```
+
+**Contraintes ZML capitalisées P4.4.2 (toujours valables)** :
+- `.withTags(...)` obligatoire après `reshape` (piège #1).
+- `weight.broad(shape)` pour broadcast explicite sur `mul`/`add` (piège #2).
+- Pattern RMSNorm Llama (`normalized.mul(weight)`) — pas Qwen `(1+weight)` (piège #3).
+
+**Standard de comparaison** (validé Gate J) :
+```zig
+var ref_slice = try buffers.<reference_tensor>.toSliceAlloc(allocator, io);
+defer ref_slice.free(allocator);
+```
 
 ## 10. Open questions / BLOCKERS
 
@@ -240,7 +411,7 @@ Sans code encore. Contraintes anticipées :
 4. Quel est le comportement attendu si on charge le modèle "naïvement" et qu'on exécute les 35 couches avec leurs propres K/V ? **NON FORMELLEMENT TESTÉ** : les modules n'existent pas (cf § 5.9), donc impossible en l'état sans patcher `__init__`. À tester en P5.1 comme oracle de divergence (charger les 35 poids brutes du safetensors et faire 35 forwards K/V indépendants pour comparer).
 
 **Nouvelle question P5.0** (à étape 4 vLLM) :
-5. vLLM implémente-t-il un layout `[L, ...]` uniforme avec aliasing, ou maintient-il deux structures séparées comme Transformers ? Quelle est la prim-of-truth pour le décode incrémental ?
+5. ~~vLLM implémente-t-il un layout `[L, ...]` uniforme avec aliasing, ou maintient-il deux structures séparées comme Transformers ?~~ **FERMÉ § 6.3** : ni l'un ni l'autre — vLLM utilise un **string-pointer statique par layer** (`kv_sharing_target_layer_name`) résolu par le backend d'attention au niveau du `kv_cache` pool. Pas de buffer Python éphémère, pas d'aliasing implicite : la table de redirection est explicite et calculée à `__init__`.
 
 ## Critères de clôture P5.0 (rappel)
 
@@ -249,11 +420,11 @@ P5.0 est fermé quand on peut répondre à ces 9 questions :
 1. Quelles couches full_attention ? **OK : [4, 9, 14, 19, 24, 29, 34]**
 2. Quelles couches sliding_attention ? **OK : les 28 restantes**
 3. Quelles couches possèdent leurs propres K/V ? **OK nuancé : 35 sur safetensors disque, 15 en Python instancié (cf § 5.9 nota bene).**
-4. Quelles couches partagent K/V ? **OK § 5.6 : layers 15..34 (les 20 dernières) consomment `shared_kv_states[layer_type]`.**
-5. Quelle couche écrit dans `shared_kv_states` ? **OK § 5.4 : layer 14 écrit `["full_attention"]`, layer 13 écrit `["sliding_attention"]` (les 2 writers).**
-6. Quelle couche lit `shared_kv_states` ? **OK § 5.5 : layers full readers = [19, 24, 29, 34] ; layers sliding readers = [15-18, 20-23, 25-28, 30-33].**
-7. Comment `past_key_values` interagit avec `shared_kv_states` ? **OK § 5.8 : deux structures disjointes. `past_key_values` n'est mis à jour que par les 15 producers ; `shared_kv_states` n'est rempli que par les 2 writers. Le commentaire Transformers 826-828 explicite que `shared_kv_states` doit exister pour les sliding readers (le cache standard est tronqué).**
-8. Que change prefill vs decode ? **OK § 5.4/5.5 : rien dans le dispatch — même code path. Le writer recalcule à chaque forward et écrase `shared_kv_states[layer_type]` ; les readers lisent la dernière version. `shared_kv_states` est éphémère par-forward (init `UserDict()` à chaque appel), pas persistant comme `past_key_values`.**
-9. Quel layout de cache faudra-t-il prévoir en ZML ? **À ARBITRER P5.1** — deux options esquissées § 5.9 : (a) suivre Transformers (15 slots producer-cache + 2 slots `shared_kv_states`), (b) cache logique uniforme `[L=35, ...]` avec aliasing des slots 15-34 vers 13/14 selon `layer_type`. Décision après cross-check vLLM.
+4. Quelles couches partagent K/V ? **OK § 5.6 + § 6.2 : layers 15..34 (les 20 dernières). Confirmé identique dans Transformers et vLLM.**
+5. Quelle couche écrit dans `shared_kv_states` ? **OK § 5.4 + § 6.3 : pour Transformers, layer 14 écrit `["full_attention"]`, layer 13 écrit `["sliding_attention"]`. Pour vLLM, le concept de "writer dans un dict" n'existe pas — les layers 13/14 écrivent dans leur propre slot du `kv_cache` pool, et les readers pointent vers ces slots.**
+6. Quelle couche lit `shared_kv_states` ? **OK § 5.5 + § 6.2 : layers full readers = [19, 24, 29, 34] ; layers sliding readers = [15-18, 20-23, 25-28, 30-33]. Mêmes layer-sets dans les deux runtimes.**
+7. Comment `past_key_values` interagit avec `shared_kv_states` ? **OK § 5.8 + § 6.3 : dans Transformers, deux structures disjointes (cache standard + UserDict éphémère). Dans vLLM, une seule structure (`kv_cache` pool) avec redirection par pointer. La sémantique est équivalente : les readers lisent le cache complet d'une layer source de même `layer_type`, jamais le cache d'une layer shared.**
+8. Que change prefill vs decode ? **OK § 5.4/5.5 + § 6.4 : rien dans le dispatch du sharing K/V (identique dans les deux runtimes, identique entre prefill et decode). vLLM ajoute une optimisation orthogonale optionnelle (`kv_sharing_fast_prefill`) qui compile deux subgraphs séparés et ne fait tourner le cross-decoder que sur les logits indices en prefill — **pas requis pour la correction**, optionnel pour la perf.**
+9. Quel layout de cache faudra-t-il prévoir en ZML ? **OK § 6.6 + § 9 : Layout A explicite — 15 slots `producer_kv` full-length + table d'accès statique de 35 entrées (identity pour 0..14, target_idx pour 15..34 selon layer_type). Zéro buffer éphémère. Sliding window appliqué via masque, pas via troncation cache. Couvre prefill et decode. Fast prefill différé à P5.2+.**
 
-**8/9 répondues. Prochaine session : étape 4 (vLLM source) pour cross-check + arbitrage Q9.**
+**9/9 répondues. P5.0 prêt à fermer.** Suggestion : commit + tag `p5.0-cartography-done` (ou équivalent), puis P5.1 = première implémentation ZML du cache + des shared layers.
