@@ -5,28 +5,36 @@
 ## Etat 28 mai 2026 (fin de session)
 
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
-P4.4.2 gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ **H ✅** (A→G bit-exact PJRT CPU vs numpy fp32, H max_diff 1.49e-8 ≪ tol 1e-4)
-Tag courant : `gate/P4.4.2-gate-H-pass` (commit `a716838`).
+P4.4.2 gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ **I ✅** (A→G bit-exact, H max_diff 1.49e-8, I max_diff 1.49e-8 — l'add n'ajoute pas de drift)
+Tag courant : `gate/P4.4.2-gate-I-pass` (commit `52f70a3`).
 
-Gate H prouve que la première réduction numérique sensible (variance → rsqrt → mul weight pur Gemma 4, pattern Llama) reproduit la référence numpy fp32 à 1 ULP. Choix Llama vs Qwen3.5 verrouillé : `normalized.mul(weight)`, jamais `normalized.mul(1+weight)`.
+Gate H a verrouillé la première réduction numérique sensible (variance → rsqrt → mul weight pur Gemma 4, pattern Llama vs Qwen3.5). Gate I a confirmé que la fusion des deux branches PLE (token_identity de Gate D + context_normalized de Gate H) reproduit numpy fp32 à 1 ULP — l'addition element-wise ne dégrade rien au-delà du résidu rsqrt de H. Sur 4 points fixes, blocks B/C/D bit-exact, block A à 1 ULP fp32 strictement hérité de H.
 
-**Next session: Gate I only — pure add (token_identity + context_normalized), no /√2.**
+**Next session: Gate J only — `.scale(INV_SQRT_2)` final + comparaison à `ple_reference_final` chargé depuis le fixture.**
 
-Frontière Gate I : première fusion des deux branches PLE validées indépendamment (Gate D pour token_identity, Gate H pour context_normalized). Op mathématiquement triviale (`add` element-wise), mais sémantiquement le premier point où le pipeline réunit ses deux flux. À traiter seul. `/√2` final + comparaison à `ple_reference_final` reportés en Gate J.
+Frontière Gate J : dernier scale + premier oracle de bout en bout. Différence avec Gates B→I (référence calculée à la volée en numpy fp32) : la cible est le tenseur `ple_reference_final` déjà matérialisé dans le buffer ZML, produit en P3 via PyTorch fp32 (matmul BLAS). Risque numérique principal : matmul `[4,1536] @ [1536,8960]` peut diverger ~1e-5 entre PJRT CPU (Eigen) et PyTorch (BLAS différent) — c'est ce qu'on a observé en P4.3 (`max_abs = 1.53e-5` numpy vs PyTorch). Donc Gate J ne sera **probablement pas bit-exact** ; tolerance cible 1e-4 (cohérent avec gates précédents), attendu ~1e-5.
 
-### Contrat Gate I (préparé)
+### Contrat Gate J (préparé)
 
 ```text
-input A : token_identity      [b=1, s=4, l=35, d=256]  ← branche Gate D (déjà ×√D=×16)
-input B : context_normalized  [b=1, s=4, l=35, d=256]  ← branche Gate H (rmsNorm * weight)
-op      : A.add(B)
-output  : ple_sum             [b=1, s=4, l=35, d=256]
-target  : numpy fp32 (token_identity + context_normalized) sur 4 points fixes A/B/C/D
-attendu : bit-exact ou ~1 ULP fp32 (max_diff ≤ 1e-7)
-tag     : gate/P4.4.2-gate-I-pass
+input  : sortie Gate I (token_identity + context_normalized)
+op     : .scale(INV_SQRT_2) avec INV_SQRT_2 = 0.7071067811865475 (déjà défini ligne 38)
+output : ple_final  [b=1, s=4, l=35, d=256]
+target : fixture `ple_reference_final` (chargé en buffer, déclaré symboliquement
+         dans PleFixture, jamais comparé jusqu'à présent)
+mode   : comparaison globale (5 blocs flat) + comparaison tenseur entier
+         via toHostBuffer + numpy.allclose (rtol/atol matchés sur diff)
+attendu: max_diff ≤ 1e-4, probable 1e-5 (matmul PJRT-CPU vs PyTorch BLAS)
+tag    : gate/P4.4.2-gate-J-pass
 ```
 
-Subtilité Gate I : la branche Gate D (`embed_tokens_per_layer_slice.scale(SQRT_D).reshape(.{1,4,35,256})`) produit shape anonyme → `.withTags(.{ .b, .s, .l, .d })` requis avant `add` (sinon shape mismatch comme on l'a eu sur Gate H pour `mul`).
+Choix d'implémentation pour Gate J : on a déjà `model.ple_reference_final` dans le buffer device. Deux options :
+1. Charger les 35 840 valeurs du fixture en host, faire `max(abs(actual - expected))` côté Zig — simple mais log volumineux.
+2. Étendre le forward à renvoyer un tuple (ple_final, ple_reference_final) et comparer en host. Plus propre, mais demande de vérifier la syntaxe ZML pour forward multi-output.
+
+Aller en (1) en première passe — c'est le pattern déjà utilisé pour les blocks A→I, juste appliqué à tout le tenseur en plus des 5 blocs strategiques. Si la moindre divergence dépasse 1e-4, isoler le matmul (Gate E) en faisant tourner deux fois la même chaîne avec/sans Eigen, ou comparer Gate E vs PyTorch directement.
+
+Gate J ferme P4.4.2 et débloque P5 (YOCO).
 
 ## Planning gemma4-zml-probe
 
