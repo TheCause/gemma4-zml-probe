@@ -23,3 +23,14 @@ zig_binary(
     main = "gemma4_routing_mock.zig",
     visibility = ["//visibility:public"],
 )
+
+# P5.2.C.1 — ZML q_proj uniquement (reader layer 15 sliding).
+zig_binary(
+    name = "gemma4_q_proj",
+    main = "gemma4_q_proj.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

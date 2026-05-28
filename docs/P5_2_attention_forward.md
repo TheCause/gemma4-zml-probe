@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) PASS (28 mai 2026). C.1-C.3, D, E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C.0 (oracle) + P5.2.C.1 (ZML q_proj) PASS (28 mai 2026). C.2-C.3, D, E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -188,7 +188,7 @@ Pas de partage de module Zig avec `gemma4_policy_lookup.zig` — sous-gates **in
 | Sous-sous-gate | Périmètre | État |
 |---|---|---|
 | **P5.2.C.0** | PyTorch oracle Q-only reader, layer 15 sliding, no K/V | **PASS** |
-| P5.2.C.1 | ZML q_proj | pending |
+| **P5.2.C.1** | ZML q_proj (single dot, reduce .h) | **PASS** |
 | P5.2.C.2 | ZML q_norm | pending |
 | P5.2.C.3 | ZML RoPE Q-only | pending |
 
@@ -255,6 +255,55 @@ q_final        mean=-1.683e-02  std= 9.921e-01  min=-5.79  max= 6.65
 
 ---
 
-## P5.2.C.1 → C.3, P5.2.D → P5.2.E (à venir)
+---
 
-Voir mémoire `project_gemma4_zml_probe.md` pour la roadmap détaillée. Une sous-sous-gate à la fois, garde-fou strict. P5.2.C.1 = portage ZML de `q_proj` avec comparaison byte-équivalente vs `q_after_proj` du fixture C.0.
+## P5.2.C.1 — ZML q_proj reader layer 15 (PASS, 28 mai 2026)
+
+### Objectif
+Porter la projection linéaire `q_proj` en ZML pour layer 15 (sliding reader), exécuter le forward sur `hidden_input` du fixture C.0, comparer le résultat byte-équivalent contre l'oracle `q_after_proj`.
+
+### Périmètre strict
+- **Pipeline ZML** : un seul `dot` réduisant `.h` :
+  ```zig
+  q_after_proj_zml = hidden_input.dot(q_proj_weight, .h)
+  // [.b=1, .s=4, .h=1536] dot [.o=2048, .h=1536] -> [.b=1, .s=4, .o=2048]
+  ```
+- **3 tenseurs chargés** depuis `fixtures/q_only_reader_layer15.safetensors` : `hidden_input`, `q_proj_weight`, `q_after_proj` (oracle). Les 6 autres tenseurs du fixture C.0 (q_norm_weight, rotary_cos/sin, q_after_norm, q_after_rope, q_final) sont **ignorés en C.1**.
+- **Interdits stricts** : q_norm, reshape `[B,S,n_heads,head_dim]`, RoPE, transpose, K/V projection, attention scores, matmul QK, softmax, cache, sliding mask.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `zml_runner/gemma4_q_proj.zig` | runner ZML (pattern P4.4.2 PLE runner) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_q_proj` avec deps `//bazel` + `//zml` |
+| `logs/P5_2_C1_q_proj.log` | sortie `bazel run` ~65 lignes |
+| `docs/P5_2_attention_forward.md` | ce document (section P5.2.C.1) |
+
+### Validation
+**3 blocks fixed-point** (extraits oracle PyTorch, hardcoded dans le runner) :
+- Block A `[0,0,:8]` flat_offset=0 — max_diff=4.53e-6
+- Block B `[0,1,:8]` flat_offset=2048 — max_diff=5.13e-6
+- Block C `[0,3,:8]` flat_offset=6144 — max_diff=2.38e-6
+- **3 blocks max_diff = 5.13e-6**
+
+**Scan global 8192 valeurs** :
+- max_abs = **1.144e-5** à `flat_index=1926 (s=0, o=1926)`
+- mean_abs = **6.34e-7**
+
+**Tolerance** : 1e-4 → marge ~9× sous le seuil. **Résidu attendu** ~1.5e-5 (matmul PJRT-CPU Eigen-like vs PyTorch BLAS, cohérent P4.4.2 Gate E/J). Observé 1.14e-5 → conforme.
+
+### Critères de clôture P5.2.C.1
+- [x] Build bazel PASS (deps `//bazel` + `//zml`)
+- [x] Run produit `q_after_proj_zml [1,4,2048]`
+- [x] 3/3 fixed-point blocks PASS (max_diff < 1e-5)
+- [x] Scan global 8192 valeurs : max_abs 1.14e-5, mean_abs 6.34e-7 (sous tolerance 1e-4)
+- [x] Aucun q_norm, aucun RoPE, aucun transpose, aucun K/V, aucune attention
+- [x] Log archivé `logs/P5_2_C1_q_proj.log`
+
+**Tag** : `p5.2-c1-zml-q-proj-pass`
+
+---
+
+## P5.2.C.2 → C.3, P5.2.D → P5.2.E (à venir)
+
+Voir mémoire `project_gemma4_zml_probe.md` pour la roadmap détaillée. Une sous-sous-gate à la fois, garde-fou strict. P5.2.C.2 ajoutera le `q_norm` (RMSNorm pattern Llama `normalized.mul(weight)`) au-dessus de `q_proj`, comparer vs `q_after_norm`.
