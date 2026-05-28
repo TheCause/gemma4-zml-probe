@@ -9,3 +9,6 @@ weights/
 
 # Variables d env locales
 .env
+
+# Generated P4.4 fixture (regenerable from .npy via scripts/08)
+fixtures/*.safetensors

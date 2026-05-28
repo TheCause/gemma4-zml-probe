@@ -1,14 +1,38 @@
 {
   "name": "gemma4-e2b-it-ple-fixture",
   "phase": "P4-prep",
-  "input_ids": [236953, 3620, 1594, 11172],
+  "input_ids": [
+    236953,
+    3620,
+    1594,
+    11172
+  ],
   "shapes": {
-    "ple_input_ids": [1, 4],
-    "embed_tokens_slice": [4, 1536],
-    "embed_tokens_per_layer_slice": [4, 8960],
-    "per_layer_model_projection": [8960, 1536],
-    "per_layer_projection_norm": [256],
-    "ple_reference_final": [1, 4, 35, 256]
+    "ple_input_ids": [
+      1,
+      4
+    ],
+    "embed_tokens_slice": [
+      4,
+      1536
+    ],
+    "embed_tokens_per_layer_slice": [
+      4,
+      8960
+    ],
+    "per_layer_model_projection": [
+      8960,
+      1536
+    ],
+    "per_layer_projection_norm": [
+      256
+    ],
+    "ple_reference_final": [
+      1,
+      4,
+      35,
+      256
+    ]
   },
   "dtype": {
     "ple_input_ids": "int64",
@@ -27,13 +51,18 @@
     "apply_final_ple_scale": "1/sqrt(2)"
   },
   "rmsnorm": {
-    "eps": 1e-6,
+    "eps": 1e-06,
     "formula": "x * rsqrt(mean(x^2) + eps) * weight",
     "no_one_plus_weight": true
   },
   "reference": {
     "source": "P3 raw PyTorch fp32",
-    "ple_final_shape": [1, 4, 35, 256],
+    "ple_final_shape": [
+      1,
+      4,
+      35,
+      256
+    ],
     "ple_final_fixed_0004": [
       -0.01278446614742279,
       0.08744463324546814,
@@ -47,5 +76,18 @@
       0.080078125
     ],
     "p2_fixed_max_abs": 0.002659559
+  },
+  "primary_fixture": {
+    "format": "safetensors",
+    "path": "fixtures/ple_fixture.safetensors",
+    "tensor_names": [
+      "ple_input_ids",
+      "embed_tokens_slice",
+      "embed_tokens_per_layer_slice",
+      "per_layer_model_projection",
+      "per_layer_projection_norm",
+      "ple_reference_final"
+    ],
+    "note": "Primary fixture for P4.4 ZML PLE-only runner. NPY files remain source/export intermediates."
   }
 }
