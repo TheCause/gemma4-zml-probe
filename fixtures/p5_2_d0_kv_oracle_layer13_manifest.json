@@ -1,0 +1,310 @@
+{
+  "source": "P5.2.D.0 PyTorch oracle K/V producer+writer layer 13 sliding",
+  "spec_refs": [
+    "transformers/models/gemma4/modeling_gemma4.py L811-L829 (Gemma4TextAttention.forward K/V path : k_proj/v_proj -> view -> k_norm -> apply_rotary_pos_emb on K only -> transpose ; V not normed, V not roped)"
+  ],
+  "layer_idx": 13,
+  "layer_type": "sliding_attention",
+  "is_writer_producer": true,
+  "seed": 1337,
+  "batch_size": 1,
+  "seq_len": 4,
+  "config": {
+    "num_hidden_layers": 35,
+    "num_kv_shared_layers": 20,
+    "first_kv_shared_layer_idx": 15,
+    "head_dim": 256,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 1,
+    "hidden_size": 1536,
+    "rms_norm_eps": 1e-06,
+    "sliding_window": 512,
+    "rope_parameters_sliding": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    }
+  },
+  "checkpoint_key_presence": {
+    "k_proj.weight": true,
+    "v_proj.weight": true,
+    "k_norm.weight": true,
+    "v_norm.weight": false
+  },
+  "tensors": {
+    "hidden_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "k_proj_weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "v_proj_weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "k_norm_weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "float32"
+    },
+    "rotary_cos": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "rotary_sin": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_after_proj": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "v_after_proj": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_after_reshape": {
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "v_after_reshape": {
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_after_norm": {
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_after_rope": {
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_final": {
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "v_final": {
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    }
+  },
+  "stats": [
+    {
+      "name": "hidden_input",
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32",
+      "min": -3.7624080181121826,
+      "max": 3.62711501121521,
+      "mean": -0.00606539985165,
+      "std": 1.0022653341293335,
+      "sum": -37.26581573486328
+    },
+    {
+      "name": "k_after_proj",
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32",
+      "min": -4.377009391784668,
+      "max": 4.543648719787598,
+      "mean": 0.009153841994702816,
+      "std": 1.1732345819473267,
+      "sum": 9.373534202575684
+    },
+    {
+      "name": "v_after_proj",
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32",
+      "min": -3.5419442653656006,
+      "max": 7.468173503875732,
+      "mean": -0.046519264578819275,
+      "std": 1.0839123725891113,
+      "sum": -47.63572692871094
+    },
+    {
+      "name": "k_after_reshape",
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "min": -4.377009391784668,
+      "max": 4.543648719787598,
+      "mean": 0.009153841994702816,
+      "std": 1.1732345819473267,
+      "sum": 9.373534202575684
+    },
+    {
+      "name": "v_after_reshape",
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "min": -3.5419442653656006,
+      "max": 7.468173503875732,
+      "mean": -0.046519264578819275,
+      "std": 1.0839123725891113,
+      "sum": -47.63572692871094
+    },
+    {
+      "name": "k_after_norm",
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "min": -0.48487722873687744,
+      "max": 0.49561765789985657,
+      "mean": 0.0010178901720792055,
+      "std": 0.1260339617729187,
+      "sum": 1.0423195362091064
+    },
+    {
+      "name": "k_after_rope",
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "min": -0.48481041193008423,
+      "max": 0.4958842992782593,
+      "mean": 0.0008094803197309375,
+      "std": 0.12603548169136047,
+      "sum": 0.82890784740448
+    },
+    {
+      "name": "k_final",
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32",
+      "min": -0.48481041193008423,
+      "max": 0.4958842992782593,
+      "mean": 0.0008094803197309375,
+      "std": 0.12603548169136047,
+      "sum": 0.82890784740448
+    },
+    {
+      "name": "v_final",
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32",
+      "min": -3.5419442653656006,
+      "max": 7.468173503875732,
+      "mean": -0.046519264578819275,
+      "std": 1.0839123725891113,
+      "sum": -47.63572692871094
+    }
+  ],
+  "rope_sanity": {
+    "pos0_max_abs_diff_k_rope_vs_k_norm": 0.0,
+    "pos3_max_abs_diff_k_rope_vs_k_norm": 0.26385658979415894,
+    "pos0_threshold_lt": 1e-06,
+    "pos3_threshold_gt": 0.001
+  },
+  "pipeline": [
+    "hidden_input [B,S,H]",
+    "A) k_after_proj = k_proj(hidden_input) [B,S,n_kv*head_dim]",
+    "   v_after_proj = v_proj(hidden_input) [B,S,n_kv*head_dim]",
+    "B) k_after_reshape = k_after_proj.view(B,S,n_kv,head_dim) [B,S,n_kv,head_dim]",
+    "   v_after_reshape = v_after_proj.view(B,S,n_kv,head_dim) [B,S,n_kv,head_dim]",
+    "C) k_after_norm = k_norm(k_after_reshape) [B,S,n_kv,head_dim] (V not normed in Gemma 4)",
+    "D) (cos, sin) = rotary(hidden_input, position_ids=arange(S), layer_type='sliding_attention') ; k_after_rope = apply_rotary_pos_emb(k_after_norm, cos, sin, unsqueeze_dim=2) (V not roped)",
+    "E) k_final = k_after_rope.transpose(1,2).contiguous() [B,n_kv,S,head_dim] ; v_final = v_after_reshape.transpose(1,2).contiguous() [B,n_kv,S,head_dim]"
+  ],
+  "interdits_p5_2_d0": [
+    "q_proj",
+    "q_norm",
+    "attention scores",
+    "matmul QK",
+    "softmax",
+    "cache",
+    "sliding mask",
+    "layer 14 (full attention)",
+    "p-RoPE proportional"
+  ]
+}
