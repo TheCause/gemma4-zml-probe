@@ -100,3 +100,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.D.5 — ZML KV slot mock (K full + V proj + transpose to cache layout).
+zig_binary(
+    name = "gemma4_kv_slot",
+    main = "gemma4_kv_slot.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

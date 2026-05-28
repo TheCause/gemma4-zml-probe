@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D EN COURS (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K PASS, 28 mai 2026 soir-nuit). D.5 + E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). E à venir.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -462,7 +462,7 @@ Sous-sous-gates :
 | **P5.2.D.2** | ZML v_proj uniquement (single dot, reduce .h) | **PASS** |
 | **P5.2.D.3** | ZML k_norm (reshape + rmsNorm + mul) | **PASS** |
 | **P5.2.D.4** | ZML RoPE K (helper natif `zml.nn.rope` sliding) | **PASS** |
-| P5.2.D.5 | ZML KV slot mock (cache write factice) | pending |
+| **P5.2.D.5** | ZML KV slot mock (cache write factice) | **PASS** |
 
 ---
 
@@ -727,10 +727,81 @@ Porter la projection linéaire `v_proj` en ZML pour layer 13 (sliding writer), e
 
 ---
 
-## P5.2.D.5 → P5.2.E (à venir)
+## P5.2.D.5 — ZML KV slot mock producer layer 13 (PASS, 28 mai 2026)
 
-D.4 PASS = pipeline `k_proj + k_norm + RoPE K` validé pour layer 13 (sliding writer) avec écart numérique 5.36e-7 (sub-tolerance 1e-4, marge ~186 000×). Le résidu est saturé par D.1 ; RoPE orthogonale n'amplifie pas.
+### Objectif
+Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_after_proj_reshaped)` en compute layout, puis applique le transpose vers cache layout (mirror PyTorch `k_final` / `v_final` du fixture D.0). Aucune attention, aucun cache dynamique réel, aucun Q path.
 
-Prochaine sous-sous-gate : **P5.2.D.5** = ZML KV slot mock. Package `k_after_rope` + `v_after_proj` dans un cache slot factice (writer) sans appliquer encore l'attention. Stop discipliné : pas d'enchaînement automatique, attendre cadrage explicite avant D.5.
+### Décision layout
+- **Compute layout** : `[1, 4, 1, 256]` = `{.b, .s, .kvh, .hd}` (sortie de D.4 K et D.2 V)
+- **Cache layout retenu** : `[1, 1, 4, 256]` = `{.b, .kvh, .s, .hd}` (mirror PyTorch transposé contiguous, plus proche du futur cache réel)
+- **Transition ZML** : `tensor.transpose(.{.b, .kvh, .s, .hd})`
+- **Sanity Python pré-export** : `k_after_rope[0,:,0,:] vs k_final[0,0,:,:]` diff = 0.0 strict (idem pour V). Avec `n_kv=1`, la singleton dim ne réordonne pas le row-major, donc le transpose est un **no-op en mémoire**. L'opération reste explicite côté ZML pour préparer les futures couches non-singleton.
 
-P5.2.E suivra avec le sliding mask au compute.
+### Périmètre strict
+- **Pipeline ZML** (return tuple `struct { zml.Tensor, zml.Tensor }`) :
+  ```zig
+  // K branch
+  k_after_proj = hidden_input.dot(k_proj_weight, .h)
+  k_4d         = k_after_proj.reshape({1,4,1,256}).withTags(.{.b,.s,.kvh,.hd})
+  k_normalized = zml.nn.rmsNorm(k_4d, .hd, 1e-6)
+  k_after_norm = k_normalized.mul(k_norm_weight.broad(shape))
+  k_after_rope = zml.nn.rope(k_after_norm, null, .{.layout=.sequential, .scaling=.{.default=.{.rope_theta=10000}}})
+  k_slot       = k_after_rope.transpose(.{.b, .kvh, .s, .hd})   // [1,1,4,256]
+
+  // V branch (pas de norm, pas de RoPE)
+  v_after_proj = hidden_input.dot(v_proj_weight, .h)
+  v_4d         = v_after_proj.reshape({1,4,1,256}).withTags(.{.b,.s,.kvh,.hd})
+  v_slot       = v_4d.transpose(.{.b, .kvh, .s, .hd})           // [1,1,4,256]
+
+  return .{ k_slot, v_slot };
+  ```
+- **Multi-return ZML** : pattern `var k_slot_buf, var v_slot_buf = results.get(struct { zml.Buffer, zml.Buffer })` (cf lfm2_tests.zig).
+- **6 tenseurs chargés** depuis `fixtures/p5_2_d5_kv_slot_layer13.safetensors` (slim re-export D.0 via `scripts/19_p5_2_d5_export_fixture.py`) : `hidden_input`, `k_proj_weight`, `k_norm_weight`, `v_proj_weight`, `k_final` (oracle K cache), `v_final` (oracle V cache).
+- **Interdits stricts** : attention scores, matmul QK, softmax, Q path (q_proj, q_norm), reader (layers 15-34), layer 14 full attention (proportional RoPE), sliding mask, cache dynamique réel (scatter / dynamicSlice).
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/19_p5_2_d5_export_fixture.py` | export safetensors slim depuis le `.pt` D.0 (6 tenseurs) |
+| `fixtures/p5_2_d5_kv_slot_layer13.safetensors` | 6 tenseurs (input + 3 poids + 2 oracles) ~3.2 MB |
+| `fixtures/p5_2_d5_kv_slot_layer13_manifest.json` | shapes/dtypes + decision layout + pipeline + sanity transpose |
+| `zml_runner/gemma4_kv_slot.zig` | runner ZML K full + V proj + transposes + tuple return |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_kv_slot` |
+| `logs/P5_2_D5_kv_slot.log` | sortie `bazel run` |
+
+### Résultats numériques observés
+- K_slot shape : `{b=1, kvh=1, s=4, hd=256, f32}` ✓
+- V_slot shape : `{b=1, kvh=1, s=4, hd=256, f32}` ✓
+- **K_slot** : 2 blocks max_diff 1.34e-7, full max_abs **5.36e-7** @ flat_index 894 (b=0, kvh=0, s=3, d=126), mean_abs 6.01e-8
+- **V_slot** : 2 blocks max_diff 1.67e-6, full max_abs **5.25e-6** @ flat_index 842 (b=0, kvh=0, s=3, d=74), mean_abs 5.69e-7
+- Tolérance 1e-4 : marge ~186 000× (K), ~19 000× (V)
+
+### Finding capitalisé (D.5)
+- **K_slot max_abs strictement identique à D.4** (5.36e-7 @ flat_index 894 même position après transpose). **V_slot max_abs strictement identique à D.2** (5.25e-6 @ flat_index 842 même position après transpose).
+- Confirmation expérimentale : **transpose sur dim singleton = pure metadata operation**. Aucune erreur additionnelle introduite par la transition compute→cache layout avec `n_kv=1`.
+- Implication : pour les futures couches non-singleton (par ex. modèles avec `n_kv > 1`), le transpose deviendra une vraie réorganisation mémoire mais le résidu numérique sous-jacent restera identique (transpose est une permutation exacte).
+- Cohérence bout-en-bout démontrée : pipeline ZML complet (D.1→D.3→D.4 puis transpose K, D.2 puis transpose V) reproduit `k_final` / `v_final` PyTorch dans la tolérance, avec saturation par les résidus matmul D.1 (K) et D.2 (V) — pas d'amplification cumulée.
+
+### Critères de clôture P5.2.D.5
+- [x] Build bazel PASS sur 3090
+- [x] Multi-return `struct { zml.Buffer, zml.Buffer }` consommé proprement
+- [x] K_slot et V_slot produits en cache layout `[1,1,4,256]` `{b,kvh,s,hd}`
+- [x] Sanity Python pré-export : k_compute_vs_cache = v_compute_vs_cache = 0.0 strict (no-op n_kv=1)
+- [x] K_slot 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,0,3,:8]` rapportés vs `k_final` oracle
+- [x] V_slot 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,0,3,:8]` rapportés vs `v_final` oracle
+- [x] Scan global K_slot : max_abs 5.36e-7 < tolerance 1e-4
+- [x] Scan global V_slot : max_abs 5.25e-6 < tolerance 1e-4
+- [x] K_slot ≡ D.4 strict ; V_slot ≡ D.2 strict (transpose no-op n_kv=1)
+- [x] Aucune attention, aucun Q path, aucun reader, aucun layer 14, aucun sliding mask, aucun cache dynamique
+- [x] Log archivé `logs/P5_2_D5_kv_slot.log`
+
+**Tag** : `p5.2-d5-zml-kv-slot-mock-pass`
+
+---
+
+## P5.2.E (à venir) — sliding mask au compute
+
+P5.2.D COMPLET = chemin K/V producer/writer validé pour layer 13 (sliding) end-to-end, depuis `hidden_input` jusqu'au slot cache layout `[1,1,4,256]`. Chaîne D.1→D.5 saturée par les résidus matmul (5.36e-7 K, 5.25e-6 V).
+
+Prochaine sous-gate : **P5.2.E** = sliding mask au compute (pas troncation cache). Application de la fenêtre `sliding_window` (cf P5.0 config) sur les scores d'attention, sans toucher au layout du cache. Premier morceau qui implique une opération QK donc l'introduction du Q path (réutilisation C.3 q_rope). Cadrage en session dédiée requis. Attention au choix layer 14 (full attention) vs layer 13/15 (sliding) pour le pilote E.
