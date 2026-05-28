@@ -2,9 +2,9 @@
 //
 // Gate A : charger ple_fixture.safetensors, declarer les 5 tenseurs symboliques,
 //          materialiser via zml.io.load. PASS.
-// Gate B : forward minimal = embed_tokens_slice.scale(sqrt(1536)).
-//          Compiler, executer, ramener host, comparer aux 8 premieres valeurs
-//          de reference (calculees en numpy cote M1).
+// Gate B : forward = embed_tokens_slice.scale(sqrt(1536)). PASS bit-exact.
+// Gate C : forward = embed_tokens_per_layer_slice.scale(16.0).
+//          Memes APIs que Gate B, autre tenseur, autre scalaire.
 //
 // CLI:
 //   gemma4_ple_fixture <path-to-ple_fixture.safetensors>
@@ -33,19 +33,20 @@ const INV_SQRT_H: f32 = 0.02551551815399144;
 const INV_SQRT_2: f32 = 0.7071067811865475;
 const RMS_EPS: f32 = 1.0e-6;
 
-// Reference Gate B : embed_tokens_slice[0, :8] * sqrt(1536)
-// Calculee cote M1 via numpy fp32 (cf fixtures/embed_tokens_slice.npy).
-const GATE_B_EXPECTED: [8]f32 = .{
-    1.191255807876587,
-    1.2247449159622192,
-    -0.047841597348451614,
-    0.6889190077781677,
-    -1.7701390981674194,
-    -1.071651816368103,
-    1.4256796836853027,
-    -1.387406349182129,
+// Reference Gate C : embed_tokens_per_layer_slice[0, :8] * 16.0
+// Calculee cote M1 via numpy fp32 (cf fixtures/embed_tokens_per_layer_slice.npy).
+// Gate B reference conservee en commentaire pour trace (cf tag gate/P4.4.2-gate-B-pass).
+const GATE_C_EXPECTED: [8]f32 = .{
+    0.16796875,
+    0.04345703125,
+    -2.1875,
+    -0.0213623046875,
+    0.1494140625,
+    -0.02490234375,
+    1.953125,
+    -0.65625,
 };
-const GATE_B_TOLERANCE: f32 = 1.0e-4;
+const GATE_C_TOLERANCE: f32 = 1.0e-4;
 
 /// Fixture PLE Gemma 4 charge depuis ple_fixture.safetensors.
 const PleFixture = struct {
@@ -109,9 +110,10 @@ const PleFixture = struct {
         self.ple_reference_final.deinit();
     }
 
-    /// Gate B forward : scale par sqrt(H). Pas de dot, pas de reshape, pas de rmsnorm.
+    /// Gate C forward : scale par sqrt(D) = 16.0 sur embed_tokens_per_layer_slice.
+    /// Toujours pas de dot, pas de reshape, pas de rmsnorm.
     pub fn forward(self: PleFixture) zml.Tensor {
-        return self.embed_tokens_slice.scale(SQRT_H);
+        return self.embed_tokens_per_layer_slice.scale(SQRT_D);
     }
 };
 
@@ -155,8 +157,8 @@ pub fn main(init: std.process.Init) !void {
     defer PleFixture.unloadBuffers(&buffers);
     log.info("Gate A PASS: 5 tensors loaded into device buffers", .{});
 
-    // === Gate B: compile + run forward (scale by sqrt(H)) ===
-    log.info("Gate B: compiling forward (scale by sqrt(1536) = {d:.6})...", .{SQRT_H});
+    // === Gate C: compile + run forward (scale by sqrt(D) = 16) ===
+    log.info("Gate C: compiling forward (scale by sqrt(256) = {d:.6})...", .{SQRT_D});
     var exe = try platform.compile(
         allocator,
         io,
@@ -188,17 +190,17 @@ pub fn main(init: std.process.Init) !void {
     log.info("First 8 values vs expected (numpy fp32 ref):", .{});
     var max_diff: f32 = 0.0;
     for (0..8) |i| {
-        const expected = GATE_B_EXPECTED[i];
+        const expected = GATE_C_EXPECTED[i];
         const actual = data[i];
         const diff = @abs(actual - expected);
         if (diff > max_diff) max_diff = diff;
         log.info("  [0, {}]: actual={d:.10} expected={d:.10} diff={e:.3}", .{ i, actual, expected, diff });
     }
-    log.info("Gate B max_diff over first 8: {e:.6} (tolerance {e:.1})", .{ max_diff, GATE_B_TOLERANCE });
+    log.info("Gate C max_diff over first 8: {e:.6} (tolerance {e:.1})", .{ max_diff, GATE_C_TOLERANCE });
 
-    if (max_diff > GATE_B_TOLERANCE) {
-        log.err("BLOCK: Gate B max_diff exceeds tolerance", .{});
-        return error.GateBFailed;
+    if (max_diff > GATE_C_TOLERANCE) {
+        log.err("BLOCK: Gate C max_diff exceeds tolerance", .{});
+        return error.GateCFailed;
     }
-    log.info("Gate B PASS: scale(sqrt(1536)) matches numpy reference", .{});
+    log.info("Gate C PASS: scale(16.0) matches numpy reference", .{});
 }
