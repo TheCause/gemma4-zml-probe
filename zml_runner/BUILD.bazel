@@ -111,3 +111,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.D.2b — ZML v_norm (reshape + rmsNorm UNSCALED, no mul), producer layer 13.
+zig_binary(
+    name = "gemma4_v_norm",
+    main = "gemma4_v_norm.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

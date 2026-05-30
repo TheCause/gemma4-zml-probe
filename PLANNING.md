@@ -7,12 +7,12 @@
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
 **P4.4.2 ✅** gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ I ✅ **J ✅**
 **P5.0 ✅ · P5.1 ✅ · P5.2.A ✅ · P5.2.B ✅ · P5.2.C ✅ complet (C.0/C.1/C.2/C.3)**
-**P5.2.D 🔧 branche K ✅ (D.1/D.3/D.4) · branche V rouverte** : bug `v_norm` (RMSNorm `with_scale=False` non appliqué à V) découvert le 30 mai en préparant E.
+**P5.2.D 🔧 branche K ✅ (D.1/D.3/D.4) · branche V en cours** : bug `v_norm` (RMSNorm `with_scale=False` non appliqué à V) découvert le 30 mai en préparant E.
   - **D.0b ✅** oracle K/V corrigé (V RMSNormed sans scale) — tag `p5.2-d0b-v-norm-oracle-pass`
-  - **D.2b ⏳** ZML v_norm sans scale (à faire)
-  - **D.5 ⏳ à refaire** après D.2b (`v_slot` actuel = V brut, faux)
-**P5.2.E ⏳ bloqué** par D.2b + D.5-redo (sliding mask au compute, pilote = layer 15 reader)
-Tag courant : `p5.2-d0b-v-norm-oracle-pass`.
+  - **D.2b ✅** ZML v_norm sans scale — scan global 2.384e-7 (marge ~420 000×) — tag `p5.2-d2b-zml-v-norm-pass`
+  - **D.5 ⏳ à refaire** : KV slot avec V corrigé (`value = v_after_norm`, pas v_after_proj brut)
+**P5.2.E ⏳ bloqué** par D.5-redo (sliding mask au compute, pilote = layer 15 reader)
+Tag courant : `p5.2-d2b-zml-v-norm-pass`.
 
 > **Gemma 4 E2B PLE minimal ZML validated end-to-end.**
 

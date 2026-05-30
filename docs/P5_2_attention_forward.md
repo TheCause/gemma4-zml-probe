@@ -857,11 +857,63 @@ eps, with_scale=False)` puis `v_after_norm = v_norm(v_after_reshape)` ;
 
 ---
 
+## P5.2.D.2b — ZML v_norm sans scale (PASS, 30 mai 2026)
+
+### Objectif
+Porter en ZML la normalisation V : `Gemma4RMSNorm(with_scale=False)`. Miroir
+exact de D.3 k_norm **sans** le `.mul(weight)` (pas de poids appris). Valider
+contre l'oracle PyTorch `v_after_norm` du fixture D.0b.
+
+### Périmètre strict
+- **Entrée** : `v_after_proj [1,4,256]` (V déjà projeté, fourni par D.0b — pas de v_proj ici).
+- **Pipeline ZML** :
+  ```zig
+  v_4d         = v_after_proj.reshape({1,4,1,256}).withTags(.{.b,.s,.kvh,.hd})
+  v_after_norm = zml.nn.rmsNorm(v_4d, .hd, RMS_EPS)   // PAS de .mul(weight)
+  ```
+- **Interdits** : `.mul(weight)`/v_norm.weight (with_scale=False), v_proj, RoPE, transpose, cache, attention.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/20_p5_2_d2b_export_fixture.py` | export safetensors slim (v_after_proj + v_after_norm) depuis le `.pt` D.0b |
+| `fixtures/p5_2_d2b_v_norm_layer13.safetensors` | 2 tenseurs (input + oracle) ~8 KB (gitignored) |
+| `zml_runner/gemma4_v_norm.zig` | runner ZML (reshape + rmsNorm sans mul) |
+| `zml_runner/BUILD.bazel` | cible `gemma4_v_norm` |
+| `logs/P5_2_D2b_v_norm.log` | sortie `bazel run` |
+
+### Résultats numériques observés
+- Shape sortie : `{b=1, s=4, kvh=1, hd=256, f32}` ✓
+- Sanity « norm active » : `max|v_after_norm − v_after_proj| = 0.777` (> 1e-3)
+- Fixed blocks : A `[0,0,0,:8]` max_diff 1.19e-7, B `[0,3,0,:8]` max_diff 0.0
+- **Scan global** : max_abs **2.384e-7** @ flat_index 74 (s=0, d=74), mean_abs 2.46e-8
+- Tolérance 1e-4 → marge **~420 000×**
+
+### Finding (D.2b)
+Résidu (2.38e-7) **~10× plus bas que D.3 k_norm** (5.36e-7) : D.2b part de
+`v_after_proj` déjà fourni (aucun matmul amont), on mesure donc le résidu pur de
+la RMSNorm fp32 PJRT-CPU vs PyTorch, sans la contribution du matmul. `with_scale=False`
+= `_norm()` seul (pas de `.mul(weight)`), bit-fidèle à PyTorch.
+
+### Critères de clôture P5.2.D.2b
+- [x] Build bazel PASS sur 3090
+- [x] Shape `{b=1,s=4,kvh=1,hd=256,f32}`
+- [x] Sanity `max|out − in| > 1e-3` (RMSNorm non no-op)
+- [x] Fixed blocks `[0,0,0,:8]`, `[0,3,0,:8]` vs oracle
+- [x] Scan global max_abs 2.384e-7 < tolerance 1e-4
+- [x] Aucun mul/weight, aucun v_proj, aucune RoPE, aucun transpose, aucun cache, aucune attention
+- [x] Log archivé `logs/P5_2_D2b_v_norm.log`
+
+**Tag** : `p5.2-d2b-zml-v-norm-pass`
+
+---
+
 ## P5.2.E (à venir) — sliding mask au compute
 
-> **Prérequis** : D.2b (ZML v_norm) puis re-run D.5 (KV slot avec V corrigé) AVANT
-> d'ouvrir E.0. E consomme `v_final` ; tant que la branche V n'est pas corrigée
-> côté ZML, E reposerait sur un V faux.
+> **Prérequis** : ~~D.2b (ZML v_norm)~~ ✅ fait — reste **re-run D.5** (KV slot avec V
+> corrigé : `value = v_after_norm`, pas le V brut) AVANT d'ouvrir E.0. E consomme
+> `v_final` ; tant que D.5 n'a pas re-validé la branche V côté slot, E reposerait
+> sur un V faux.
 
 P5.2.D branche K validée end-to-end (D.1/D.3/D.4 → D.5 K) ; branche V rouverte par
 D.0b (oracle corrigé), ZML V à refaire (D.2b + D.5). Chaîne K saturée par les
