@@ -74,26 +74,38 @@ def main() -> None:
         assert t.dtype == torch.float32, f"{name} dtype {t.dtype} != float32"
 
     # Cross-check : avec n_kv=1, k_final[0,0,s,:] == k_after_rope[0,s,0,:]
-    # bit-exact (transpose dim singleton = no-op mémoire).
+    # bit-exact (transpose dim singleton = no-op mémoire). Idem V mais c'est
+    # v_after_norm (V RMSNormé sans scale, D.0b) qui est transposé, PAS le V brut.
     k_after_rope = blob["k_after_rope"]  # [1, 4, 1, 256] {b, s, kvh, hd}
-    v_after_reshape = blob["v_after_reshape"]  # [1, 4, 1, 256] {b, s, kvh, hd}
-    # k_final = k_after_rope.transpose(1, 2).contiguous() côté D.0.
-    # avec n_kv=1, doit donner les mêmes valeurs réorganisées.
+    v_after_norm = blob["v_after_norm"]  # [1, 4, 1, 256] {b, s, kvh, hd} (D.0b)
+    v_after_reshape = blob["v_after_reshape"]  # [1, 4, 1, 256] V brut (avant norm)
     k_compute_vs_final = (k_after_rope[0, :, 0, :] - k_final[0, 0, :, :]).abs().max().item()
-    v_compute_vs_final = (v_after_reshape[0, :, 0, :] - v_final[0, 0, :, :]).abs().max().item()
+    v_compute_vs_final = (v_after_norm[0, :, 0, :] - v_final[0, 0, :, :]).abs().max().item()
     print(
         f"Sanity transpose K (compute -> cache) |diff|_max : {k_compute_vs_final:.6e}  "
         f"(expected 0.0 strict, n_kv=1 transpose no-op)"
     )
     print(
-        f"Sanity transpose V (compute -> cache) |diff|_max : {v_compute_vs_final:.6e}  "
+        f"Sanity transpose V (v_after_norm -> cache) |diff|_max : {v_compute_vs_final:.6e}  "
         f"(expected 0.0 strict, n_kv=1 transpose no-op)"
     )
     assert k_compute_vs_final == 0.0, (
         f"K compute vs cache should be bit-exact for n_kv=1, got {k_compute_vs_final}"
     )
     assert v_compute_vs_final == 0.0, (
-        f"V compute vs cache should be bit-exact for n_kv=1, got {v_compute_vs_final}"
+        f"V (norm) compute vs cache should be bit-exact for n_kv=1, got {v_compute_vs_final}"
+    )
+
+    # Sanity anti-régression D.5 : v_final (= v_after_norm transposé) DOIT différer
+    # du V brut. Si ~0, la branche V a régressé vers "V non normé" (bug D.0).
+    v_norm_vs_raw = (v_after_norm - v_after_reshape).abs().max().item()
+    print(
+        f"Sanity V norm vs brut |v_after_norm - v_after_reshape|_max : {v_norm_vs_raw:.6e}  "
+        f"(expected ~0.777, RMSNorm V active — sinon le bug V est revenu)"
+    )
+    assert v_norm_vs_raw > 1e-2, (
+        f"v_after_norm ~ v_after_reshape : V non normé, le bug D.0 est revenu "
+        f"(got {v_norm_vs_raw})"
     )
     print()
 
@@ -141,7 +153,7 @@ def main() -> None:
     print(f"wrote {OUT_FIXTURE}  ({total_bytes} bytes of tensor payload)")
 
     manifest = {
-        "source": "P5.2.D.5 ZML KV slot mock fixture (slim from D.0)",
+        "source": "P5.2.D.5 ZML KV slot mock fixture (slim from D.0b, V RMSNormed sans scale)",
         "derived_from": str(IN_FIXTURE.name),
         "layer_idx": LAYER_IDX,
         "layer_type": LAYER_TYPE,
@@ -174,7 +186,8 @@ def main() -> None:
             "k_slot       = k_after_rope.transpose(.{.b, .kvh, .s, .hd})  [B,n_kv,S,hd]",
             "v_after_proj = hidden_input @ v_proj_weight.T  [B,S,n_kv*hd]",
             "v_4d         = v_after_proj.reshape(B,S,n_kv,hd).withTags(.{.b,.s,.kvh,.hd})",
-            "v_slot       = v_4d.transpose(.{.b, .kvh, .s, .hd})  [B,n_kv,S,hd]   (V non normé, non roté)",
+            "v_after_norm = rmsNorm(v_4d, .hd, 1e-6)   (UNSCALED, with_scale=False, PAS de mul)",
+            "v_slot       = v_after_norm.transpose(.{.b, .kvh, .s, .hd})  [B,n_kv,S,hd]   (V RMSNormé sans scale, non roté)",
             "return (k_slot, v_slot)",
         ],
         "transpose_sanity_pytorch": {
@@ -183,7 +196,7 @@ def main() -> None:
             "explanation": "With n_kv=1, the singleton dim transpose is a memory no-op (bit-exact).",
         },
         "expected_zml_max_abs_le": 1.0e-4,
-        "expected_zml_residual_hint": "K side ~ D.4 résidu ~5e-7 (RoPE orthogonale), V side ~ D.2 résidu ~5e-6 (matmul brut)",
+        "expected_zml_residual_hint": "K side ~ D.4 résidu ~5e-7 (RoPE orthogonale), V side ~ D.2 résidu ~5e-6 (v_proj matmul through v_norm unscaled)",
         "interdits_p5_2_d5": [
             "attention",
             "Q path",

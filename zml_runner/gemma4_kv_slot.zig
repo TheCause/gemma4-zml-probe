@@ -14,9 +14,10 @@
 // reordonne pas en row-major). Verifié côté Python dans la sanity D.5.
 // Reste explicite ZML-side pour préparer les futures couches non-singleton.
 //
-// Pipeline ZML strict (return tuple K_slot, V_slot) :
+// Pipeline ZML strict (return tuple K_slot, V_slot, V_raw) :
 //   K : k_proj + reshape + withTags + rmsNorm + mul + rope + transpose
-//   V : v_proj + reshape + withTags          + transpose      (pas de norm, pas de RoPE)
+//   V : v_proj + reshape + withTags + rmsNorm (UNSCALED, no mul) + transpose  (pas de RoPE)
+//   V_raw : v_4d avant norm, expose pour la sanity anti-regression D.5 corrige.
 //
 // RoPE opts identique a D.4 :
 //   layout=.sequential, scaling=.default, theta=10000
@@ -143,12 +144,12 @@ const KvSlotFixture = struct {
     ///       -> compute layout {.b, .s, .kvh, .hd} = [1,4,1,256]
     ///       -> transpose -> cache layout {.b, .kvh, .s, .hd} = [1,1,4,256]
     ///
-    ///   V : v_proj (D.2) + reshape + withTags
+    ///   V : v_proj (D.2) + reshape + withTags + rmsNorm UNSCALED (D.2b, no mul)
     ///       -> compute layout {.b, .s, .kvh, .hd} = [1,4,1,256]
     ///       -> transpose -> cache layout {.b, .kvh, .s, .hd} = [1,1,4,256]
-    ///       (V non normé, non roté en Gemma 4)
-    pub fn forward(self: KvSlotFixture) struct { zml.Tensor, zml.Tensor } {
-        // --- K branche ---
+    ///       (V RMSNormé sans scale, non roté en Gemma 4)
+    pub fn forward(self: KvSlotFixture) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+        // --- K branche (inchangée) ---
         const k_after_proj = self.hidden_input.dot(self.k_proj_weight, .h);
         const k_4d = k_after_proj
             .reshape(.{ B, S, NKV, D })
@@ -166,15 +167,19 @@ const KvSlotFixture = struct {
         // mais reste explicite pour préparer les couches futures.
         const k_slot = k_after_rope.transpose(.{ .b, .kvh, .s, .hd });
 
-        // --- V branche ---
+        // --- V branche (corrigée D.5 : RMSNorm UNSCALED, cf D.2b) ---
         const v_after_proj = self.hidden_input.dot(self.v_proj_weight, .h);
         const v_4d = v_after_proj
             .reshape(.{ B, S, NKV, D })
             .withTags(.{ .b, .s, .kvh, .hd });
-        // V : pas de RMSNorm (v_norm absent du checkpoint Gemma 4), pas de RoPE.
-        const v_slot = v_4d.transpose(.{ .b, .kvh, .s, .hd });
+        // V : RMSNorm UNSCALED (Gemma4 v_norm = with_scale=False) — normalise
+        // SANS poids (pas de mul), pas de RoPE. value = v_after_norm.
+        const v_after_norm = zml.nn.rmsNorm(v_4d, .hd, RMS_EPS);
+        const v_slot = v_after_norm.transpose(.{ .b, .kvh, .s, .hd });
 
-        return .{ k_slot, v_slot };
+        // v_4d (V brut, avant norm) expose pour la sanity anti-regression host :
+        // max|v_slot - v_raw| doit valoir ~0.777, sinon le v_norm a saute.
+        return .{ k_slot, v_slot, v_4d };
     }
 };
 
@@ -316,9 +321,10 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{buffers});
     exe.call(args, &results);
 
-    var k_slot_buf, var v_slot_buf = results.get(struct { zml.Buffer, zml.Buffer });
+    var k_slot_buf, var v_slot_buf, var v_raw_buf = results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer });
     defer k_slot_buf.deinit();
     defer v_slot_buf.deinit();
+    defer v_raw_buf.deinit();
 
     log.info("Forward K_slot shape: {f}", .{k_slot_buf.shape()});
     log.info("Forward V_slot shape: {f}", .{v_slot_buf.shape()});
@@ -327,8 +333,30 @@ pub fn main(init: std.process.Init) !void {
     defer k_slice.free(allocator);
     var v_slice = try v_slot_buf.toSliceAlloc(allocator, io);
     defer v_slice.free(allocator);
+    var v_raw_slice = try v_raw_buf.toSliceAlloc(allocator, io);
+    defer v_raw_slice.free(allocator);
     const k_data = k_slice.items(f32);
     const v_data = v_slice.items(f32);
+    const v_raw_data = v_raw_slice.items(f32);
+
+    // === Sanity obligatoire (D.5 corrigé) : v_slot (normé) DOIT différer du V
+    // brut (v_4d). Avec n_kv=1 les deux partagent le flat layout (1024). Si la
+    // RMSNorm V a sauté, max|v_slot - v_raw| ~ 0 -> le bug 'V non normé' revient. ===
+    if (v_raw_data.len == v_data.len) {
+        var v_norm_change: f32 = 0.0;
+        for (v_data, v_raw_data) |normed, raw| {
+            const c = @abs(normed - raw);
+            if (c > v_norm_change) v_norm_change = c;
+        }
+        log.info("sanity max|v_slot - v_raw(brut)| = {e:.6} (expected ~0.777, RMSNorm V active)", .{v_norm_change});
+        if (v_norm_change < 1.0e-2) {
+            log.err("BLOCK: V slot ~ raw V — la RMSNorm V a saute, le bug 'V non norme' est revenu", .{});
+            return error.VNormRegressed;
+        }
+    } else {
+        log.err("v_raw length {d} != v_data length {d}", .{ v_raw_data.len, v_data.len });
+        return error.SlotLengthMismatch;
+    }
 
     var k_ref_slice = try buffers.k_final_oracle.toSliceAlloc(allocator, io);
     defer k_ref_slice.free(allocator);
@@ -340,17 +368,17 @@ pub fn main(init: std.process.Init) !void {
     // === Compare K slot (expected ~ D.4 résidu ~5e-7) ===
     const k_stats = try compareSlot("K_slot", k_data, k_ref, KV_SLOT_TOLERANCE);
 
-    // === Compare V slot (expected ~ D.2 résidu ~5e-6) ===
+    // === Compare V slot (v_proj matmul + v_norm UNSCALED ; résidu ~ D.2 ~5e-6) ===
     const v_stats = try compareSlot("V_slot", v_data, v_ref, KV_SLOT_TOLERANCE);
 
     log.info("---", .{});
     log.info("Summary :", .{});
     log.info("  K_slot max_abs={e:.6} mean_abs={e:.6} (expected ~ D.4 = 5.36e-7)", .{ k_stats.max_abs, k_stats.mean_abs });
-    log.info("  V_slot max_abs={e:.6} mean_abs={e:.6} (expected ~ D.2 = 5.25e-6)", .{ v_stats.max_abs, v_stats.mean_abs });
+    log.info("  V_slot max_abs={e:.6} mean_abs={e:.6} (v_proj matmul through v_norm, ~ D.2 5.25e-6)", .{ v_stats.max_abs, v_stats.mean_abs });
     log.info("  Tolerance {e:.1} on each slot", .{KV_SLOT_TOLERANCE});
 
     log.info("P5.2.D.5 PASS: ZML KV slot mock producer layer 13 validated vs PyTorch oracle", .{});
     log.info("  K_slot ≡ k_after_rope.transpose(cache) ≡ k_final  (cache layout {{b,kvh,s,hd}}=[1,1,4,256])", .{});
-    log.info("  V_slot ≡ v_after_reshape.transpose(cache) ≡ v_final  (V non normé, non roté)", .{});
+    log.info("  V_slot ≡ v_after_norm.transpose(cache) ≡ v_final  (V RMSNormé sans scale, non roté)", .{});
     log.info("  (no attention, no Q path, no reader, no layer 14, no sliding mask, no dynamic cache)", .{});
 }

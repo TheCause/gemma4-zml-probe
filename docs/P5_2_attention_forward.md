@@ -733,10 +733,16 @@ Porter la projection linéaire `v_proj` en ZML pour layer 13 (sliding writer), e
 
 ---
 
-## P5.2.D.5 — ZML KV slot mock producer layer 13 (PASS, 28 mai 2026)
+## P5.2.D.5 — ZML KV slot mock producer layer 13 (PASS, 28 mai 2026 ; corrigé 30 mai)
+
+> ⚠️ **Re-validé le 30 mai (V RMSNorm).** La V originale (« v_after_proj_reshaped »,
+> sans norm) était fausse — cf bug D.0/D.0b. La branche V intègre désormais
+> `rmsNorm(.hd)` **sans** poids (D.2b), `value = v_after_norm`. Re-run vs oracle
+> D.0b corrigé : K_slot 5.36e-7 (inchangé), **V_slot 4.17e-6** (vs ancien 5.25e-6
+> sur V brut), sanity `max|v_slot − v_raw| = 0.777`. Tag : `p5.2-d5-kv-slot-mock-pass`.
 
 ### Objectif
-Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_after_proj_reshaped)` en compute layout, puis applique le transpose vers cache layout (mirror PyTorch `k_final` / `v_final` du fixture D.0). Aucune attention, aucun cache dynamique réel, aucun Q path.
+Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_after_norm)` en compute layout, puis applique le transpose vers cache layout (mirror PyTorch `k_final` / `v_final` du fixture D.0b). Aucune attention, aucun cache dynamique réel, aucun Q path.
 
 ### Décision layout
 - **Compute layout** : `[1, 4, 1, 256]` = `{.b, .s, .kvh, .hd}` (sortie de D.4 K et D.2 V)
@@ -755,12 +761,13 @@ Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_af
   k_after_rope = zml.nn.rope(k_after_norm, null, .{.layout=.sequential, .scaling=.{.default=.{.rope_theta=10000}}})
   k_slot       = k_after_rope.transpose(.{.b, .kvh, .s, .hd})   // [1,1,4,256]
 
-  // V branch (pas de norm, pas de RoPE)
+  // V branch (RMSNorm UNSCALED, pas de mul, pas de RoPE) — corrigé D.5
   v_after_proj = hidden_input.dot(v_proj_weight, .h)
   v_4d         = v_after_proj.reshape({1,4,1,256}).withTags(.{.b,.s,.kvh,.hd})
-  v_slot       = v_4d.transpose(.{.b, .kvh, .s, .hd})           // [1,1,4,256]
+  v_after_norm = zml.nn.rmsNorm(v_4d, .hd, 1e-6)                // with_scale=False, no mul
+  v_slot       = v_after_norm.transpose(.{.b, .kvh, .s, .hd})   // [1,1,4,256]
 
-  return .{ k_slot, v_slot };
+  return .{ k_slot, v_slot, v_4d };   // v_4d expose pour sanity anti-regression
   ```
 - **Multi-return ZML** : pattern `var k_slot_buf, var v_slot_buf = results.get(struct { zml.Buffer, zml.Buffer })` (cf lfm2_tests.zig).
 - **6 tenseurs chargés** depuis `fixtures/p5_2_d5_kv_slot_layer13.safetensors` (slim re-export D.0 via `scripts/19_p5_2_d5_export_fixture.py`) : `hidden_input`, `k_proj_weight`, `k_norm_weight`, `v_proj_weight`, `k_final` (oracle K cache), `v_final` (oracle V cache).
@@ -779,15 +786,16 @@ Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_af
 ### Résultats numériques observés
 - K_slot shape : `{b=1, kvh=1, s=4, hd=256, f32}` ✓
 - V_slot shape : `{b=1, kvh=1, s=4, hd=256, f32}` ✓
-- **K_slot** : 2 blocks max_diff 1.34e-7, full max_abs **5.36e-7** @ flat_index 894 (b=0, kvh=0, s=3, d=126), mean_abs 6.01e-8
-- **V_slot** : 2 blocks max_diff 1.67e-6, full max_abs **5.25e-6** @ flat_index 842 (b=0, kvh=0, s=3, d=74), mean_abs 5.69e-7
-- Tolérance 1e-4 : marge ~186 000× (K), ~19 000× (V)
+- **K_slot** (inchangé) : 2 blocks max_diff 1.34e-7, full max_abs **5.36e-7** @ flat_index 894 (b=0, kvh=0, s=3, d=126), mean_abs 6.01e-8
+- **V_slot** (corrigé, V normé) : 2 blocks max_diff 1.55e-6, full max_abs **4.17e-6** @ flat_index 875 (b=0, kvh=0, s=3, d=107), mean_abs 5.29e-7
+- Sanity anti-régression : `max|v_slot − v_raw(brut)| = 0.777` (RMSNorm V active)
+- Tolérance 1e-4 : marge ~186 000× (K), ~24 000× (V)
 
-### Finding capitalisé (D.5)
-- **K_slot max_abs strictement identique à D.4** (5.36e-7 @ flat_index 894 même position après transpose). **V_slot max_abs strictement identique à D.2** (5.25e-6 @ flat_index 842 même position après transpose).
-- Confirmation expérimentale : **transpose sur dim singleton = pure metadata operation**. Aucune erreur additionnelle introduite par la transition compute→cache layout avec `n_kv=1`.
-- Implication : pour les futures couches non-singleton (par ex. modèles avec `n_kv > 1`), le transpose deviendra une vraie réorganisation mémoire mais le résidu numérique sous-jacent restera identique (transpose est une permutation exacte).
-- Cohérence bout-en-bout démontrée : pipeline ZML complet (D.1→D.3→D.4 puis transpose K, D.2 puis transpose V) reproduit `k_final` / `v_final` PyTorch dans la tolérance, avec saturation par les résidus matmul D.1 (K) et D.2 (V) — pas d'amplification cumulée.
+### Finding capitalisé (D.5, corrigé)
+- **K_slot max_abs strictement identique à D.4** (5.36e-7 @ flat_index 894, même position après transpose) — la branche K n'a pas bougé.
+- **V_slot max_abs 4.17e-6** (vs ancien 5.25e-6 sur V brut) : le résidu V passe désormais par `v_norm` (RMSNorm unscaled, D.2b). La position du max se déplace (d=107 vs d=74 sur V brut) car la normalisation redistribue le résidu du matmul v_proj.
+- Confirmation expérimentale : **transpose sur dim singleton = pure metadata operation** (sanity Python compute↔cache = 0.0 strict pour K comme pour V normé).
+- Cohérence bout-en-bout : pipeline ZML complet (K : D.1→D.3→D.4→transpose ; V : D.2→D.2b→transpose) reproduit `k_final` / `v_final` PyTorch (oracle D.0b corrigé) dans la tolérance 1e-4.
 
 ### Critères de clôture P5.2.D.5
 - [x] Build bazel PASS sur 3090
@@ -795,14 +803,16 @@ Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_af
 - [x] K_slot et V_slot produits en cache layout `[1,1,4,256]` `{b,kvh,s,hd}`
 - [x] Sanity Python pré-export : k_compute_vs_cache = v_compute_vs_cache = 0.0 strict (no-op n_kv=1)
 - [x] K_slot 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,0,3,:8]` rapportés vs `k_final` oracle
-- [x] V_slot 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,0,3,:8]` rapportés vs `v_final` oracle
+- [x] V_slot 2/2 fixed-point blocks `[0,0,0,:8]`, `[0,0,3,:8]` rapportés vs `v_final` oracle (corrigé)
 - [x] Scan global K_slot : max_abs 5.36e-7 < tolerance 1e-4
-- [x] Scan global V_slot : max_abs 5.25e-6 < tolerance 1e-4
-- [x] K_slot ≡ D.4 strict ; V_slot ≡ D.2 strict (transpose no-op n_kv=1)
+- [x] Scan global V_slot : max_abs 4.17e-6 < tolerance 1e-4 (V normé)
+- [x] K_slot ≡ D.4 strict ; V_slot via v_norm (D.2b), value = v_after_norm
+- [x] Sanity anti-régression host : `max|v_slot − v_raw| = 0.777` (RMSNorm V active)
 - [x] Aucune attention, aucun Q path, aucun reader, aucun layer 14, aucun sliding mask, aucun cache dynamique
 - [x] Log archivé `logs/P5_2_D5_kv_slot.log`
 
-**Tag** : `p5.2-d5-zml-kv-slot-mock-pass`
+**Tag (28 mai, V brut, superseded)** : `p5.2-d5-zml-kv-slot-mock-pass`
+**Tag (30 mai, V normé, corrigé)** : `p5.2-d5-kv-slot-mock-pass`
 
 ---
 
@@ -910,10 +920,9 @@ la RMSNorm fp32 PJRT-CPU vs PyTorch, sans la contribution du matmul. `with_scale
 
 ## P5.2.E (à venir) — sliding mask au compute
 
-> **Prérequis** : ~~D.2b (ZML v_norm)~~ ✅ fait — reste **re-run D.5** (KV slot avec V
-> corrigé : `value = v_after_norm`, pas le V brut) AVANT d'ouvrir E.0. E consomme
-> `v_final` ; tant que D.5 n'a pas re-validé la branche V côté slot, E reposerait
-> sur un V faux.
+> **Prérequis** : ~~D.2b~~ ✅ · ~~re-run D.5~~ ✅ (V corrigé, `value = v_after_norm`,
+> tag `p5.2-d5-kv-slot-mock-pass`). **Branche V réparée de bout en bout** — E.0 est
+> débloqué. E.0 sera une nouvelle frontière : premier QK / softmax / context.
 
 P5.2.D branche K validée end-to-end (D.1/D.3/D.4 → D.5 K) ; branche V rouverte par
 D.0b (oracle corrigé), ZML V à refaire (D.2b + D.5). Chaîne K saturée par les
