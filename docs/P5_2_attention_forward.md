@@ -811,8 +811,9 @@ Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_af
 - [x] Aucune attention, aucun Q path, aucun reader, aucun layer 14, aucun sliding mask, aucun cache dynamique
 - [x] Log archivé `logs/P5_2_D5_kv_slot.log`
 
-**Tag (28 mai, V brut, superseded)** : `p5.2-d5-zml-kv-slot-mock-pass`
-**Tag (30 mai, V normé, corrigé)** : `p5.2-d5-kv-slot-mock-pass`
+**Tags D.5** (les deux conservés — l'ancien documente le faux PASS pré-D.0b) :
+- `p5.2-d5-zml-kv-slot-mock-pass` — **superseded** (raw V, oracle D.0 faux)
+- `p5.2-d5-kv-slot-mock-pass` — **canonical** (V RMSNorm no-scale corrigé)
 
 ---
 
