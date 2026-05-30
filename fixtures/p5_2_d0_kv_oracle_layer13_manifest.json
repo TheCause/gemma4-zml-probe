@@ -1,7 +1,7 @@
 {
-  "source": "P5.2.D.0 PyTorch oracle K/V producer+writer layer 13 sliding",
+  "source": "P5.2.D.0b PyTorch oracle K/V producer+writer layer 13 sliding (V RMSNormed without learned scale)",
   "spec_refs": [
-    "transformers/models/gemma4/modeling_gemma4.py L811-L829 (Gemma4TextAttention.forward K/V path : k_proj/v_proj -> view -> k_norm -> apply_rotary_pos_emb on K only -> transpose ; V not normed, V not roped)"
+    "transformers/models/gemma4/modeling_gemma4.py (transformers 5.9.0) Gemma4TextAttention.__init__ (v_norm = Gemma4RMSNorm(head_dim, eps, with_scale=False)) + forward (k_proj/v_proj -> view -> k_norm(K) / v_norm(V) -> apply_rotary_pos_emb on K only -> transpose ; K scaled-normed + roped, V UNSCALED-normed, not roped)"
   ],
   "layer_idx": 13,
   "layer_type": "sliding_attention",
@@ -101,6 +101,15 @@
       "dtype": "float32"
     },
     "v_after_reshape": {
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "v_after_norm": {
       "shape": [
         1,
         4,
@@ -220,6 +229,21 @@
       "sum": -47.63572692871094
     },
     {
+      "name": "v_after_norm",
+      "shape": [
+        1,
+        4,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "min": -3.173516273498535,
+      "max": 6.691344738006592,
+      "mean": -0.042480163276195526,
+      "std": 0.9995850920677185,
+      "sum": -43.49968719482422
+    },
+    {
       "name": "k_after_norm",
       "shape": [
         1,
@@ -273,11 +297,11 @@
         256
       ],
       "dtype": "float32",
-      "min": -3.5419442653656006,
-      "max": 7.468173503875732,
-      "mean": -0.046519264578819275,
-      "std": 1.0839123725891113,
-      "sum": -47.63572692871094
+      "min": -3.173516273498535,
+      "max": 6.691344738006592,
+      "mean": -0.042480163276195526,
+      "std": 0.9995850920677185,
+      "sum": -43.49968719482422
     }
   ],
   "rope_sanity": {
@@ -286,15 +310,20 @@
     "pos0_threshold_lt": 1e-06,
     "pos3_threshold_gt": 0.001
   },
+  "v_norm_sanity": {
+    "max_abs_diff_v_norm_vs_v_reshape": 0.7768287658691406,
+    "threshold_gt": 0.01,
+    "note": "Gemma4 v_norm = unscaled RMSNorm (with_scale=False) : V is normalized but has no learned weight. D.0 wrongly skipped this ; D.0b restores it."
+  },
   "pipeline": [
     "hidden_input [B,S,H]",
     "A) k_after_proj = k_proj(hidden_input) [B,S,n_kv*head_dim]",
     "   v_after_proj = v_proj(hidden_input) [B,S,n_kv*head_dim]",
     "B) k_after_reshape = k_after_proj.view(B,S,n_kv,head_dim) [B,S,n_kv,head_dim]",
     "   v_after_reshape = v_after_proj.view(B,S,n_kv,head_dim) [B,S,n_kv,head_dim]",
-    "C) k_after_norm = k_norm(k_after_reshape) [B,S,n_kv,head_dim] (V not normed in Gemma 4)",
+    "C) k_after_norm = k_norm(k_after_reshape) [B,S,n_kv,head_dim] (scaled RMSNorm) ; v_after_norm = v_norm(v_after_reshape) [B,S,n_kv,head_dim] (UNSCALED RMSNorm, with_scale=False)",
     "D) (cos, sin) = rotary(hidden_input, position_ids=arange(S), layer_type='sliding_attention') ; k_after_rope = apply_rotary_pos_emb(k_after_norm, cos, sin, unsqueeze_dim=2) (V not roped)",
-    "E) k_final = k_after_rope.transpose(1,2).contiguous() [B,n_kv,S,head_dim] ; v_final = v_after_reshape.transpose(1,2).contiguous() [B,n_kv,S,head_dim]"
+    "E) k_final = k_after_rope.transpose(1,2).contiguous() [B,n_kv,S,head_dim] ; v_final = v_after_norm.transpose(1,2).contiguous() [B,n_kv,S,head_dim]"
   ],
   "interdits_p5_2_d0": [
     "q_proj",

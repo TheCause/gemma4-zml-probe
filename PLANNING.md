@@ -2,13 +2,17 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## Etat 28 mai 2026 (P5.2.D COMPLET — KV producer/writer layer 13 validé)
+## Etat 30 mai 2026 (P5.2.D branche V rouverte — bug v_norm corrigé en D.0b)
 
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅
 **P4.4.2 ✅** gates : A ✅ B ✅ C ✅ D ✅ E ✅ F ✅ G ✅ H ✅ I ✅ **J ✅**
-**P5.0 ✅ · P5.1 ✅ · P5.2.A ✅ · P5.2.B ✅ · P5.2.C ✅ complet (C.0/C.1/C.2/C.3) · P5.2.D ✅ complet (D.0/D.1/D.2/D.3/D.4/D.5)**
-**P5.2.E ⏳ pending** (sliding mask au compute)
-Tag courant : `p5.2-d5-zml-kv-slot-mock-pass`.
+**P5.0 ✅ · P5.1 ✅ · P5.2.A ✅ · P5.2.B ✅ · P5.2.C ✅ complet (C.0/C.1/C.2/C.3)**
+**P5.2.D 🔧 branche K ✅ (D.1/D.3/D.4) · branche V rouverte** : bug `v_norm` (RMSNorm `with_scale=False` non appliqué à V) découvert le 30 mai en préparant E.
+  - **D.0b ✅** oracle K/V corrigé (V RMSNormed sans scale) — tag `p5.2-d0b-v-norm-oracle-pass`
+  - **D.2b ⏳** ZML v_norm sans scale (à faire)
+  - **D.5 ⏳ à refaire** après D.2b (`v_slot` actuel = V brut, faux)
+**P5.2.E ⏳ bloqué** par D.2b + D.5-redo (sliding mask au compute, pilote = layer 15 reader)
+Tag courant : `p5.2-d0b-v-norm-oracle-pass`.
 
 > **Gemma 4 E2B PLE minimal ZML validated end-to-end.**
 
@@ -32,6 +36,9 @@ Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne
 2. **Piège ZML #2 — mul/add ne broadcastent pas implicitement** : `weight.broad(other.shape())` obligatoire (pattern Llama `model.zig:391`).
 3. **Choix RMSNorm verrouillé** : pattern Llama `normalized.mul(weight)`. Variante Qwen3.5 `normalized.mul(1+weight)` interdite pour Gemma 4.
 4. **Numérique attendu** : matmul PJRT-CPU vs PyTorch BLAS introduit ~1.5e-5 résidu. Pour valider une couche entière vs référence PyTorch, viser tolérance 1e-4 ; pour valider la couche vs numpy fp32 reproduit localement, viser bit-exact ou 1 ULP.
+5. **Piège Gemma4 #1 — `with_scale=False` ≠ pas de normalisation** : `v_norm = Gemma4RMSNorm(head_dim, eps, with_scale=False)` normalise V (division RMS) **sans** poids appris. L'absence de `v_norm.weight` au checkpoint = « pas de poids », PAS « pas de norm ». V est RMSNormé sans scale ; K et Q sont RMSNormés AVEC scale (`with_scale=True`). En ZML : V = `zml.nn.rmsNorm(v_4d, .hd, eps)` **sans** `.mul(weight)`. (bug D.0→D.0b, 30 mai)
+6. **Principe méthodo — l'oracle doit être indépendant du code testé** : le bug v_norm a survécu à un PASS « end-to-end » parce que l'oracle PyTorch ET l'implémentation ZML partageaient la même hypothèse fausse → ils s'accordaient à ~5e-6 (fausse confiance). Un oracle ne révèle un bug que s'il dérive de la **source de vérité** (`modeling_gemma4.py`), jamais d'une hypothèse ré-encodée à la main.
+7. **Faits attention Gemma4 (pour P5.2.E)** : `Gemma4TextAttention.scaling = 1.0` (PAS √head_dim — la norm passe par q_norm), **pas de softcap d'attention** (seulement `final_logit_softcapping` en P7), GQA via `repeat_kv` (`num_key_value_groups = 8`), masque **additif**, softmax fp32.
 
 ## Planning gemma4-zml-probe
 
@@ -66,6 +73,7 @@ Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne
 - **Piège ZML #1 — reshape perd les tags** : `tensor.reshape(.{1,4,35,256})` retourne un `Tensor({1,4,35,256, f32})` anonyme. Pour cibler un axe par tag (`rmsNorm(x, .d, eps)`, `add` avec un tenseur taggué, etc.), il faut chaîner `.withTags(.{ .b, .s, .l, .d })` immédiatement après le reshape. Observé Gate H, valable pour Gate I et au-delà.
 - **Piège ZML #2 — `mul`/`add` ne broadcastent pas implicitement** : `normalized {.b,.s,.l,.d}.mul(weight {.d})` panique `mul expects tensor shapes to match`. Il faut expliciter le broadcast : `weight.broad(normalized.shape())`. Pareil pour `add`. Pattern Llama exact : `normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()))`. Le `.convert(dtype)` est utile en mixed-precision ; ici tout est fp32, on l'omet.
 - Compute : 3090 pour Python (`/data/gemma4-zml-probe`, venv `/data/venvs/gemma4-probe`). ZML est dans `/data/rqz_workspace/zml` sur la 3090. Pour le portage Zig, machine = 3090 (Bazel + accès `examples/`).
+- **Oracle = source de vérité, pas hypothèse** : avant de coder un oracle PyTorch d'une couche, LIRE le `forward` de référence dans `modeling_gemma4.py` (scaling, softcap, norms, masque). Ne jamais inférer « pas de poids ⇒ pas d'op » (cf bug v_norm D.0→D.0b). Un oracle qui partage une hypothèse avec le code ZML testé donne un PASS trompeur.
 
 ## Mémoire associée
 

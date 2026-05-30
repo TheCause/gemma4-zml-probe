@@ -1,18 +1,26 @@
-"""P5.2.D.0 — PyTorch oracle K/V producer + writer sliding, layer 13.
+"""P5.2.D.0b — PyTorch oracle K/V producer + writer sliding, layer 13.
 
-Computes k_proj / v_proj -> view -> k_norm -> RoPE(K) on a sliding writer
-layer (layer 13), on synthetic deterministic input. Q path absent.
+Computes k_proj / v_proj -> view -> k_norm / v_norm -> RoPE(K) on a sliding
+writer layer (layer 13), on synthetic deterministic input. Q path absent.
 Attention scores absent. QK matmul absent. Softmax absent. Cache absent.
 
-Spec refs : transformers/models/gemma4/modeling_gemma4.py
-  Gemma4TextAttention.forward L811-L829 (k_proj / v_proj -> view -> k_norm
-  -> RoPE(K) -> transpose, V not normed, V not roped)
+Spec refs : transformers/models/gemma4/modeling_gemma4.py (transformers 5.9.0)
+  Gemma4TextAttention.__init__ : v_norm = Gemma4RMSNorm(head_dim, eps,
+    with_scale=False)  -> RMSNorm applied to V but WITHOUT a learned weight.
+  Gemma4TextAttention.forward  : k_proj/v_proj -> view -> k_norm(K) / v_norm(V)
+    -> RoPE(K only) -> transpose. K is scaled-normed + roped ; V is
+    unscaled-normed, NOT roped.
+
+D.0 -> D.0b fix : the original oracle skipped v_norm, reading the absence of
+`v_norm.weight` in the checkpoint as "V not normed". That is wrong : Gemma4
+uses an UNSCALED RMSNorm for V (with_scale=False), so there is no weight on
+disk yet the RMS normalization IS applied (observed ~0.25 max abs change).
 
 Pas de chargement du modele complet : load uniquement k_proj.weight,
-v_proj.weight et k_norm.weight depuis safetensors brut. Verifie que
-v_norm n'est pas present dans le checkpoint (Gemma 4 : Q et K seulement).
-Rotary instancie depuis config (pas de poids). Reproductibilite C.0 :
-meme seed, meme hidden_input.
+v_proj.weight et k_norm.weight depuis safetensors brut. v_norm n'a pas de
+poids (with_scale=False) donc rien a charger pour lui. Rotary instancie
+depuis config (pas de poids). Reproductibilite C.0 : meme seed, meme
+hidden_input.
 """
 from __future__ import annotations
 
@@ -115,15 +123,18 @@ def main() -> None:
     for suffix, present in presence.items():
         print(f"  {suffix:<14}  present={present}")
     print()
-    # Hard contract for Gemma 4 K/V path : k_proj, v_proj, k_norm yes ;
-    # v_norm absent. If a future Gemma variant ships v_norm we want to fail
-    # loud here rather than silently misuse it.
+    # Hard contract for Gemma 4 K/V path : k_proj, v_proj, k_norm present.
+    # v_norm.weight ABSENT is EXPECTED and CORRECT : Gemma4 v_norm is an
+    # UNSCALED RMSNorm (with_scale=False), so it has no learned weight on disk
+    # yet still normalizes V. Do NOT read "no v_norm.weight" as "V not normed"
+    # (that was the D.0 bug, fixed in D.0b). If a future Gemma variant ships a
+    # scaled v_norm.weight we want to fail loud here rather than misuse it.
     assert presence["k_proj.weight"], "missing k_proj.weight"
     assert presence["v_proj.weight"], "missing v_proj.weight"
     assert presence["k_norm.weight"], "missing k_norm.weight"
     assert not presence["v_norm.weight"], (
-        "v_norm.weight found on disk — D.0 contract says K-norm only ; "
-        "investigate before using"
+        "v_norm.weight found on disk — Gemma4 expects an UNSCALED v_norm "
+        "(with_scale=False, no learned weight) ; investigate before using"
     )
 
     # Load K/V projection + k_norm weights from raw safetensors (no full model).
@@ -161,6 +172,11 @@ def main() -> None:
     k_norm = Gemma4RMSNorm(head_dim, eps=rms_eps)
     k_norm.weight = torch.nn.Parameter(k_norm_weight)
 
+    # V normalization : Gemma4 applies an UNSCALED RMSNorm to V
+    # (with_scale=False). No learned weight (absent from checkpoint, asserted
+    # above) but the RMS normalization itself IS applied. D.0 -> D.0b fix.
+    v_norm = Gemma4RMSNorm(head_dim, eps=rms_eps, with_scale=False)
+
     # Rotary embedding (pas de poids, pure compute from config).
     rotary = Gemma4TextRotaryEmbedding(tc)
 
@@ -188,10 +204,13 @@ def main() -> None:
         print(f"B) k_after_reshape shape : {tuple(k_after_reshape.shape)}")
         print(f"   v_after_reshape shape : {tuple(v_after_reshape.shape)}")
 
-        # Step C : k_norm (RMSNorm Llama pure-weight pattern, last-dim head_dim).
-        # V is NOT normed in Gemma 4 (no v_norm in checkpoint, see Sanity 2).
+        # Step C : k_norm (RMSNorm Llama scaled-weight pattern) and v_norm
+        # (RMSNorm UNSCALED, with_scale=False). Both normalize the last dim
+        # (head_dim). D.0 -> D.0b fix : v_norm was previously (wrongly) skipped.
         k_after_norm = k_norm(k_after_reshape)
+        v_after_norm = v_norm(v_after_reshape)
         print(f"C) k_after_norm shape    : {tuple(k_after_norm.shape)}")
+        print(f"   v_after_norm shape    : {tuple(v_after_norm.shape)}")
 
         # Step D : RoPE on K only (V is not roped in Gemma 4).
         # Sliding layer => rotary with layer_type='sliding_attention',
@@ -204,10 +223,11 @@ def main() -> None:
         )
         print(f"   k_after_rope shape    : {tuple(k_after_rope.shape)}")
 
-        # Step E : optional transpose to [B, n_kv, S, head_dim] = [1, 1, 4, 256].
+        # Step E : transpose to [B, n_kv, S, head_dim] = [1, 1, 4, 256].
         # Matches Gemma4TextAttention output layout before the cache write.
+        # V transpose operates on the NORMED V (v_after_norm), not raw reshape.
         k_final = k_after_rope.transpose(1, 2).contiguous()
-        v_final = v_after_reshape.transpose(1, 2).contiguous()
+        v_final = v_after_norm.transpose(1, 2).contiguous()
         print(f"E) k_final shape         : {tuple(k_final.shape)} (transposed)")
         print(f"   v_final shape         : {tuple(v_final.shape)} (transposed)")
 
@@ -234,6 +254,19 @@ def main() -> None:
     )
     assert pos3_diff > 1e-3, (
         f"RoPE pos 3 should differ from k_norm but got max abs diff {pos3_diff}"
+    )
+
+    # === Sanity 4 (D.0b) : v_norm IS applied (unscaled RMSNorm) ===
+    # Guards against regressing to "V not normed". The unscaled RMSNorm must
+    # measurably change V (observed ~0.25 max abs on this synthetic input).
+    v_norm_delta = (v_after_norm - v_after_reshape).abs().max().item()
+    print(
+        f"v_norm |v_after_norm - v_reshape|_max : {v_norm_delta:.6e}  "
+        f"(expected > 1e-2, unscaled RMSNorm active)"
+    )
+    assert v_norm_delta > 1e-2, (
+        f"v_norm should modify V (unscaled RMSNorm) but got max abs diff "
+        f"{v_norm_delta} — regression to 'V not normed' ?"
     )
 
     print()
@@ -289,6 +322,7 @@ def main() -> None:
         ("v_after_proj", v_after_proj),
         ("k_after_reshape", k_after_reshape),
         ("v_after_reshape", v_after_reshape),
+        ("v_after_norm", v_after_norm),
         ("k_after_norm", k_after_norm),
         ("k_after_rope", k_after_rope),
         ("k_final", k_final),
@@ -314,6 +348,7 @@ def main() -> None:
         "v_after_proj": v_after_proj,
         "k_after_reshape": k_after_reshape,
         "v_after_reshape": v_after_reshape,
+        "v_after_norm": v_after_norm,
         "k_after_norm": k_after_norm,
         "k_after_rope": k_after_rope,
         "k_final": k_final,
@@ -328,12 +363,16 @@ def main() -> None:
     print(f"wrote {OUT_FIXTURE}  ({total_bytes} bytes of tensor payload)")
 
     manifest = {
-        "source": "P5.2.D.0 PyTorch oracle K/V producer+writer layer 13 sliding",
+        "source": (
+            "P5.2.D.0b PyTorch oracle K/V producer+writer layer 13 sliding "
+            "(V RMSNormed without learned scale)"
+        ),
         "spec_refs": [
-            "transformers/models/gemma4/modeling_gemma4.py L811-L829 "
-            "(Gemma4TextAttention.forward K/V path : k_proj/v_proj -> view "
-            "-> k_norm -> apply_rotary_pos_emb on K only -> transpose ; "
-            "V not normed, V not roped)"
+            "transformers/models/gemma4/modeling_gemma4.py (transformers 5.9.0) "
+            "Gemma4TextAttention.__init__ (v_norm = Gemma4RMSNorm(head_dim, eps, "
+            "with_scale=False)) + forward (k_proj/v_proj -> view -> k_norm(K) / "
+            "v_norm(V) -> apply_rotary_pos_emb on K only -> transpose ; K scaled-"
+            "normed + roped, V UNSCALED-normed, not roped)"
         ],
         "layer_idx": LAYER_IDX,
         "layer_type": LAYER_TYPE,
@@ -368,6 +407,15 @@ def main() -> None:
             "pos0_threshold_lt": 1e-6,
             "pos3_threshold_gt": 1e-3,
         },
+        "v_norm_sanity": {
+            "max_abs_diff_v_norm_vs_v_reshape": v_norm_delta,
+            "threshold_gt": 1e-2,
+            "note": (
+                "Gemma4 v_norm = unscaled RMSNorm (with_scale=False) : V is "
+                "normalized but has no learned weight. D.0 wrongly skipped "
+                "this ; D.0b restores it."
+            ),
+        },
         "pipeline": [
             "hidden_input [B,S,H]",
             "A) k_after_proj = k_proj(hidden_input) [B,S,n_kv*head_dim]",
@@ -377,14 +425,15 @@ def main() -> None:
             "   v_after_reshape = v_after_proj.view(B,S,n_kv,head_dim) "
             "[B,S,n_kv,head_dim]",
             "C) k_after_norm = k_norm(k_after_reshape) [B,S,n_kv,head_dim] "
-            "(V not normed in Gemma 4)",
+            "(scaled RMSNorm) ; v_after_norm = v_norm(v_after_reshape) "
+            "[B,S,n_kv,head_dim] (UNSCALED RMSNorm, with_scale=False)",
             "D) (cos, sin) = rotary(hidden_input, position_ids=arange(S), "
             "layer_type='sliding_attention') ; "
             "k_after_rope = apply_rotary_pos_emb(k_after_norm, cos, sin, "
             "unsqueeze_dim=2) (V not roped)",
             "E) k_final = k_after_rope.transpose(1,2).contiguous() "
             "[B,n_kv,S,head_dim] ; "
-            "v_final = v_after_reshape.transpose(1,2).contiguous() "
+            "v_final = v_after_norm.transpose(1,2).contiguous() "
             "[B,n_kv,S,head_dim]",
         ],
         "interdits_p5_2_d0": [
@@ -399,8 +448,8 @@ def main() -> None:
     print(f"wrote {OUT_MANIFEST}")
     print()
     print(
-        "P5.2.D.0 PASS: PyTorch oracle for K/V producer+writer "
-        "layer 13 (sliding) generated."
+        "P5.2.D.0b PASS: PyTorch oracle for K/V producer+writer "
+        "layer 13 (sliding) generated (V RMSNormed without learned scale)."
     )
 
 

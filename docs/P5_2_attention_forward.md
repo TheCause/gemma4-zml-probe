@@ -468,6 +468,12 @@ Sous-sous-gates :
 
 ## P5.2.D.0 — PyTorch oracle K/V producer+writer layer 13 sliding (PASS, 28 mai 2026)
 
+> ⚠️ **Corrigé par D.0b (30 mai 2026) — branche V.** L'oracle décrit ci-dessous
+> a été régénéré : il manquait l'étape `v_norm` (RMSNorm **sans scale**,
+> `with_scale=False`) sur V. Le `v_final` d'origine était égal au V brut — faux.
+> Voir la sous-section **P5.2.D.0b** en fin de section D. La branche K
+> (k_norm/RoPE) décrite ici est inchangée et reste valide.
+
 ### Objectif
 Premier calcul du chemin **producer K/V** : produire un oracle PyTorch fp32 du pipeline `k_proj / v_proj → view → k_norm → RoPE(K) → transpose` pour la layer 13 (sliding writer, première frontière où on touche aux poids producer). Sérialiser comme fixture `.pt` à 16 tenseurs pour valider les sous-sous-gates D.1 → D.5 byte-par-byte.
 
@@ -800,8 +806,65 @@ Packager le writer sliding dans un slot KV factice. Calcule `(k_after_rope, v_af
 
 ---
 
+## P5.2.D.0b — Correction oracle : V RMSNormed sans scale (PASS, 30 mai 2026)
+
+### Le bug
+En préparant P5.2.E (première opération QK), la lecture du `forward` de référence
+`Gemma4TextAttention` (transformers 5.9.0) a révélé que **V passe par un RMSNorm**
+avant le transpose :
+```python
+self.v_norm = Gemma4RMSNorm(self.head_dim, eps=..., with_scale=False)   # __init__
+...
+value_states = self.v_norm(value_states)                                # forward
+```
+`Gemma4RMSNorm(with_scale=False)` **saute seulement la multiplication par le poids,
+pas la normalisation RMS**. Donc V est bien normalisé, simplement sans poids appris
+(d'où l'absence de `v_norm.weight` au checkpoint).
+
+L'oracle D.0 d'origine avait inféré « pas de poids `v_norm.weight` ⇒ V non normé »
+et faisait `v_final = v_after_reshape.transpose(...)`. **Faux.**
+
+### Pourquoi le bug a survécu à un PASS « end-to-end »
+D.0 (oracle) **et** D.2/D.5 (ZML) partageaient la même hypothèse fausse — ils
+s'accordaient donc entre eux à ~5e-6. Un oracle qui reproduit le bug du code testé
+donne un PASS trompeur. Le bug n'est visible qu'en remontant à la **source de
+vérité** (`modeling_gemma4.py`), ce que P5.2.E imposait. Leçon : **l'oracle doit
+rester indépendant du code testé** ; toute hypothèse sur la référence doit être
+vérifiée dans la source, pas inférée.
+
+### Le correctif (atomique, branche V seulement)
+`scripts/14_kv_oracle_layer13.py` : ajout de `v_norm = Gemma4RMSNorm(head_dim,
+eps, with_scale=False)` puis `v_after_norm = v_norm(v_after_reshape)` ;
+`v_final = v_after_norm.transpose(...)`. Nouveaux tenseurs en fixture :
+`v_after_norm`. Sanity 4 ajoutée (`|v_after_norm − v_reshape|_max > 1e-2`).
+
+### Résultats (3090, oracle régénéré)
+- `v_norm |v_after_norm − v_reshape|_max = 0.777` → normalisation bien active.
+- `v_after_norm` / `v_final` : std **0.9996** (vs V brut std 1.0839, max 7.47→6.69).
+- Branche K **inchangée** : `k_final` std 0.1260, RoPE pos0=0.0 / pos3=0.264.
+- Fixture `p5_2_d0_kv_oracle_layer13.pt` régénérée (md5 `bb3fc164…`, M1≡3090).
+
+### Impact sur les gates
+| Gate | État |
+|---|---|
+| D.0 → **D.0b** | oracle K/V corrigé (V normé) — **ce gate** |
+| D.1 (k_proj), D.3 (k_norm), D.4 (RoPE K) | restent **valides** (branche K intacte) |
+| D.2 (v_proj seul) | reste valide mais **incomplet** (manque v_norm) |
+| **D.2b** (à faire) | ZML v_norm sans scale — `zml.nn.rmsNorm(v_4d, .hd, eps)` **sans** `.mul(weight)` |
+| D.5 (KV slot) | **à refaire** après D.2b : `v_slot` actuel est faux (V brut) |
+
+**Tag** : `p5.2-d0b-v-norm-oracle-pass`
+
+---
+
 ## P5.2.E (à venir) — sliding mask au compute
 
-P5.2.D COMPLET = chemin K/V producer/writer validé pour layer 13 (sliding) end-to-end, depuis `hidden_input` jusqu'au slot cache layout `[1,1,4,256]`. Chaîne D.1→D.5 saturée par les résidus matmul (5.36e-7 K, 5.25e-6 V).
+> **Prérequis** : D.2b (ZML v_norm) puis re-run D.5 (KV slot avec V corrigé) AVANT
+> d'ouvrir E.0. E consomme `v_final` ; tant que la branche V n'est pas corrigée
+> côté ZML, E reposerait sur un V faux.
+
+P5.2.D branche K validée end-to-end (D.1/D.3/D.4 → D.5 K) ; branche V rouverte par
+D.0b (oracle corrigé), ZML V à refaire (D.2b + D.5). Chaîne K saturée par les
+résidus matmul (5.36e-7 K).
 
 Prochaine sous-gate : **P5.2.E** = sliding mask au compute (pas troncation cache). Application de la fenêtre `sliding_window` (cf P5.0 config) sur les scores d'attention, sans toucher au layout du cache. Premier morceau qui implique une opération QK donc l'introduction du Q path (réutilisation C.3 q_rope). Cadrage en session dédiée requis. Attention au choix layer 14 (full attention) vs layer 13/15 (sliding) pour le pilote E.
