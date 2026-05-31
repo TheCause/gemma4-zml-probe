@@ -1,0 +1,54 @@
+{
+  "source": "P5.2.E.1 ZML QK scores fixture (slim from E.0 oracle .pt)",
+  "derived_from": "p5_2_e0_attention_oracle_layer15_kv13.pt",
+  "reader_layer_idx": 15,
+  "writer_layer_idx": 13,
+  "layer_type": "sliding_attention",
+  "scaling": 1.0,
+  "scope": "QK scores ONLY \u2014 pas de mask, pas de softmax, pas de context",
+  "tensors": {
+    "q_final": {
+      "shape": [
+        1,
+        8,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "k_final": {
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "scores_raw": {
+      "shape": [
+        1,
+        8,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "q = load q_final  -> tags {.b, .h, .s, .hd}     [1,8,4,256]",
+    "k = load k_final  -> tags {.b, .kvh, .s, .hd}   [1,1,4,256]",
+    "scores = dot(q, k.T sur .hd) * 1.0  avec broadcast kvh 1 -> h 8  -> {.b,.h,.s,.t}  [1,8,4,4]",
+    "compare scores vs scores_raw (oracle), tol\u00e9rance 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "expected_zml_residual_hint": "matmul PJRT-CPU vs PyTorch BLAS ~1e-5 (r\u00e9duction sur .hd=256)",
+  "interdits_p5_2_e1": [
+    "mask",
+    "softmax",
+    "context",
+    "layer 14",
+    "softcap",
+    "scaling 1/sqrt(hd)"
+  ]
+}

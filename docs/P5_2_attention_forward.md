@@ -985,17 +985,88 @@ reproduit `eager_attention_forward` de `modeling_gemma4.py` (5.9.0, L~982-1015).
 
 ---
 
-## P5.2.E (suite) — E.1 ZML QK, puis sliding mask réel
+## P5.2.E.1 — ZML QK scores only : reader layer 15 × KV layer 13 (PASS, 31 mai 2026)
 
-> **Prérequis** : ~~D.2b~~ ✅ · ~~re-run D.5~~ ✅ · ~~E.0 oracle PyTorch~~ ✅
-> (tag `p5.2-e0-pytorch-attention-oracle-pass`). **Référence attention établie.**
+### Objectif
+Premier calcul d'attention en ZML, limité aux **scores bruts** `Q·Kᵀ` (AVANT masque /
+softmax / context). Comparer byte-equivalent contre l'oracle PyTorch `scores_raw`
+(fixture E.0). Première opération qui introduit le **batched matmul d'attention** et
+la **GQA** côté ZML.
 
-- **E.1 (prochaine)** = **ZML QK scores only** : reproduire `scores_raw` côté ZML
-  (dot Q×Kᵀ avec broadcast GQA, scaling 1.0) et comparer au `scores_raw` de la
-  fixture E.0 (tolérance 1e-4, résidu matmul PJRT-CPU attendu ~1e-5).
-- **E.mask (plus tard)** = sliding mask **réel** au compute, à tester sur un cas
-  synthétique `S=8, window=3` où le masque sliding diffère effectivement du causal
-  (E.0 ne couvre que le régime dégénéré S < window).
-- Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding)
-  à trancher pour la suite E. Le helper `zml.nn.rope` ne couvre pas encore
-  `proportional + partial rotary` (point rouge connu, cf D.4).
+### Périmètre strict
+- **Pipeline ZML** (dot manuel, PAS le helper `sdpa`/`attention` — voir Finding) :
+  ```zig
+  // q_final {.b,.h=8,.q,.hd}  ;  k_final {.b,.h=1,.k,.hd}  (tags posés au chargement)
+  const q_split = q_final.splitAxis(.h, .{ .h = k_final.dim(.h), .hq = .auto }); // {.b,.h=1,.hq=8,.q,.hd}
+  const scores  = q_split.dot(k_final, .hd);                                     // {.b,.h=1,.hq=8,.q,.k}
+  const merged  = scores.merge(.{ .h = .{ .h, .hq } });                          // {.b,.h=8,.q,.k}
+  return merged.transpose(.{ .b, .h, .q, .k });                                  // [b,h,q,k] = oracle layout
+  ```
+- **GQA = split des têtes Q** (convention Llama/sdpa, `zml/nn.zig:1094`), PAS un
+  `repeat_kv` de K. Les 8 têtes Q sont scindées en `{.h=1, .hq=8}` et se batchent
+  contre l'unique tête K (`.h=1`). Le résultat `merge(.h,.hq)` ré-aligne l'index de
+  tête global (head `hq` ↔ head PyTorch `hq`, K head 0 partagé).
+- **Scaling = 1.0** : Gemma4 (la norm passe par q_norm/k_norm). On **omet** la `mul`
+  par `1/√head_dim` que `sdpa` applique par défaut — sinon scores divisés par 16.
+- **Interdits** : masque, softmax, context (dot V), layer 14, softcap, `1/√head_dim`.
+
+### Décision d'implémentation (Finding sur l'API ZML)
+Le helper `zml.attention.attention.attention` et `zml.nn.sdpa` **n'exposent jamais
+les scores bruts** : ils enchaînent `dot → mask → softmax → dot(V) → merge` de façon
+monolithique, et les backends `cuda_fa2/fa3` (flash attention) fusionnent le kernel
+(scores physiquement inexistants en mémoire). → E.1 refait le `dot` Q·Kᵀ **à la main**
+(3 lignes), seule voie propre pour isoler les scores avant softmax.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/22_p5_2_e1_export_fixture.py` | export safetensors slim depuis le `.pt` E.0 (q_final, k_final, scores_raw) |
+| `fixtures/p5_2_e1_qk_scores_layer15_kv13.safetensors` | 3 tenseurs (gitignored, régénérable) |
+| `fixtures/p5_2_e1_qk_scores_layer15_kv13_manifest.json` | shapes/dtypes + pipeline ZML hint |
+| `zml_runner/gemma4_qk_scores.zig` | runner ZML QK scores (single-return) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_qk_scores` |
+| `logs/P5_2_E1_qk_scores.log` | sortie `bazel run` (3090) |
+
+### Résultats numériques observés
+- Symbolic shapes ZML : `q {b=1,h=8,q=4,hd=256}`, `k {b=1,h=1,k=4,hd=256}`, oracle `{b=1,h=8,q=4,k=4}` ✓
+- **Forward result shape** : `{b=1,h=8,q=4,k=4}` ✓ (split→dot→merge→transpose produit le bon layout)
+- Fixed-point blocks : 3 blocks max_diff **9.54e-7** (dont `[0,7,3,:4]` head 7 spécifique)
+- **Scan global** : max_abs **2.384e-6** @ flat_index 36 (b=0, h=2, q=1, k=0), mean_abs **3.52e-7**
+- Tolérance 1e-4 → **marge ~42 000×**. Résidu = matmul QK PJRT-CPU Eigen-like vs PyTorch BLAS, cohérent avec le plancher de jitter fp32 ~5e-7 mesuré côté Python (script 22).
+
+### Vérification adversariale (anti-faux-PASS, cf leçon D.0b)
+- **Oracle indépendant du code testé** : l'oracle exprime la GQA par `repeat_kv(K)` (PyTorch),
+  le ZML par `splitAxis(Q)` — **deux expressions différentes** qui convergent à 2.4e-6.
+  Un mauvais mapping de têtes donnerait une divergence massive, pas 2.4e-6.
+- **Pas de recopie** : le résidu ≠ 0.0 prouve un vrai matmul indépendant (une copie de
+  l'oracle donnerait 0.0 strict).
+- **Head-mapping** : le fixed-point head 7 matche l'oracle head 7 → `merge(.h,.hq)` préserve l'index global.
+- **Scaling 1.0** vérifié dans `modeling_gemma4.py` L772 (source de vérité), pas inféré.
+
+### Critères de clôture P5.2.E.1
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_qk_scores`, 34s)
+- [x] Forward layout `{b,h,q,k}` = `[1,8,4,4]` conforme à l'oracle
+- [x] GQA par split des têtes Q (convention sdpa), scaling 1.0 (pas de `1/√hd`)
+- [x] 3 fixed-point blocks rapportés vs `scores_raw`, max 9.54e-7
+- [x] Scan global max_abs 2.384e-6 < tolérance 1e-4
+- [x] Comparé à `scores_raw` (PAS `scores_masked` qui contient des `finfo.min`)
+- [x] Aucun masque, softmax, context, layer 14, softcap
+- [x] Log archivé `logs/P5_2_E1_qk_scores.log`
+
+**Tag** : `p5.2-e1-zml-qk-scores-pass`
+
+---
+
+## P5.2.E (suite) — sliding mask réel, puis softmax + context
+
+> **Prérequis** : ~~E.0 oracle~~ ✅ · ~~E.1 ZML QK scores~~ ✅
+> (tag `p5.2-e1-zml-qk-scores-pass`). **Scores bruts validés ZML↔PyTorch.**
+
+- **E.mask** = sliding mask **réel** au compute, sur cas synthétique `S=8, window=3`
+  où le masque sliding diffère effectivement du causal (E.0/E.1 ne couvrent que le
+  régime dégénéré S < window). Oracle PyTorch puis ZML (`add` du masque additif).
+- **E.softmax / E.context** = softmax(.k) en fp32 puis `dot(V, .k)` → context `[b,h,q,hd]`
+  (réutilise `value_states` de la branche V D.5). Première chaîne d'attention complète.
+- Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding) à
+  trancher. Le helper `zml.nn.rope` ne couvre pas `proportional + partial rotary`
+  (point rouge connu, cf D.4).

@@ -122,3 +122,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.E.1 — ZML QK scores only (dot Q x K^T, GQA split, scaling 1.0, no mask/softmax).
+zig_binary(
+    name = "gemma4_qk_scores",
+    main = "gemma4_qk_scores.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
