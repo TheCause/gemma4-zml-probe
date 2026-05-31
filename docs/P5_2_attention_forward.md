@@ -1127,16 +1127,104 @@ q=4:[..ooo...] q=5:[...ooo..] q=6:[....ooo.] q=7:[.....ooo]   (visible ⟺ q-3 <
 
 ---
 
-## P5.2.E (suite) — softmax, puis context
+## P5.2.E.softmax — ZML softmax only : reader layer 15 × KV layer 13 (PASS, 31 mai 2026)
 
-> **Prérequis** : ~~E.0~~ ✅ · ~~E.1 QK scores~~ ✅ · ~~E.mask sliding réel~~ ✅
-> (tag `p5.2-emask-sliding-mask-pass`). **QK + masque sliding validés ZML↔PyTorch.**
+### Objectif
+Valider la transformation `scores_masked → probs` côté ZML, **softmax sur l'axe `.k`
+uniquement** (après QK scores de E.1 et masque de E.mask, AVANT le context dot). Comparer
+vs l'oracle PyTorch `probs` = `torch.softmax(scores_masked, dim=-1, fp32)` figé en E.0.
 
-- **E.softmax** = `softmax(scores_masked, .k)` en fp32 (cf `sdpa` : `.convert(.f32).softmax(.k)`).
-  Oracle = `probs` de E.0 (sur le cas réel S=4) ou un cas synthétique mordant. Vérifier
-  Σ=1 et fuite nulle sur les positions masquées.
+### Périmètre strict
+- **Pipeline ZML** : une seule op.
+  ```zig
+  probs = scores_masked.softmax(.k)   // [.b=1,.h=8,.q=4,.k=4]
+  ```
+  Convention `sdpa` ZML (`zml/nn.zig` L1112 : `attn_weights.convert(.f32).softmax(.k)`).
+  `Tensor.softmax` (`tensor.zig` L1369) soustrait le max par ligne (stable) → exp → normalise,
+  et renvoie 0 pour une ligne entièrement `-inf`. Ici aucune ligne n'est full-masquée
+  (q0 voit toujours k0) → comportement identique à `torch.softmax`.
+- **2 tenseurs chargés** depuis `fixtures/p5_2_esoftmax_layer15_kv13.safetensors` (slim re-export
+  D.0/E.0 via `scripts/24_p5_2_esoftmax_export_fixture.py`) : `scores_masked` (input, contient
+  déjà le masque causal additif finfo.min), `probs` (oracle).
+- **Indépendance oracle** : `probs` vient de `torch.softmax` (E.0), le runner utilise
+  l'implémentation ZML native — aucun code partagé, seul le contrat numérique l'est.
+- **Interdits stricts** : context `probs @ V`, toute op sur V, `dot(V)`, masque réel
+  S=8/window=3 (testé en E.mask), layer 14 full attention, softcap, scaling `1/√head_dim`.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/24_p5_2_esoftmax_export_fixture.py` | export safetensors slim depuis le `.pt` E.0 (2 tenseurs) |
+| `fixtures/p5_2_esoftmax_layer15_kv13.safetensors` | `scores_masked` (input) + `probs` (oracle) ~1 KB |
+| `fixtures/p5_2_esoftmax_layer15_kv13_manifest.json` | shapes/dtypes + pipeline + interdits |
+| `zml_runner/gemma4_softmax.zig` | runner ZML (`softmax(.k)` + checks distribution) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_softmax` |
+| `logs/P5_2_Esoftmax.log` | sortie `bazel run` (3090) |
+
+### Validation
+**Checks distribution (sortie ZML)** :
+- `max|sum(probs, .k) − 1| = 1.192e-7` (tol 1e-5)
+- `max proba sur futur masqué = 0.000` (tol 1e-9) — causalité stricte préservée par softmax
+- NaN/Inf = false
+
+**3 blocks fixed-point vs oracle** (`probs[0,0,0,:4]`, `probs[0,0,3,:4]`, `probs[0,7,3,:4]`) :
+- **max_diff = 0.000** (bit-exact sur les 3 blocks)
+
+**Scan global 128 valeurs** :
+- max_abs = **2.980e-8** à `flat_index 46 (b=0, h=2, q=3, k=2)`
+- mean_abs = **6.112e-10**
+- Tolérance 1e-4 → marge ~3 300× sous le seuil
+
+### Observations
+- **max_abs E.softmax (2.98e-8) << jitter QK E.1 (2.38e-6)** : la normalisation softmax borne
+  les sorties dans `[0,1]` et les probabilités dominantes correspondent exactement à l'oracle ;
+  le résidu absolu est donc plus petit que celui des scores bruts. La position du max se
+  déplace (h=2,q=3,k=2) car l'argmax du worst-case n'est plus lié au matmul QK mais à
+  l'exp/normalisation d'une distribution non-dégénérée.
+- **finfo.min géré correctement** : `softmax` soustrait le max fini par ligne → les positions
+  masquées (`-3.4e38`) donnent `exp(≈-3.4e38)=0`, exactement comme l'oracle. Fuite futur = 0.
+
+### Piège capitalisé (build) — quota comptime / longueur du nom de module
+Le runner initial s'appelait `gemma4_attention_softmax.zig`. Build **KO** :
+`error: evaluation exceeded 1000 backwards branches` dans `std/mem.zig` (`indexOf`),
+déclenché par `pjrt.zig` `structSize(T)` (`std.mem.indexOf(u8, @typeName(T), ".struct_")`)
+à l'instanciation comptime de `exe.call` → `PJRT_LoadedExecutable_Execute`. Le `Struct`
+**local** de `pjrt.zig` n'a pas de `@setEvalBranchQuota` (contrairement à `zml/meta.zig:308`),
+et un `@setEvalBranchQuota` placé dans **mon `main` n'atteint PAS** cette Sema d'instanciation
+générique (scope comptime distinct, quota par défaut 1000). Les runners au nom plus court
+(`gemma4_qk_scores` 16c, `gemma4_sliding_mask` 19c) passaient ; `gemma4_attention_softmax`
+(24c) débordait — le coût cumulé de branches comptime croît avec la longueur du `@typeName`.
+**Fix** : renommer le binaire `gemma4_softmax` (14c) → build PASS. **Règle réutilisable :
+garder les noms de runners ZML courts (≤ ~20 c) pour rester sous le quota comptime fragile
+de `pjrt.zig`.**
+
+### Critères de clôture P5.2.E.softmax
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_softmax`)
+- [x] Run produit `probs [1,8,4,4]`
+- [x] `sum(probs, .k) ≈ 1` (err 1.19e-7) sur tous les heads/queries
+- [x] Futur masqué ≈ 0 (0.000) ; aucun NaN/Inf
+- [x] 3/3 fixed-point blocks bit-exact (max_diff 0.0) vs oracle `probs`
+- [x] Scan global 128 valeurs : max_abs 2.98e-8 < tolerance 1e-4 ; mean_abs 6.11e-10
+- [x] Aucun context dot, aucun `dot(V)`, aucune op sur V, aucun layer 14
+- [x] Log archivé `logs/P5_2_Esoftmax.log`
+
+**Tag** : `p5.2-esoftmax-zml-pass`
+
+> Note livrable : le handoff listait `scripts/23_…` et `zml_runner/gemma4_attention_softmax.zig`.
+> Numéro de script → `24_` (le `23_` était déjà pris par `23_p5_2_emask_oracle.py`) ; runner
+> renommé `gemma4_softmax.zig` (cf piège quota comptime ci-dessus).
+
+---
+
+## P5.2.E (suite) — context
+
+> **Prérequis** : ~~E.0~~ ✅ · ~~E.1 QK scores~~ ✅ · ~~E.mask sliding réel~~ ✅ ·
+> ~~E.softmax~~ ✅ (tag `p5.2-esoftmax-zml-pass`). **QK + masque + softmax validés ZML↔PyTorch.**
+
 - **E.context** = `probs.dot(value_states, .k)` → context `[b,h,q,hd]` (réutilise la branche V
-  D.5). Première **chaîne d'attention ZML complète** (QK → mask → softmax → context).
+  **corrigée** de D.5 canonique, `value = v_after_norm`). Première **chaîne d'attention ZML
+  complète** (QK → mask → softmax → context). GQA : `value_states = repeat_kv(v_final, 8)` côté
+  oracle, à reproduire en ZML (broadcast kvh 1 → h 8) avant le `dot(.k)`.
 - Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding) à
   trancher. Le helper `zml.nn.rope` ne couvre pas `proportional + partial rotary`
   (point rouge connu, cf D.4).

@@ -144,3 +144,17 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.E.softmax — ZML softmax only (scores_masked -> probs, axe .k, fp32, no context/V).
+# Nom court volontaire (cf P5_2 doc) : un module plus long ("gemma4_attention_softmax")
+# faisait déborder le quota comptime de 1000 backwards branches dans pjrt.zig (structSize
+# scanne @typeName via std.mem.indexOf à l'instanciation de exe.call).
+zig_binary(
+    name = "gemma4_softmax",
+    main = "gemma4_softmax.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

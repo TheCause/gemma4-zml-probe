@@ -1,0 +1,50 @@
+{
+  "source": "P5.2.E.softmax ZML softmax fixture (slim from E.0 oracle .pt)",
+  "derived_from": "p5_2_e0_attention_oracle_layer15_kv13.pt",
+  "reader_layer_idx": 15,
+  "writer_layer_idx": 13,
+  "layer_type": "sliding_attention",
+  "scope": "SOFTMAX ONLY (axe .k) \u2014 pas de context, pas de V, pas de dot(V)",
+  "mask_note": "scores_masked contient le masque causal additif (finfo.min sur le futur). \u00c0 S=4 < sliding_window=512 le sliding d\u00e9g\u00e9n\u00e8re en causal (cf E.0). Le vrai sliding window est test\u00e9 s\u00e9par\u00e9ment en E.mask (S=8, window=3) \u2014 PAS ici.",
+  "tensors": {
+    "scores_masked": {
+      "shape": [
+        1,
+        8,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    },
+    "probs": {
+      "shape": [
+        1,
+        8,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "scores_masked = load -> tags {.b, .h, .q, .k}   [1,8,4,4]",
+    "probs = scores_masked.softmax(.k)   (fp32, soustrait le max par ligne)   [1,8,4,4]",
+    "compare probs vs oracle probs, tol\u00e9rance 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "expected_zml_residual_hint": "softmax stable (sub max + exp). Le r\u00e9sidu vient du jitter QK propag\u00e9 (~2.4e-6 en E.1), softmax peut l'amplifier l\u00e9g\u00e8rement mais reste << 1e-4.",
+  "distribution_checks": {
+    "max_prob_sum_err": 1.1920928955078125e-07,
+    "future_prob_max": 0.0
+  },
+  "interdits_p5_2_esoftmax": [
+    "context = probs @ V",
+    "dot(V)",
+    "toute op sur V",
+    "E.context",
+    "masque r\u00e9el S=8/window=3 (E.mask)",
+    "layer 14 full attention",
+    "softcap d'attention",
+    "scaling 1/sqrt(head_dim)"
+  ]
+}
