@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). E à venir.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). **P5.2.E COMPLET** (E.0 oracle + E.1 QK scores + E.mask sliding + E.softmax + E.context PASS, 31 mai 2026) — chaîne d'attention ZML `QK → mask → softmax → context` validée bout-en-bout vs oracles PyTorch indépendants.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -1216,15 +1216,114 @@ de `pjrt.zig`.**
 
 ---
 
-## P5.2.E (suite) — context
+## P5.2.E.context — ZML context dot : reader layer 15 × KV layer 13 (PASS, 31 mai 2026)
 
-> **Prérequis** : ~~E.0~~ ✅ · ~~E.1 QK scores~~ ✅ · ~~E.mask sliding réel~~ ✅ ·
-> ~~E.softmax~~ ✅ (tag `p5.2-esoftmax-zml-pass`). **QK + masque + softmax validés ZML↔PyTorch.**
+### Objectif
+**Dernier maillon** de l'attention forward : `context = probs @ V` (après QK/mask/softmax,
+**avant** `o_proj`). **Ferme P5.2.E** → première chaîne d'attention ZML complète. Comparer vs
+l'oracle PyTorch `context` (= `matmul(probs, repeat_kv(v_final, 8))`) figé en E.0.
 
-- **E.context** = `probs.dot(value_states, .k)` → context `[b,h,q,hd]` (réutilise la branche V
-  **corrigée** de D.5 canonique, `value = v_after_norm`). Première **chaîne d'attention ZML
-  complète** (QK → mask → softmax → context). GQA : `value_states = repeat_kv(v_final, 8)` côté
-  oracle, à reproduire en ZML (broadcast kvh 1 → h 8) avant le `dot(.k)`.
-- Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding) à
-  trancher. Le helper `zml.nn.rope` ne couvre pas `proportional + partial rotary`
-  (point rouge connu, cf D.4).
+### Périmètre strict
+- **Pipeline ZML** (GQA par split des têtes Q — **miroir exact d'E.1**, cf split de Q là-bas) :
+  ```zig
+  probs_split = probs.splitAxis(.h, .{ .h = v_final.dim(.h)=1, .hq = .auto=8 })  // [.b,.h=1,.hq=8,.q,.k]
+  context     = probs_split.dot(v_final, .k)                                     // [.b,.h=1,.hq=8,.q,.hd]
+  context     = context.merge(.{ .h = .{ .h, .hq } })                            // [.b,.h=8,.q,.hd]
+  context     = context.transpose(.{ .b, .h, .q, .hd })                          // ordre physique
+  ```
+  GQA : l'unique tête KV (`.h=1`) est le **batch** partagé par les 8 têtes Q (`.hq=8`) ;
+  `merge(.h,.hq)` → `head = h*8 + hq = hq` (h∈{0}), exactement `repeat_kv(v,8)` (toutes les
+  têtes Q attendent la même V). **Pas de scaling/softcap/re-softmax/o_proj** — juste la
+  contraction `probs@V` sur `.k`.
+- **3 tenseurs chargés** depuis `fixtures/p5_2_econtext_layer15_kv13.safetensors` (slim re-export
+  E.0 via `scripts/25_p5_2_econtext_export_fixture.py`) : `probs` (input), `v_final` (input,
+  tête KV taggée `.h` size 1), `context` (oracle).
+- **V = `v_final`** (RMSNorm sans scale, D.0b) — **PAS** `v_after_reshape` (V brut, bug D.0).
+  Garde anti-régression auto-contenue dans le script : `RMS(v_final, hd) ≈ 1` (propriété du
+  RMSNorm no-scale ; V brut ne l'aurait pas) — mesuré `max|RMS−1| = 4.77e-7`.
+- **Interdits stricts** : `o_proj` (vient après context), re-softmax, masque, scaling `1/√hd`,
+  softcap, layer 14 full attention.
+
+### Décision design (workflow de vérification adversariale, 4 agents)
+Avant codage, un workflow a fait tourner 4 agents lecture-seule en parallèle (dot ZML / contrat
+oracle / scope+nommage / adversarial). Apport décisif : **splitter PROBS** (le côté 8 têtes),
+**pas V**. Un agent avait d'abord tenté de splitter V (singleton `.h=1` → deux tags `.h` →
+`merge` donnerait 8×8=64 têtes, faux), puis basculait sur un broadcast. L'agent adversarial a
+validé le split-sur-probs (`GO_WITH_FIX`, `axis_order_correct`, `gqa_correct`) comme miroir exact
+de la GQA d'E.1, et fourni les assertions sanity (rang/shape, NaN/Inf, magnitude, fixed-points).
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/25_p5_2_econtext_export_fixture.py` | export safetensors slim depuis le `.pt` E.0 (3 tenseurs) |
+| `fixtures/p5_2_econtext_layer15_kv13.safetensors` | `probs` + `v_final` (inputs) + `context` (oracle) ~37 KB |
+| `fixtures/p5_2_econtext_layer15_kv13_manifest.json` | shapes/dtypes + pipeline + interdits |
+| `zml_runner/gemma4_context.zig` | runner ZML (split/dot/merge/transpose + sanity) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_context` (14c, sous quota comptime) |
+| `logs/P5_2_Econtext.log` | sortie `bazel run` (3090) |
+
+### Validation
+**Sanity sortie ZML** : NaN/Inf = false ; `max|context| = 6.265` (< ceil 10, layout non-scrambled).
+
+**3 blocks fixed-point vs oracle** (`context[0,0,0,:8]`, `context[0,0,3,:8]`, `context[0,7,3,:8]`,
+le dernier sur **h=7** → prouve la réplication GQA correcte) : **max_diff = 0.000** (bit-exact).
+
+**Scan global 8192 valeurs** :
+- max_abs = **0.000000** (bit-exact sur les 8192 fp32)
+- mean_abs = **0.000000**
+- Tolérance 1e-4 → marge infinie
+
+### Observation
+- **Bit-exact (max_abs = 0.0)** : la contraction `.k=4` est une somme de ≤ 4 termes fp32 ; sur des
+  inputs bit-identiques, PJRT-CPU (Eigen) et PyTorch BLAS produisent le **même arrondi** pour une
+  réduction aussi courte. Contraste avec les matmuls `q_proj`/QK (réduction `.h=1536`/`.hd=256`,
+  résidu ~1e-5) : le bruit d'accumulation croît avec la longueur de réduction ; à `k=4` il est nul.
+- **GQA prouvée** : le block `h=7` matche l'oracle au bit près → `merge(.h,.hq)` réplique bien
+  l'unique tête KV sur les 8 têtes Q, identique à `repeat_kv`.
+
+### Vérification anti-vacuous (un `max_abs=0.0` global est un drapeau jaune)
+Une revue adversariale a soulevé un risque légitime : un PASS bit-exact pourrait être un **faux
+positif** si le buffer résultat était un alias de l'oracle (`results.get(zml.Buffer)` renvoyant
+`context_oracle` au lieu du forward calculé). Deux preuves le réfutent :
+1. **Statique** : `forward()` ne référence QUE `self.probs` et `self.v_final`, jamais
+   `self.context_oracle` → le graphe compilé ne peut pas sortir l'oracle.
+2. **Empirique (test de perturbation)** : runner relancé sur une fixture à **oracle corrompu**
+   (`context := zeros`, `probs`/`v_final` intacts). Résultat : `Sanity max|context|=6.265` (le
+   forward sort de **vraies** valeurs, pas des zéros), **3 fixed-points PASS** (sortie réelle ==
+   littéraux hardcodés depuis `logs/21_*.log`, indépendants de la fixture), **scan FAIL**
+   `max_abs=6.265 @ flat_index 1866 (h=1)`. Conclusion : le buffer résultat **≠** oracle, le forward
+   calcule bien `probs@V`, et le `h=1` (non couvert par les fixed-points) porte de vraies valeurs —
+   le scan global 8192 couvre h=0..7. **PASS non-vacuous confirmé.** (Le scan exhaustif, pas les
+   3 spot-checks, est ce qui garantit l'absence de scramble de têtes ou de transpose fautif.)
+
+### Critères de clôture P5.2.E.context
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_context`)
+- [x] Run produit `context [1,8,4,256]` (rang 4 → `.k` bien contracté)
+- [x] NaN/Inf = false ; `max|context|` borné (6.26 < 10)
+- [x] 3/3 fixed-point blocks bit-exact (max_diff 0.0), dont `h=7` (GQA)
+- [x] Scan global 8192 valeurs : max_abs 0.0, mean_abs 0.0 (< tolerance 1e-4)
+- [x] V = `v_final` RMSNorm no-scale (garde RMS≈1, dev 4.77e-7) — pas de régression D.0
+- [x] Aucun `o_proj`, aucun re-softmax/mask/scaling/softcap, aucun layer 14
+- [x] Log archivé `logs/P5_2_Econtext.log`
+
+**Tag** : `p5.2-econtext-zml-pass`
+
+---
+
+## P5.2.E — COMPLET (31 mai 2026)
+
+> ~~E.0 oracle~~ ✅ · ~~E.1 QK scores~~ ✅ · ~~E.mask sliding réel~~ ✅ · ~~E.softmax~~ ✅ ·
+> ~~E.context~~ ✅ (tag `p5.2-econtext-zml-pass`).
+
+**Chaîne d'attention ZML complète validée bout-en-bout** pour le pilote reader layer 15
+(sliding) × KV writer layer 13 (sliding) : `Q·Kᵀ → masque sliding additif → softmax(.k) fp32 →
+probs·V`, chaque maillon comparé byte-à-byte à un oracle PyTorch indépendant (`modeling_gemma4`),
+sous tolérance 1e-4 (résidus observés : QK 2.4e-6, softmax 3e-8, context 0.0).
+
+### Reste à faire (hors P5.2.E)
+- **`o_proj`** (projection de sortie de l'attention) + résiduel — phase suivante.
+- **Layer 14 full attention** : `rope_type=proportional` + `partial_rotary_factor=0.25` +
+  `theta=1e6`. Le helper `zml.nn.rope` ne couvre que `default/llama3/yarn/linear` → patch ZML
+  requis (point rouge connu, cf D.4). Le pilote actuel reste sur le **sliding** (layer 13/15).
+- **Vrai sliding-window au compute** : E.mask a validé la logique de fenêtrage `causalAttnMask`
+  sur un cas mordant S=8/window=3 ; l'intégrer dans la chaîne quand S ≥ sliding_window=512.

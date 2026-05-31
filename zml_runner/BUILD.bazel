@@ -158,3 +158,15 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.E.context — ZML context dot (probs @ V, GQA split têtes Q, .k, no o_proj). Ferme P5.2.E.
+# Nom court (gemma4_context, 14c) pour rester sous le quota comptime pjrt.zig (cf E.softmax).
+zig_binary(
+    name = "gemma4_context",
+    main = "gemma4_context.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

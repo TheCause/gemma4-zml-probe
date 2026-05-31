@@ -1,0 +1,63 @@
+{
+  "source": "P5.2.E.context ZML context dot fixture (slim from E.0 oracle .pt)",
+  "derived_from": "p5_2_e0_attention_oracle_layer15_kv13.pt",
+  "reader_layer_idx": 15,
+  "writer_layer_idx": 13,
+  "layer_type": "sliding_attention",
+  "scope": "CONTEXT DOT ONLY (probs @ V, contraction .k) \u2014 pas de o_proj, pas de re-softmax/mask/scaling",
+  "gqa_note": "value_states = repeat_kv(v_final, 8) c\u00f4t\u00e9 PyTorch. C\u00f4t\u00e9 ZML : split des t\u00eates Q (.h 8 -> .h=1 batch + .hq=8) partageant l'unique t\u00eate KV de v_final (.h=1), puis dot(.k), merge(.h,.hq), transpose. Miroir exact de la GQA de E.1 (QK scores).",
+  "v_source": "v_final (V RMSNorm sans scale, D.0b) \u2014 surtout PAS v_after_reshape (V brut, bug D.0)",
+  "tensors": {
+    "probs": {
+      "shape": [
+        1,
+        8,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    },
+    "v_final": {
+      "shape": [
+        1,
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "context": {
+      "shape": [
+        1,
+        8,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "probs   = load -> tags {.b, .h, .q, .k}     [1,8,4,4]",
+    "v_final = load -> tags {.b, .h, .k, .hd}    [1,1,4,256]  (t\u00eate KV tagg\u00e9e .h, size 1)",
+    "probs_split = probs.splitAxis(.h, {.h = v_final.dim(.h)=1, .hq = .auto=8})  [1,1,8,4,4]",
+    "context = probs_split.dot(v_final, .k)   [1,1,8,4,256]",
+    "context = context.merge({.h = {.h, .hq}})   [1,8,4,256]",
+    "context = context.transpose({.b,.h,.q,.hd})",
+    "compare context vs oracle context, tol\u00e9rance 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "expected_zml_residual_hint": "matmul probs@V PJRT-CPU vs PyTorch BLAS (r\u00e9duction .k=4). Jitter QK E.1 (~2.4e-6) + softmax (~0) propag\u00e9s, plus le r\u00e9sidu de ce matmul. Attendu << 1e-4.",
+  "checks": {
+    "v_final_rms_dev": 4.76837158203125e-07,
+    "recompute_diff": 0.0
+  },
+  "interdits_p5_2_econtext": [
+    "o_proj (vient apr\u00e8s context)",
+    "re-softmax",
+    "masque (E.mask/E.softmax)",
+    "scaling 1/sqrt(head_dim)",
+    "softcap",
+    "layer 14 full attention"
+  ],
+  "completes": "P5.2.E (cha\u00eene d'attention ZML compl\u00e8te : QK -> mask -> softmax -> context)"
+}
