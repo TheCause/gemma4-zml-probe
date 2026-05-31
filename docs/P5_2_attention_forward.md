@@ -919,14 +919,83 @@ la RMSNorm fp32 PJRT-CPU vs PyTorch, sans la contribution du matmul. `with_scale
 
 ---
 
-## P5.2.E (à venir) — sliding mask au compute
+## P5.2.E.0 — PyTorch oracle attention : reader layer 15 × KV layer 13 (PASS, 31 mai 2026)
 
-> **Prérequis** : ~~D.2b~~ ✅ · ~~re-run D.5~~ ✅ (V corrigé, `value = v_after_norm`,
-> tag `p5.2-d5-kv-slot-mock-pass`). **Branche V réparée de bout en bout** — E.0 est
-> débloqué. E.0 sera une nouvelle frontière : premier QK / softmax / context.
+### Objectif
+Produire l'**oracle PyTorch de la première attention effective** : layer 15 (reader,
+sliding) lit le KV partagé produit par layer 13 (writer, sliding). Calcul
+`Q15 × K13ᵀ → masque → softmax → V13 → context`. Aucun ZML, aucun chargement de
+modèle : on relit `q_final` (C.0) et `k_final`/`v_final` (D.0b corrigé) et on
+reproduit `eager_attention_forward` de `modeling_gemma4.py` (5.9.0, L~982-1015).
 
-P5.2.D branche K validée end-to-end (D.1/D.3/D.4 → D.5 K) ; branche V rouverte par
-D.0b (oracle corrigé), ZML V à refaire (D.2b + D.5). Chaîne K saturée par les
-résidus matmul (5.36e-7 K).
+### Périmètre strict
+- **Pipeline** (fidèle à `eager_attention_forward`, source de vérité) :
+  ```python
+  key_states   = repeat_kv(k_final, 8)                          # GQA 1 -> 8  [1,8,4,256]
+  value_states = repeat_kv(v_final, 8)                          #             [1,8,4,256]
+  scores_raw   = matmul(q_final, key_states.transpose(2,3)) * 1.0   # scaling=1.0  [1,8,4,4]
+  scores_masked= scores_raw + causal_mask                       # masque ADDITIF (finfo.min)
+  probs        = softmax(scores_masked, dim=-1, dtype=fp32)     #             [1,8,4,4]
+  context      = matmul(probs, value_states)                    #             [1,8,4,256]
+  ```
+- **Faits Gemma4 verrouillés** : `scaling = 1.0` (PAS 1/√head_dim), **pas de softcap
+  d'attention**, GQA `num_key_value_groups = 8`, masque additif, softmax fp32,
+  `value = v_after_norm` (V RMSNorm sans scale, jamais V brut).
+- **Masque** : layer_type `sliding_attention`, `sliding_window = 512`. On construit le
+  **vrai masque sliding** et on **prouve** qu'à `S=4 < 512` il est strictement
+  identique au masque causal (`torch.equal` PASS). **E.0 ne valide donc PAS le
+  comportement sliding-window réel** — réservé à E.mask (synthétique S=8, window=3).
+- **Interdits** : ZML, runners ZML, E.1, layer 14 (full attention), softcap
+  d'attention, scaling `1/√head_dim`, V brut non normé, vrai sliding prétendu validé.
 
-Prochaine sous-gate : **P5.2.E** = sliding mask au compute (pas troncation cache). Application de la fenêtre `sliding_window` (cf P5.0 config) sur les scores d'attention, sans toucher au layout du cache. Premier morceau qui implique une opération QK donc l'introduction du Q path (réutilisation C.3 q_rope). Cadrage en session dédiée requis. Attention au choix layer 14 (full attention) vs layer 13/15 (sliding) pour le pilote E.
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/21_attention_oracle_layer15_reader_kv13.py` | oracle PyTorch attention (relit fixtures, pas de modèle) |
+| `fixtures/p5_2_e0_attention_oracle_layer15_kv13.pt` | tenseurs (inputs + `scores_raw`/`scores_masked`/`probs`/`context`) + `meta` embarquée |
+| `logs/21_attention_oracle_layer15_reader_kv13.log` | sortie (md5 fixture M1 ≡ 3090 `f88ea58d…`) |
+
+### Résultats numériques observés
+- Shapes : `scores_raw` `[1,8,4,4]`, `scores_masked` `[1,8,4,4]`, `probs` `[1,8,4,4]`, `context` `[1,8,4,256]` ✓
+- **V correction check** : `max|v_final − v_raw| = 0.7768` (V RMSNormé sans scale, anti-régression bug D.0) ✓
+- **Sliding ≡ causal** (`torch.equal`) = `True` à S=4 < 512 ✓
+- **Softmax** : `max|Σ probs − 1| = 1.19e-7` (< 1e-6) ; **masse futur masqué = 0.0 strict** ✓
+- Causalité par position : q0 voit t0 ; q1 voit t0..t1 ; q2 voit t0..t2 ; q3 voit t0..t3 (masse visible = 1.0, futur = 0) ✓
+- Cross-check `k_final`/`v_final` vs fixture D.5 slim : `|Δ| = 0.0` strict ✓
+- Fixed point `probs[0,0,0,:4] = [1, 0, 0, 0]` (q0 totalement sur t0) ; `probs[0,0,3,:4] = [0.0098, 0.0352, 0.7669, 0.1881]` (somme 1).
+
+### Finding capitalisé (E.0)
+- `scores_masked` a `mean = −inf`, `std = inf` dans les stats : artefact **attendu** du
+  masque additif `finfo.min` (≈ −3.4e38) sur 6 des 16 positions par head. Le **calcul**
+  reste sain (softmax sans NaN, probs propres, futur = 0 exact). Les valeurs masquées
+  sont sauvées telles quelles dans la fixture (pas de nettoyage : fidélité à la source).
+- E.0 établit la **référence** que E.1 (ZML QK scores) comparera contre `scores_raw`.
+
+### Critères de clôture P5.2.E.0
+- [x] Script tourne sur 3090 venv `/data/venvs/gemma4-probe` (EXIT=0)
+- [x] Toutes les shapes conformes au contrat
+- [x] Masque causal S=4 correct + sliding≡causal prouvé (`torch.equal`)
+- [x] Softmax somme à 1 (err 1.19e-7) ; futur masqué ≈ 0 (0.0 strict)
+- [x] V normé confirmé (`max|v_final − v_raw| = 0.7768`, pas de V brut)
+- [x] Fixture sauvée + md5 M1 ≡ 3090 (`f88ea58d…`)
+- [x] Doc explicite : **E.0 ne valide PAS le sliding-window réel** (réservé E.mask)
+- [x] Aucun ZML, aucun runner ZML touché, E.1 non ouvert
+
+**Tag** : `p5.2-e0-pytorch-attention-oracle-pass`
+
+---
+
+## P5.2.E (suite) — E.1 ZML QK, puis sliding mask réel
+
+> **Prérequis** : ~~D.2b~~ ✅ · ~~re-run D.5~~ ✅ · ~~E.0 oracle PyTorch~~ ✅
+> (tag `p5.2-e0-pytorch-attention-oracle-pass`). **Référence attention établie.**
+
+- **E.1 (prochaine)** = **ZML QK scores only** : reproduire `scores_raw` côté ZML
+  (dot Q×Kᵀ avec broadcast GQA, scaling 1.0) et comparer au `scores_raw` de la
+  fixture E.0 (tolérance 1e-4, résidu matmul PJRT-CPU attendu ~1e-5).
+- **E.mask (plus tard)** = sliding mask **réel** au compute, à tester sur un cas
+  synthétique `S=8, window=3` où le masque sliding diffère effectivement du causal
+  (E.0 ne couvre que le régime dégénéré S < window).
+- Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding)
+  à trancher pour la suite E. Le helper `zml.nn.rope` ne couvre pas encore
+  `proportional + partial rotary` (point rouge connu, cf D.4).
