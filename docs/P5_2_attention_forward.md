@@ -1057,16 +1057,86 @@ monolithique, et les backends `cuda_fa2/fa3` (flash attention) fusionnent le ker
 
 ---
 
-## P5.2.E (suite) — sliding mask réel, puis softmax + context
+## P5.2.E.mask — ZML masque sliding RÉEL, cas synthétique S=8/window=3 (PASS, 31 mai 2026)
 
-> **Prérequis** : ~~E.0 oracle~~ ✅ · ~~E.1 ZML QK scores~~ ✅
-> (tag `p5.2-e1-zml-qk-scores-pass`). **Scores bruts validés ZML↔PyTorch.**
+### Objectif
+Fermer le **trou de couverture** laissé par E.0/E.1 : à `S=4` et `sliding_window=512`,
+le masque sliding **dégénère en causal** (la fenêtre ne mord jamais), donc E.0/E.1 ne
+valident que le régime causal. Ici, cas synthétique `S=8, window=3` où le sliding
+**diffère effectivement** du causal, pour valider la vraie logique de fenêtrage en ZML.
 
-- **E.mask** = sliding mask **réel** au compute, sur cas synthétique `S=8, window=3`
-  où le masque sliding diffère effectivement du causal (E.0/E.1 ne couvrent que le
-  régime dégénéré S < window). Oracle PyTorch puis ZML (`add` du masque additif).
-- **E.softmax / E.context** = softmax(.k) en fp32 puis `dot(V, .k)` → context `[b,h,q,hd]`
-  (réutilise `value_states` de la branche V D.5). Première chaîne d'attention complète.
+### Convention (source de vérité, triple-validée)
+`transformers/masking_utils.py` `sliding_window_overlay` : `kv_idx > q_idx - sliding_window`,
+composé (`and_masks`) avec le causal `kv_idx <= q_idx`. Le helper ZML
+`zml.nn.causalAttnMask` implémente exactement la même chose (`k.cmp(.LE,q) AND q.cmp(.LT,k+window)`).
+La table dérivée == celle attendue :
+```
+q=0:[o.......] q=1:[oo......] q=2:[ooo.....] q=3:[.ooo....]
+q=4:[..ooo...] q=5:[...ooo..] q=6:[....ooo.] q=7:[.....ooo]   (visible ⟺ q-3 < k <= q)
+```
+→ **21 visibles / 43 masquées** ; q=7 masqué = `[0,1,2,3,4]`.
+
+### Périmètre strict (mask only)
+- **Pipeline ZML** (multi-return) :
+  ```zig
+  const mask = zml.nn.causalAttnMask(.{ .q = 8, .k = 8 }, .f32, 3);  // {.q,.k} additif (0 / finfo.min)
+  const scores_masked = self.scores_synth.add(mask.broad(self.scores_synth.shape())); // broadcast sur .b,.h
+  return .{ mask, scores_masked };
+  ```
+- **Garde déterminante** : `causalAttnMask` n'applique la fenêtre que si `qlen >= window_len`.
+  À `S=4 >= 512` = faux → causal pur (c'est ce qui faisait dégénérer E.0/E.1). À `S=8 >= 3`
+  = vrai → la fenêtre **mord**.
+- **Interdits** : softmax, context, `dot(V)`, layer 14, full attention, scaling, RoPE, Q/K/V proj.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/23_p5_2_emask_oracle.py` | oracle numpy from-scratch (masque + scores synthétiques) + assertions table |
+| `fixtures/p5_2_emask_sliding_layer_synthetic.safetensors` | scores_synth [1,2,8,8], sliding_mask [8,8], scores_masked [1,2,8,8] |
+| `fixtures/p5_2_emask_sliding_layer_synthetic_manifest.json` | convention + pipeline hint |
+| `zml_runner/gemma4_sliding_mask.zig` | runner ZML (construit le masque via helper natif + applique) |
+| `zml_runner/BUILD.bazel` | cible `gemma4_sliding_mask` |
+| `logs/P5_2_Emask_sliding_mask.log` | sortie `bazel run` |
+
+### Résultats numériques observés
+- Forward shapes : `mask {q=8,k=8}`, `scores_masked {b=1,h=2,q=8,k=8}` ✓
+- Grille ZML reconstruite **identique** à l'oracle (bande diagonale largeur 3 qui glisse)
+- **mask** : masked=**43**/64, visible max_diff=**0.0**, struct_mismatch=**0**
+- **scores_masked** : masked=**86**/128 (43×2 heads), visible max_diff=**0.0**, struct_mismatch=**0**
+- Comparaison **robuste finfo.min** : visible bit-exact, masqué `< -1e30`, structure 100 % identique.
+
+### Vérification adversariale
+- **Constructions indépendantes** : oracle = numpy (`k≤q & k>q−W`), ZML = helper `causalAttnMask`.
+  Convergence **bit-exact** (0 mismatch / 64). Un helper bogué divergerait.
+- **La fenêtre mord** : causal pur masquerait **28** positions, le sliding en masque **43**
+  (**+15** positions anciennes retirées). Si le `window` était ignoré (régime E.0/E.1), on
+  verrait 28, pas 43. Preuve numérique que le sliding ≠ causal sur ce cas.
+- **Bit-exact attendu et sain** : masque additif + add, pas de matmul → déterminisme IEEE754
+  (≠ E.1 où le matmul donnait 2.4e-6). Le 0.0 confirme add exact + scores identiques.
+
+### Critères de clôture P5.2.E.mask
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_sliding_mask`)
+- [x] mask shape `[8,8]` broadcast-compatible `[1,1,8,8]` ; positions futures (k>q) masquées
+- [x] positions trop anciennes (k ≤ q−3) masquées ; fenêtre taille 3 respectée
+- [x] `scores_masked` ZML == oracle (visible bit-exact, masqué structurellement identique)
+- [x] masked count = 43 (mask) / 86 (scores) conforme ; struct_mismatch = 0
+- [x] Aucun softmax, aucun context, aucun `dot(V)`, aucun layer 14
+- [x] Log archivé `logs/P5_2_Emask_sliding_mask.log`
+
+**Tag** : `p5.2-emask-sliding-mask-pass`
+
+---
+
+## P5.2.E (suite) — softmax, puis context
+
+> **Prérequis** : ~~E.0~~ ✅ · ~~E.1 QK scores~~ ✅ · ~~E.mask sliding réel~~ ✅
+> (tag `p5.2-emask-sliding-mask-pass`). **QK + masque sliding validés ZML↔PyTorch.**
+
+- **E.softmax** = `softmax(scores_masked, .k)` en fp32 (cf `sdpa` : `.convert(.f32).softmax(.k)`).
+  Oracle = `probs` de E.0 (sur le cas réel S=4) ou un cas synthétique mordant. Vérifier
+  Σ=1 et fuite nulle sur les positions masquées.
+- **E.context** = `probs.dot(value_states, .k)` → context `[b,h,q,hd]` (réutilise la branche V
+  D.5). Première **chaîne d'attention ZML complète** (QK → mask → softmax → context).
 - Cadrage layer 14 (full attention, p-RoPE proportional) vs layer 13/15 (sliding) à
   trancher. Le helper `zml.nn.rope` ne couvre pas `proportional + partial rotary`
   (point rouge connu, cf D.4).

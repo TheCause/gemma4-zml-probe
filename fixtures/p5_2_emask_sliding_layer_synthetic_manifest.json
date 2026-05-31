@@ -1,0 +1,56 @@
+{
+  "source": "P5.2.E.mask oracle \u2014 sliding window mask r\u00e9el, cas synth\u00e9tique S=8 window=3",
+  "spec_refs": [
+    "transformers/masking_utils.py sliding_window_overlay (kv_idx > q_idx - sliding_window) + causal",
+    "zml/nn.zig causalAttnMask (k.cmp(.LE,q) AND q.cmp(.LT,k+window)) \u2014 helper ZML utilis\u00e9 par E.mask"
+  ],
+  "S": 8,
+  "window": 3,
+  "n_heads": 2,
+  "seed": 1337,
+  "convention": "visible <=> (k <= q) AND (k > q - window) <=> q-window < k <= q",
+  "n_visible": 21,
+  "n_masked": 43,
+  "min_val_finfo_f32": -3.4028234663852886e+38,
+  "tensors": {
+    "scores_synth": {
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ],
+      "dtype": "float32"
+    },
+    "sliding_mask": {
+      "shape": [
+        8,
+        8
+      ],
+      "dtype": "float32"
+    },
+    "scores_masked": {
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "mask = zml.nn.causalAttnMask(.{ .q = 8, .k = 8 }, .f32, 3)   -> {.q,.k} additif",
+    "compare mask vs sliding_mask oracle (structure 0/finfo.min)",
+    "scores_masked = scores_synth.add(mask.broad(scores_synth.shape()))",
+    "compare scores_masked vs oracle (visible bit-exact, masqu\u00e9 < -1e30)"
+  ],
+  "scope": "mask only \u2014 pas de softmax, pas de context, pas de dot(V), pas de layer 14",
+  "interdits_p5_2_emask": [
+    "softmax",
+    "context",
+    "dot(V)",
+    "layer 14",
+    "full attention"
+  ]
+}

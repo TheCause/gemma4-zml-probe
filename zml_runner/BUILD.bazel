@@ -133,3 +133,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.E.mask — ZML sliding window mask réel (causalAttnMask window=3, S=8 mordant, add only).
+zig_binary(
+    name = "gemma4_sliding_mask",
+    main = "gemma4_sliding_mask.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
