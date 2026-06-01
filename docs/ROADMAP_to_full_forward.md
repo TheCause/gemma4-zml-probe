@@ -57,8 +57,14 @@ residual = h ; h = rmsNorm(h).mul(pre_ff_w)
 h = h.dot(gate_w).gelu().mul(h.dot(up_w)).dot(down_w)                         # H
 out = residual + rmsNorm(h).mul(post_ff_w)                                    # H
 ```
-Seul maillon non isolé : `input_layernorm` (= rmsNorm+mul de G/H → trivial). Fixture = poids layer 13
-+ cos/sin sliding + mask + layer_input + output oracle.
+Maillons non encore isolés pour la couche RÉELLE complète :
+- `input_layernorm` (= rmsNorm+mul de G/H → trivial).
+- **Bloc PLE per-layer** (modeling_gemma4 L1429-1438, actif car `hidden_size_per_layer_input>0`) :
+  `residual + post_per_layer_input_norm(per_layer_projection(gelu(per_layer_input_gate(h)) * per_layer_input))`
+  puis `× layer_scalar`. 3 nouveaux poids (`per_layer_input_gate`, `per_layer_projection`,
+  `post_per_layer_input_norm`) + `per_layer_input` (du pipeline PLE P4.4) + `layer_scalar`. Ops toutes
+  de types validés (Linear=dot, gelu, mul, RMSNorm) → gate P5.3.bis avant l'assemblage couche.
+Fixture = poids layer 13 + cos/sin sliding + mask + per_layer_input + layer_input + output oracle.
 
 ### P5.7 — runtime 35 couches end-to-end (productionisation)
 Au-delà de la composition : (1) loader 35 couches (producers 0-14 vs readers 15-34 ; MLP 6144 vs
