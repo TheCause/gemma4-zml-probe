@@ -51,7 +51,11 @@ seront validées en ZML** (assemblage = composition mécanique).
 ## Journal des gates fermées (mode autonome, 1 juin 2026)
 - **P5.2.H** (MLP, double-wide 12288) — `p5.2-h-mlp-zml-pass` — scan 5.34e-5.
 - **P5.6** (full attn Q-rope manuelle partielle, layer 14, head_dim 512) — `p5.6-full-qrope-zml-pass` — scan 7.99e-6. **Risque levé.**
-- **P5.4** (embedding gather + scale √1536, slice vocab 4096) — `p5.4-embed-zml-pass` — **bit-exact** (gather=sélection exacte, scale=mul scalaire).
+- **P5.4** (embedding gather + scale √1536, slice vocab 4096) — `p5.4-embed-zml-pass` — **bit-exact**.
+- **P5.5** (head : final norm + lm_head tied + softcap 30·tanh(x/30), slice vocab 4096) — `p5.5-head-zml-pass` — scan 5.44e-5.
+
+## ✅ TOUTES LES OPS DISTINCTES DU FORWARD VALIDÉES EN ZML (1 juin 2026)
+gather+scale · rmsNorm(+scale, pattern Llama) · dot (toutes projections + lm_head) · RoPE sliding (zml.nn.rope) + RoPE full partial MANUELLE (split/neg/concat + cos/sin oracle) · QK GQA (splitAxis) · sliding mask (causalAttnMask) · softmax(.k) · context GQA · gelu (Tensor.gelu=gelu_pytorch_tanh) · residual add · softcap (tanh) · KV-sharing routing (policy). Inconnus architecturaux résolus : double-wide MLP (12288, layers 15-34), full attn head_dim 512 + partial rotary 0.25, tied lm_head, embed_scale √1536, softcap 30. **Reste = INTÉGRATION (composition d'ops validées) : P5.3 (couche e2e), P5.7 (35 couches + KV cache + PLE).**
 
 ## Découvertes architecturales (vs hypothèses initiales)
 - **MLP double-wide** : layers KV-shared (15-34) ont intermediate=12288 (`use_double_wide_mlp`) ; 0-14 = 6144.

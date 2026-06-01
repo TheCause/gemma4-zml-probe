@@ -225,3 +225,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.5 — ZML head (final norm + lm_head tied + softcap 30*tanh(x/30)).
+zig_binary(
+    name = "gemma4_head",
+    main = "gemma4_head.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

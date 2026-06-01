@@ -1,0 +1,60 @@
+{
+  "source": "P5.5 PyTorch oracle head (final norm + lm_head tied + softcap), vocab slice 4096",
+  "spec_refs": [
+    "Gemma4TextModel.forward norm finale ; lm_head tied = embed_tokens.weight",
+    "final_logit_softcapping=30 : logits = 30*tanh(logits/30)"
+  ],
+  "config": {
+    "hidden": 1536,
+    "vocab_slice": 4096,
+    "seq_len": 4,
+    "rms_eps": 1e-06,
+    "softcap": 30.0,
+    "lm_head_tied": true
+  },
+  "tensors": {
+    "hidden_final": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "norm_weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "lm_head_slice": {
+      "shape": [
+        4096,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "logits_out": {
+      "shape": [
+        1,
+        4,
+        4096
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "hidden_final {.b,.s,.d=1536} ; norm_weight {.d} ; lm_head_slice {.voc=4096,.d=1536}",
+    "normed = rmsNorm(hidden_final,.d,1e-6).mul(norm_weight.broad)",
+    "logits = normed.dot(lm_head_slice,.d)   {.b,.s,.voc}",
+    "logits_out = logits.scale(1/30).tanh().scale(30)   # softcap",
+    "compare vs logits_out oracle [1,4,4096], tol 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "interdits_p5_5": [
+    "couches d\u00e9codeur",
+    "embedding",
+    "PLE"
+  ],
+  "note": "lm_head pleine table 262144 = 1.6GB impraticable ; slice 4096 (m\u00e9caniquement identique)."
+}
