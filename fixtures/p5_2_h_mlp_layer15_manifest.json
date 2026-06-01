@@ -1,0 +1,101 @@
+{
+  "source": "P5.2.H PyTorch oracle MLP feed-forward (layer 15)",
+  "spec_refs": [
+    "modeling_gemma4.py L1408-1427 (pre_ff_norm -> mlp -> post_ff_norm -> +residual)",
+    "Gemma4TextMLP.forward : down_proj(act_fn(gate_proj(x)) * up_proj(x))",
+    "act_fn = gelu_pytorch_tanh ; zml Tensor.gelu = meme formule tanh-approx"
+  ],
+  "layer_idx": 15,
+  "config": {
+    "hidden": 1536,
+    "intermediate": 12288,
+    "seq_len": 4,
+    "rms_eps": 1e-06,
+    "activation": "gelu_pytorch_tanh",
+    "bias": false
+  },
+  "residual_note": "residual = attn_sublayer_out (P5.2.G) = input MLP ET r\u00e9siduel (cha\u00eene de couche).",
+  "pipeline": [
+    "x = pre_feedforward_layernorm(residual)",
+    "gate = gate_proj(x) ; up = up_proj(x)   [1,4,6144]",
+    "gated = gelu_pytorch_tanh(gate) * up",
+    "mlp_out = down_proj(gated)   [1,4,1536]",
+    "y = post_feedforward_layernorm(mlp_out)",
+    "out = residual + y"
+  ],
+  "tensors": {
+    "residual": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "gate_proj_weight": {
+      "shape": [
+        12288,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "up_proj_weight": {
+      "shape": [
+        12288,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "down_proj_weight": {
+      "shape": [
+        1536,
+        12288
+      ],
+      "dtype": "float32"
+    },
+    "pre_ff_norm_weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "post_ff_norm_weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "mlp_sublayer_out": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "residual = load {.b,.q,.d=1536}",
+    "gate/up_proj_weight = {.f=6144,.d=1536} ; down_proj_weight = {.d=1536,.f=6144}",
+    "x = rmsNorm(residual,.d,1e-6).mul(pre_ff_w.broad)",
+    "gate = x.dot(gate_proj_weight,.d) ; up = x.dot(up_proj_weight,.d)   {.b,.q,.f}",
+    "gated = gate.gelu().mul(up)",
+    "mlp_out = gated.dot(down_proj_weight,.f)   {.b,.q,.d}",
+    "y = rmsNorm(mlp_out,.d,1e-6).mul(post_ff_w.broad)",
+    "out = residual.add(y)",
+    "compare vs mlp_sublayer_out, tol 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "checks": {
+    "gelu_diff": 0.0,
+    "gating_order_diff": 38.79087448120117,
+    "residual_add_shift": 8.986104011535645
+  },
+  "interdits_p5_2_h": [
+    "attention",
+    "input_layernorm",
+    "per_layer_input (PLE)",
+    "layer 14"
+  ],
+  "closes": "avec P5.2.G : COUCHE D\u00c9CODEUR sliding compl\u00e8te (attention + MLP)"
+}

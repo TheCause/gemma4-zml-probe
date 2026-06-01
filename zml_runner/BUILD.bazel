@@ -192,3 +192,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.H — ZML MLP feed-forward (double-wide 12288 ; gate/up + gelu_tanh + down + sandwich norms).
+zig_binary(
+    name = "gemma4_mlp",
+    main = "gemma4_mlp.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

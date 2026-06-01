@@ -1475,7 +1475,54 @@ out    = residual.add(scaled)
 > `q/k/v proj → norm → RoPE → QK → masque sliding → softmax → context → o_proj → post_attn_norm → +residual`.
 
 ### Reste (vers la couche décodeur complète)
-- **MLP** : `gate_proj`/`up_proj` + activation (GeGLU ?) + `down_proj`, encadré par
-  `pre_feedforward_layernorm` et `post_feedforward_layernorm` + résiduel.
-- **`input_layernorm`** + câblage end-to-end du résiduel (assemblage de couche).
-- **Layer 14 full attention** (patch `zml.nn.rope` proportional+partial rotary — point rouge).
+- ~~**MLP**~~ ✅ **P5.2.H** (cf section ci-dessous) → couche décodeur sliding complète.
+- **`input_layernorm`** + câblage end-to-end du résiduel (assemblage de couche, P5.3).
+- **Layer 14 full attention** (RoPE proportional — RoPE manuelle via cos/sin oracle, P5.6).
+
+---
+
+## P5.2.H — ZML MLP feed-forward : ferme la couche décodeur sliding (PASS, 1 juin 2026)
+
+### Objectif
+Sous-couche FFN : `out = residual + post_ff_norm(mlp(pre_ff_norm(residual)))`. Avec P5.2.G,
+**ferme une COUCHE DÉCODEUR sliding complète** (attention + MLP).
+
+### Ground truth + découverte
+`Gemma4TextDecoderLayer.forward` L1408-1427 + `Gemma4TextMLP` : `down(gelu_pytorch_tanh(gate(x))*up(x))`.
+- **DÉCOUVERTE (oracle=vérité)** : layer 15 = KV-shared (reader) + `config.use_double_wide_mlp=True`
+  → **intermediate = 2×6144 = 12288** (modeling_gemma4 L1057-1060). Layers 0-14 (producers) = 6144,
+  layers 15-34 (readers) = 12288. L'analyse initiale supposait 6144 ; le poids `[12288,1536]` a
+  corrigé. **Pour l'assemblage : intermediate dépend de la couche.**
+- `gelu_pytorch_tanh` = `Tensor.gelu` ZML (`0.5x(1+tanh(√(2/π)(x+0.044715x³)))`) — confirmé identique (0.0).
+- Gating : `gelu(gate)*up` (activation sur gate seul), PAS `gelu(gate*up)` — vérifié (diff 38.8).
+- pre/post_feedforward_layernorm = Gemma4RMSNorm with_scale (pattern Llama). Linears bias=False.
+
+### Pipeline ZML
+```zig
+x      = rmsNorm(residual,.d,1e-6).mul(pre_ff_w.broad)
+gate   = x.dot(gate_proj_weight,.d) ; up = x.dot(up_proj_weight,.d)   // {.b,.q,.f=12288}
+gated  = gate.gelu().mul(up)
+mlp_out= gated.dot(down_proj_weight,.f)                                // {.b,.q,.d=1536}
+y      = rmsNorm(mlp_out,.d,1e-6).mul(post_ff_w.broad)
+out    = residual.add(y)
+```
+`residual` = `attn_sublayer_out` (P5.2.G) = input MLP ET résiduel (chaîne de couche).
+Oracle = modules réels Gemma4RMSNorm + ACT2FN['gelu_pytorch_tanh'].
+
+### Livrables
+`scripts/28_p5_2_h_mlp_oracle.py`, `fixtures/p5_2_h_mlp_layer15.safetensors` (~226 MB, 3090 only),
+`zml_runner/gemma4_mlp.zig` + `BUILD` (`gemma4_mlp`), `logs/P5_2_Hmlp.log`.
+
+### Validation
+- Forward `[1,4,1536]`, NaN/Inf=false, `max|out|=103.6` (< 200, résidual stream Gemma grandit).
+- 2 fixed-point blocks : max_diff **1.43e-5**.
+- Scan global 6144 : **max_abs 5.34e-5** @ `(q=0,d=221)`, mean_abs 4.85e-6, max_rel 1.62e-3.
+  Tolérance 1e-4 → marge ~1.9× (plus gros résidu du projet : réduction `down_proj .f=12288` +
+  magnitudes ~100 ; relatif ~1e-6). Non-nul → réfute echo.
+
+**Tag** : `p5.2-h-mlp-zml-pass`
+
+> **COUCHE DÉCODEUR SLIDING COMPLÈTE** : input_layernorm (à câbler) → attention (E/F/G) →
+> +residual → MLP (H) → +residual. Maillons tous validés ; reste l'assemblage e2e (P5.3) +
+> input_layernorm + layers full (P5.6) + embedding/head (P5.4/5.5) + multi-couches (P5.7).
+> Voir `docs/ROADMAP_to_full_forward.md`.
