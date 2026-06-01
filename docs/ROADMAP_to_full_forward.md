@@ -36,6 +36,39 @@ final_logit_softcapping=30.0. `full_attention` aux couches 4,9,14,19,24,29,34 (r
 - **PLE** : pipeline auxiliaire (embed_tokens_per_layer + per_layer_model_projection + norm) si
   `hidden_size_per_layer_input>0` — déjà partiellement fait en P4.4, à réintégrer en P5.7.
 
+## Recette d'assemblage (phase intégration — toutes les ops ci-dessous sont VALIDÉES)
+
+### P5.3 — couche décodeur sliding end-to-end (1 couche, bounded, sans KV cache/PLE)
+Oracle = `Gemma4TextDecoderLayer(config, layer_idx=13)` réel (producer sliding, intermediate 6144),
+appelé avec `position_embeddings=rotary(h,pos,"sliding_attention")`, `attention_mask`=sliding causal
+(S=4 → causal), `shared_kv_states={}`, `past_key_values=None`. ZML compose en UN forward les
+maillons déjà validés :
+```
+residual = layer_input                                  # synthétique pré-norm
+h = rmsNorm(layer_input).mul(input_layernorm_w)         # NOUVEAU poids input_ln (même pattern C.2/G)
+q = h.dot(q_proj_w).reshape.rmsNorm.mul(q_norm_w) ; zml.nn.rope(q, sliding)   # C.1/C.2/C.3
+k = h.dot(k_proj_w)...rmsNorm.mul(k_norm_w) ; zml.nn.rope(k, sliding)         # D.1/D.3/D.4
+v = h.dot(v_proj_w)...rmsNorm(no scale)                                        # D.2/D.2b
+scores = splitAxis(q).dot(k,.hd).merge.transpose ; += causalAttnMask          # E.1/E.mask
+probs = softmax(scores,.k) ; ctx = splitAxis(probs).dot(v,.k).merge.transpose # E.softmax/E.context
+attn = ctx.transpose.merge(têtes).dot(o_proj_w)                               # F
+h = residual + rmsNorm(attn).mul(post_attn_w)                                 # G
+residual = h ; h = rmsNorm(h).mul(pre_ff_w)
+h = h.dot(gate_w).gelu().mul(h.dot(up_w)).dot(down_w)                         # H
+out = residual + rmsNorm(h).mul(post_ff_w)                                    # H
+```
+Seul maillon non isolé : `input_layernorm` (= rmsNorm+mul de G/H → trivial). Fixture = poids layer 13
++ cos/sin sliding + mask + layer_input + output oracle.
+
+### P5.7 — runtime 35 couches end-to-end (productionisation)
+Au-delà de la composition : (1) loader 35 couches (producers 0-14 vs readers 15-34 ; MLP 6144 vs
+12288 ; sliding head_dim 256 vs full 512) ; (2) **KV cache YOCO** : producers écrivent
+`shared_kv_states`, readers lisent (sliding→13, full→14) via policy table P5.1 (validée) ;
+(3) **PLE** par couche (P4.4) ; (4) masques sliding S≥512 + full ; (5) rotary sliding+full pré-calc ;
+(6) embedding (P5.4) → couches → norm+head (P5.5) ; (7) génération (decode incrémental) optionnelle.
+Phase d'ingénierie runtime (pas validation d'op). Sous-découper : P5.7.a (loader + 1 forward prefill
+complet vs HF logits) puis P5.7.b (decode/génération). Idéal en contexte frais.
+
 ## Discipline (inchangée)
 Oracle PyTorch = source de vérité (lire `modeling_gemma4.py`, ne rien supposer). Gate atomique :
 oracle 3090 → fixture → runner ZML → comparaison (fixed-points + scan global, tol 1e-4) → commit + tag.
