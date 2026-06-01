@@ -1,0 +1,56 @@
+{
+  "source": "P5.4 PyTorch oracle embedding gather + scale (vocab slice 4096)",
+  "spec_refs": [
+    "Gemma4TextScaledWordEmbedding : embed_tokens(ids) * sqrt(hidden_size)",
+    "P4.4 Gate B : scale sqrt(1536) bit-exact ; ici on ajoute le gather ZML"
+  ],
+  "config": {
+    "hidden": 1536,
+    "vocab_slice": 4096,
+    "seq_len": 4,
+    "embed_scale": 39.191835884530846,
+    "input_ids": [
+      2,
+      105,
+      2048,
+      4095
+    ]
+  },
+  "tensors": {
+    "embed_slice": {
+      "shape": [
+        4096,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "input_ids": {
+      "shape": [
+        1,
+        4
+      ],
+      "dtype": "int32"
+    },
+    "embed_out": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "embed_slice = load {.voc=4096,.d=1536} ; input_ids = load {.b=1,.s=4} i32",
+    "gathered = embed_slice.gather(.{.voc = input_ids}, .{})   {.b,.s,.d}",
+    "embed_out = gathered.scale(sqrt(1536))",
+    "compare vs embed_out oracle [1,4,1536], tol 1e-4 (attendu bit-exact : gather+scale exacts)"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "interdits_p5_4": [
+    "couches d\u00e9codeur",
+    "PLE auxiliaire",
+    "lm_head"
+  ],
+  "note": "table compl\u00e8te 262144 impraticable en fixture ; gather pleine table = m\u00e9caniquement identique."
+}

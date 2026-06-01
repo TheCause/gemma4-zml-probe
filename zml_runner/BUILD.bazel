@@ -214,3 +214,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.4 — ZML embedding gather + scale sqrt(1536).
+zig_binary(
+    name = "gemma4_embed",
+    main = "gemma4_embed.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

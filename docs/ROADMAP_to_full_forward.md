@@ -51,6 +51,7 @@ seront validées en ZML** (assemblage = composition mécanique).
 ## Journal des gates fermées (mode autonome, 1 juin 2026)
 - **P5.2.H** (MLP, double-wide 12288) — `p5.2-h-mlp-zml-pass` — scan 5.34e-5.
 - **P5.6** (full attn Q-rope manuelle partielle, layer 14, head_dim 512) — `p5.6-full-qrope-zml-pass` — scan 7.99e-6. **Risque levé.**
+- **P5.4** (embedding gather + scale √1536, slice vocab 4096) — `p5.4-embed-zml-pass` — **bit-exact** (gather=sélection exacte, scale=mul scalaire).
 
 ## Découvertes architecturales (vs hypothèses initiales)
 - **MLP double-wide** : layers KV-shared (15-34) ont intermediate=12288 (`use_double_wide_mlp`) ; 0-14 = 6144.
