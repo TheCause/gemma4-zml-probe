@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). **P5.2.E COMPLET** (E.0 oracle + E.1 QK scores + E.mask sliding + E.softmax + E.context PASS, 31 mai 2026) — chaîne d'attention ZML `QK → mask → softmax → context` validée bout-en-bout vs oracles PyTorch indépendants. **P5.2.F PASS** (o_proj, 1 juin 2026) — projection de sortie de l'attention.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). **P5.2.E COMPLET** (E.0 oracle + E.1 QK scores + E.mask sliding + E.softmax + E.context PASS, 31 mai 2026) — chaîne d'attention ZML `QK → mask → softmax → context` validée bout-en-bout vs oracles PyTorch indépendants. **P5.2.F PASS** (o_proj, 1 juin 2026) — projection de sortie de l'attention. **P5.2.G PASS** (post_attention_layernorm + résiduel, 1 juin 2026) — **sous-couche attention COMPLÈTE**.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -1401,7 +1401,81 @@ o_out = attn.dot(o_proj_weight, .m)                 // contract .m=2048 (mirror 
 
 **Tag** : `p5.2-f-oproj-zml-pass`
 
-### Reste après P5.2.F
-- **`post_attention_layernorm` + résiduel** → sous-couche attention complète (assemblage).
-- **MLP** (gate/up/down + activation) + son layernorm → couche décodeur complète.
+---
+
+## P5.2.G — ZML post_attention_layernorm + résiduel : ferme la sous-couche attention (PASS, 1 juin 2026)
+
+### Objectif
+Dernier maillon de la **sous-couche attention** : `out = residual + post_attention_layernorm(attn_output)`.
+
+### Ground truth (`Gemma4TextDecoderLayer.forward`, L1395-1406)
+```python
+residual = hidden_states                       # PRE input_layernorm
+hidden_states = input_layernorm(hidden_states)
+hidden_states, _ = self.self_attn(...)         # -> o_proj output (P5.2.F)
+hidden_states = post_attention_layernorm(hidden_states)
+hidden_states = residual + hidden_states
+```
+`post_attention_layernorm` = `Gemma4RMSNorm(1536, eps=1e-6, with_scale=True)` = `_norm(x) * weight`
+(pattern Llama, init weight=1, **PAS** `(1+weight)` ; cf q_norm/k_norm). Poids
+`...layers.15.post_attention_layernorm.weight` `[1536]` (mean 0.914, std 0.198 — **non uniforme**,
+exerce vraiment le broadcast mul, contrairement à k_norm uniforme).
+
+### Périmètre & note résiduel
+- **Inputs** : `attn_output` = `o_proj_out` (P5.2.F) ; `residual` = **stand-in** `hidden_input` (C.0).
+- ⚠️ Le VRAI résiduel est le hidden state **pré-`input_layernorm`**. Le pilote synthétique (C.0)
+  part du post-norm (input de q_proj) et ne modélise pas `input_layernorm`. On utilise donc
+  `hidden_input` comme stand-in : oracle ET ZML consomment le **même** tenseur → la gate valide
+  l'**opération** (`post_attn_norm + add`), pas la sémantique end-to-end du résiduel (déférée à
+  l'assemblage de couche, qui ajoutera `input_layernorm`).
+- **Interdits** : MLP, pre/post_feedforward_layernorm, input_layernorm, layer 14.
+
+### Pipeline
+**Oracle** (`scripts/27_p5_2_g_attn_residual_oracle.py`) : instancie le **module réel**
+`Gemma4RMSNorm` (pas de ré-dérivation manuelle), `out = residual + ln(attn_output)`. Sanity :
+formule manuelle vs module = `0.0` ; effet résiduel `max|out-normed| = 3.76` (add non vide).
+
+**ZML** (`zml_runner/gemma4_attn_resid.zig`, mirror C.2 q_norm + add) :
+```zig
+normed = zml.nn.rmsNorm(attn_output, .d, 1e-6)
+scaled = normed.mul(pa_norm_weight.broad(normed.shape()))   // pattern Llama
+out    = residual.add(scaled)
+```
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/27_p5_2_g_attn_residual_oracle.py` | oracle (module Gemma4RMSNorm réel) + export fixture |
+| `fixtures/p5_2_g_attn_residual_layer15.safetensors` | attn_output, residual, pa_norm_weight (inputs), attn_sublayer_out (oracle) |
+| `fixtures/p5_2_g_attn_residual_layer15_manifest.json` | shapes/dtypes + pipeline + note résiduel |
+| `zml_runner/gemma4_attn_resid.zig` | runner ZML (rmsNorm + mul + add) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_attn_resid` |
+| `logs/P5_2_Gattn_resid.log` | sortie `bazel run` (3090) |
+
+### Validation
+- Sanity : NaN/Inf = false ; `max|out| = 8.99` (< 20).
+- **2 blocks fixed-point** : max_diff **2.38e-7**.
+- **Scan global 6144 valeurs** : max_abs **9.54e-7** @ `(q=0, d=850)`, mean_abs **3.37e-8**.
+  Tolérance 1e-4 → marge ~100 000×. Résidu ~1e-6 cohérent (rmsNorm+mul+add, pas de longue
+  réduction matmul) ; non-nul → réfute tout echo d'oracle.
+
+### Critères de clôture P5.2.G
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_attn_resid`)
+- [x] Run produit `out [1,4,1536]`
+- [x] NaN/Inf = false ; `max|out|` borné (8.99 < 20)
+- [x] 2/2 fixed-point blocks (max_diff 2.38e-7) vs oracle (module Gemma4RMSNorm réel)
+- [x] Scan global 6144 valeurs : max_abs 9.54e-7 < tolerance 1e-4 ; mean_abs 3.37e-8
+- [x] RMSNorm pattern Llama (`* weight`), eps 1e-6, weight non uniforme ; add résiduel exercé (shift 3.76)
+- [x] Aucun MLP, feedforward norms, input_layernorm, layer 14
+- [x] Log archivé `logs/P5_2_Gattn_resid.log`
+
+**Tag** : `p5.2-g-attn-resid-zml-pass`
+
+> **SOUS-COUCHE ATTENTION COMPLÈTE** (pilote sliding layer 15 reader × 13 writer) :
+> `q/k/v proj → norm → RoPE → QK → masque sliding → softmax → context → o_proj → post_attn_norm → +residual`.
+
+### Reste (vers la couche décodeur complète)
+- **MLP** : `gate_proj`/`up_proj` + activation (GeGLU ?) + `down_proj`, encadré par
+  `pre_feedforward_layernorm` et `post_feedforward_layernorm` + résiduel.
+- **`input_layernorm`** + câblage end-to-end du résiduel (assemblage de couche).
 - **Layer 14 full attention** (patch `zml.nn.rope` proportional+partial rotary — point rouge).

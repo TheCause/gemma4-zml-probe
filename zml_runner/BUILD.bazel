@@ -181,3 +181,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.G — ZML post_attention_layernorm + résiduel (ferme la sous-couche attention).
+zig_binary(
+    name = "gemma4_attn_resid",
+    main = "gemma4_attn_resid.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

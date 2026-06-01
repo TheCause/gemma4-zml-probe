@@ -1,0 +1,72 @@
+{
+  "source": "P5.2.G PyTorch oracle post_attention_layernorm + r\u00e9siduel (layer 15)",
+  "spec_refs": [
+    "modeling_gemma4.py (5.9.0) Gemma4TextDecoderLayer.forward L1395-1406 (post_attn_ln + residual add)",
+    "Gemma4RMSNorm L191-211 (with_scale=True : _norm(x) * weight, init weight=1, pattern Llama)"
+  ],
+  "layer_idx": 15,
+  "config": {
+    "hidden": 1536,
+    "seq_len": 4,
+    "rms_eps": 1e-06,
+    "with_scale": true
+  },
+  "residual_note": "residual = hidden_input de C.0 (stand-in). Le VRAI r\u00e9siduel est le hidden state pr\u00e9-input_layernorm ; pilote synth\u00e9tique ne mod\u00e9lise pas input_layernorm. La gate valide l'op (post_attn_norm + add), pas la s\u00e9mantique end-to-end du r\u00e9siduel.",
+  "pipeline": [
+    "normed = Gemma4RMSNorm(attn_output)   [_norm(x) * weight, eps=1e-6]",
+    "out    = residual + normed             [1,4,1536]"
+  ],
+  "tensors": {
+    "attn_output": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "residual": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "pa_norm_weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "attn_sublayer_out": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "attn_output, residual = load -> tags {.b,.q,.d}   [1,4,1536]",
+    "pa_norm_weight = load -> tag {.d}   [1536]",
+    "normed = zml.nn.rmsNorm(attn_output, .d, 1e-6)",
+    "scaled = normed.mul(pa_norm_weight.broad(normed.shape()))   [pattern Llama]",
+    "out = residual.add(scaled)   [1,4,1536]",
+    "compare out vs oracle attn_sublayer_out, tol\u00e9rance 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "expected_zml_residual_hint": "rmsNorm + mul + add, fp32 ; r\u00e9sidu attendu tr\u00e8s faible (~1e-6, cf q_norm C.2 6.7e-6)",
+  "checks": {
+    "rmsnorm_formula_diff": 0.0,
+    "residual_add_shift": 3.7624082565307617
+  },
+  "interdits_p5_2_g": [
+    "MLP",
+    "pre/post_feedforward_layernorm",
+    "input_layernorm (non mod\u00e9lis\u00e9)",
+    "layer 14"
+  ],
+  "closes": "sous-couche ATTENTION (qkv->attn->o_proj->post_attn_norm->residual)"
+}
