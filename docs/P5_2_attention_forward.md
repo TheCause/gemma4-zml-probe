@@ -1,6 +1,6 @@
 # P5.2 — Gemma 4 E2B attention forward (5 sous-gates)
 
-**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). **P5.2.E COMPLET** (E.0 oracle + E.1 QK scores + E.mask sliding + E.softmax + E.context PASS, 31 mai 2026) — chaîne d'attention ZML `QK → mask → softmax → context` validée bout-en-bout vs oracles PyTorch indépendants.
+**Status global** : P5.2.A + P5.2.B PASS, P5.2.C COMPLET (C.0 oracle + C.1 q_proj + C.2 q_norm + C.3 RoPE) PASS (28 mai 2026), P5.2.D COMPLET (D.0 oracle + D.1 k_proj + D.2 v_proj + D.3 k_norm + D.4 RoPE K + D.5 KV slot mock PASS, 28 mai 2026 soir-nuit). **P5.2.E COMPLET** (E.0 oracle + E.1 QK scores + E.mask sliding + E.softmax + E.context PASS, 31 mai 2026) — chaîne d'attention ZML `QK → mask → softmax → context` validée bout-en-bout vs oracles PyTorch indépendants. **P5.2.F PASS** (o_proj, 1 juin 2026) — projection de sortie de l'attention.
 **Scope** : implémentation ZML de l'attention forward consommant la policy table P5.1.
 
 ## Découpage (rappel)
@@ -1321,9 +1321,87 @@ probs·V`, chaque maillon comparé byte-à-byte à un oracle PyTorch indépendan
 sous tolérance 1e-4 (résidus observés : QK 2.4e-6, softmax 3e-8, context 0.0).
 
 ### Reste à faire (hors P5.2.E)
-- **`o_proj`** (projection de sortie de l'attention) + résiduel — phase suivante.
+- ~~**`o_proj`** (projection de sortie de l'attention)~~ ✅ **P5.2.F** (cf section ci-dessous).
+- **`post_attention_layernorm` + résiduel** : assemblage de la sous-couche attention complète.
 - **Layer 14 full attention** : `rope_type=proportional` + `partial_rotary_factor=0.25` +
   `theta=1e6`. Le helper `zml.nn.rope` ne couvre que `default/llama3/yarn/linear` → patch ZML
   requis (point rouge connu, cf D.4). Le pilote actuel reste sur le **sliding** (layer 13/15).
 - **Vrai sliding-window au compute** : E.mask a validé la logique de fenêtrage `causalAttnMask`
   sur un cas mordant S=8/window=3 ; l'intégrer dans la chaîne quand S ≥ sliding_window=512.
+
+---
+
+## P5.2.F — ZML o_proj : projection de sortie de l'attention, layer 15 (PASS, 1 juin 2026)
+
+### Objectif
+Dernier maillon du **bloc attention** : `o_proj` (projette `context` concaténé sur les têtes
+`[b,q,2048]` → hidden `[b,q,1536]`), après `context` (E.context), **avant** résiduel/MLP.
+
+### Périmètre strict & ground truth (discipline « oracle = source de vérité »)
+Lecture directe de `modeling_gemma4.py` (5.9.0) avant de coder :
+- **`o_proj` TEXTE = `nn.Linear(2048, 1536, bias=attention_bias=False)`** (L1209) — PAS de
+  `Gemma4ClippableLinear` (ça, c'est l'attention **VISION** L911, avec clamp ±inf). **Fausse
+  alerte clipping écartée.** Poids `...layers.15.self_attn.o_proj.weight` `[1536,2048]`, sans biais.
+- **Transpose manquant dans E.0** : `eager_attention_forward` (L833-834) renvoie
+  `matmul(probs, value_states).transpose(1,2)` = `[b,q,h,hd]`. Notre `context` E.0 est stocké
+  **avant** ce transpose, en `[b,h,q,hd]`. La gate doit donc transposer (1,2) avant le reshape.
+- `Gemma4TextAttention.forward` L1272-1273 : `attn_output.reshape(*input_shape, -1)` → `[b,q,2048]`
+  puis `o_proj(attn_output)`.
+
+### Pipeline
+**Oracle** (`scripts/26_p5_2_f_oproj_oracle.py`, depuis `context` E.0 + poids safetensors) :
+```python
+attn_output = context.transpose(1,2).reshape(1,4,2048)   # [b,h,q,hd]->[b,q,h,hd]->[b,q,2048]
+o_out       = F.linear(attn_output, o_proj_weight)        # [1,4,2048] @ [1536,2048]^T -> [1,4,1536]
+```
+Cross-check einsum indépendant `bhqd,ohd->bqo` (concat h-major explicite) vs `F.linear` :
+`|diff|=5.72e-6` → **ordre de concaténation des têtes confirmé** (h-major, hd-mineur).
+
+**ZML** (`zml_runner/gemma4_oproj.zig`) :
+```zig
+attn  = context.transpose(.{ .b, .q, .h, .hd })   // = transpose(1,2)
+attn  = attn.merge(.{ .m = .{ .h, .hd } })          // concat h-major : m = h*head_dim + hd
+o_out = attn.dot(o_proj_weight, .m)                 // contract .m=2048 (mirror C.1 q_proj)
+```
+`merge(.{ .m = .{ .h, .hd } })` reproduit exactement le `reshape(b,q,h*hd)` PyTorch post-transpose.
+
+### Livrables
+| Fichier | Rôle |
+|---|---|
+| `scripts/26_p5_2_f_oproj_oracle.py` | oracle PyTorch + export fixture (charge `context` E.0 + `o_proj.weight`) |
+| `fixtures/p5_2_f_oproj_layer15.safetensors` | `context` + `o_proj_weight` (inputs) + `o_proj_out` (oracle) ~12.6 MB |
+| `fixtures/p5_2_f_oproj_layer15_manifest.json` | shapes/dtypes + pipeline + interdits |
+| `zml_runner/gemma4_oproj.zig` | runner ZML (transpose + merge têtes + dot) |
+| `zml_runner/BUILD.bazel` | nouvelle cible `gemma4_oproj` |
+| `logs/P5_2_Foproj.log` | sortie `bazel run` (3090) |
+
+### Validation
+- Sanity : NaN/Inf = false ; `max|o_out| = 13.61` (< ceil 20, concat non-scrambled).
+- **2 blocks fixed-point** (`o_proj_out[0,0,:8]`, `o_proj_out[0,3,:8]`) : max_diff **2.50e-6**.
+- **Scan global 6144 valeurs** : max_abs **2.29e-5** @ `flat_index 1129 (q=0, o=1129)`,
+  mean_abs **5.86e-7**. Tolérance 1e-4 → marge ~4.4×.
+
+### Observation
+- **Résidu non-nul ~2.3e-5** (≠ bit-exact d'E.context) : réduction `.m=2048` longue → bruit
+  d'accumulation matmul PJRT-CPU vs PyTorch BLAS, cohérent avec `q_proj` C.1 (1.14e-5, réduction
+  1536). Confirme la relation longueur-de-réduction → résidu, et **réfute tout echo d'oracle**
+  (un alias donnerait 0.0). Pas de test de perturbation nécessaire ici.
+- **Concat des têtes correct** : fixed-points + scan dans la tolérance, et l'einsum oracle a
+  indépendamment fixé l'ordre h-major.
+
+### Critères de clôture P5.2.F
+- [x] Build bazel PASS sur 3090 (`//examples/rqz:gemma4_oproj`)
+- [x] Run produit `o_out [1,4,1536]`
+- [x] NaN/Inf = false ; `max|o_out|` borné (13.6 < 20)
+- [x] 2/2 fixed-point blocks (max_diff 2.50e-6) vs oracle
+- [x] Scan global 6144 valeurs : max_abs 2.29e-5 < tolerance 1e-4 ; mean_abs 5.86e-7
+- [x] o_proj = `nn.Linear` simple (pas de clipping/biais) ; concat têtes h-major confirmé (einsum)
+- [x] Aucun résiduel, post_attention_layernorm, MLP, layer 14, re-attention
+- [x] Log archivé `logs/P5_2_Foproj.log`
+
+**Tag** : `p5.2-f-oproj-zml-pass`
+
+### Reste après P5.2.F
+- **`post_attention_layernorm` + résiduel** → sous-couche attention complète (assemblage).
+- **MLP** (gate/up/down + activation) + son layernorm → couche décodeur complète.
+- **Layer 14 full attention** (patch `zml.nn.rope` proportional+partial rotary — point rouge).

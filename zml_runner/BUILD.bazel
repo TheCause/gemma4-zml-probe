@@ -170,3 +170,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.2.F — ZML o_proj (projection sortie attention : concat têtes + nn.Linear 2048->1536).
+zig_binary(
+    name = "gemma4_oproj",
+    main = "gemma4_oproj.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
