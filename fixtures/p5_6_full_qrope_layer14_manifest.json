@@ -1,0 +1,95 @@
+{
+  "source": "P5.6 PyTorch oracle full_attention Q-rope (layer 14, partial rotary manuelle)",
+  "spec_refs": [
+    "modeling_gemma4 L1226-1229 (q_proj.view -> q_norm -> apply_rotary_pos_emb)",
+    "apply_rotary_pos_emb L770-789 ((x*cos)+(rotate_half(x)*sin)), rotate_half L763",
+    "rope_parameters full_attention = {proportional, theta=1e6, partial_rotary_factor=0.25, global_head_dim=512}"
+  ],
+  "layer_idx": 14,
+  "config": {
+    "hidden": 1536,
+    "n_heads": 8,
+    "head_dim": 512,
+    "seq_len": 4,
+    "rms_eps": 1e-06,
+    "rope": "proportional partial 0.25 theta1e6 scaling1.0"
+  },
+  "tensors": {
+    "hidden_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "q_proj_weight": {
+      "shape": [
+        4096,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "q_norm_weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "float32"
+    },
+    "cos_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "sin_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "q_after_norm": {
+      "shape": [
+        1,
+        4,
+        8,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "q_after_rope": {
+      "shape": [
+        1,
+        4,
+        8,
+        512
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "q = hidden_input.dot(q_proj_weight,.h) -> reshape [1,4,8,512] withTags {.b,.s,.nh,.hd}",
+    "q = rmsNorm(q,.hd,1e-6).mul(q_norm_weight.broad)",
+    "rh = concat(-q.split(.hd,{256,256})[1], q.split(.hd,{256,256})[0], .hd)  # rotate_half",
+    "q_rope = q.mul(cos.broad).add(rh.mul(sin.broad))   # cos/sin {.s,.hd=512}",
+    "compare vs q_after_rope (oracle, avant transpose) [1,4,8,512], tol 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "checks": {
+    "manual_vs_apply": 0.0,
+    "pos0_identity": 0.0,
+    "pos3_active": 8.070467948913574
+  },
+  "interdits_p5_6": [
+    "K/V (Q-path only)",
+    "QK/softmax/context",
+    "o_proj",
+    "MLP",
+    "sliding"
+  ],
+  "note": "head_dim full=512 ; partial rotary port\u00e9 par cos/sin (384/512 identit\u00e9). zml.nn.rope inutilisable -> rope manuelle."
+}

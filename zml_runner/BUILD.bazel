@@ -203,3 +203,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.6 — ZML full_attention Q-rope manuelle partielle (layer 14, head_dim 512, rotate_half via split/neg/concat).
+zig_binary(
+    name = "gemma4_full_qrope",
+    main = "gemma4_full_qrope.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
