@@ -252,3 +252,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.1 — ZML chargement sélectif depuis le checkpoint réel bf16 (embed + 1 couche).
+zig_binary(
+    name = "gemma4_load_check",
+    main = "gemma4_load_check.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
