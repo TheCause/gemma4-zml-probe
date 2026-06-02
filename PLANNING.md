@@ -2,6 +2,23 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
+## État 2 juin 2026 (P5.7.5-prep — contrat de précision verrouillé, gate docs-only avant moteur 35 couches)
+
+**Gate courant `P5.7.5-prep` ✅** — décision Régis : **oracle HYBRIDE** (fp32 sauf `embed_tokens_per_layer`
+bf16). Contrat figé dans `docs/P5_7_5_precision_contract.md`. Périmètre = docs seulement, **aucun runner**.
+- **Pourquoi hybride** : modèle texte full fp32 = 18,51 Go résidents / pic chargement ≈ 27,8 Go > VM 23 Go.
+  `embed_tokens_per_layer` `[262144,8960]` = 9,40 Go (50,7 % des params résidents, bf16 sur disque → upcast
+  ne récupère rien). Hybride = 13,82 Go ; **bit-identique au full fp32** (gather exact + ×√256=16 puissance
+  de 2 exacte), rigueur fp32 préservée sur les 35 couches.
+- **Seuils** : PASS `max_abs ≤ 1e-2` **ET** `mean_abs ≤ 1e-4` ; WARN `1e-2 < max_abs ≤ 1e-1` (→ investiguer
+  câblage : distribution, localisation par couche, points fixes, suspects YOCO/dispatch/MLP-width) ; FAIL
+  `> 1e-1` / NaN-Inf / mismatch shape ou distribution. Drift attendu = matmul Eigen-vs-BLAS accumulé sur
+  35 couches (~1e-3..1e-2), concentré (mean_abs petit). Distinguer drift vs bug = §6 du contrat.
+- **Dette pour P5.7.5 (phase moteur)** : `scripts/38_p5_7_5_prefill_oracle.py` est **full bf16** → à régénérer
+  en hybride ; fixture `p5_7_5_prefill.safetensors` **périmé** ; `expected_zml_max_abs_le` du manifest
+  (2e-3) à aligner sur le PASS contractuel (1e-2). Options 2 (moteur ZML bf16) / 3 (tol 1e-1 critère premier)
+  rejetées. **Interdit** : démarrer le moteur 35 couches tant que ce contrat n'est pas committé (✅ fait).
+
 ## Etat 31 mai 2026 (P5.2.E.mask PASS — ZML sliding mask réel S=8/window=3, bit-exact)
 
 P-1 ✅ · P2 ✅ · P3 ✅ · P4-prep ✅ · P4.3 ✅ · P4.4.0 ✅ · P4.4.1 ✅

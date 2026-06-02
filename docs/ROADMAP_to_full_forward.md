@@ -85,10 +85,23 @@ Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
 - ~~**P5.7.2**~~ ✅ — load les 35 couches (597 tenseurs, []LayerW + prefix/withLayer), shapes par-couche OK (tag `p5.7.2-loadall-zml-pass`).
 - ~~**P5.7.3**~~ ✅ — runtime plan 35 couches (dispatch type/reader/target/dims/rope/mask), `fixtures/p5_7_3_runtime_plan.json` (tag `p5.7.3-runtime-plan-done`).
 - ~~**P5.7.4**~~ ✅ — couche FULL attention complète (layer 14, head_dim 512 + RoPE manuelle) vs module réel, scan 1.63e-5. **Les 2 types de couche validés e2e** (sliding P5.3 + full P5.7.4) (tag `p5.7.4-full-layer-zml-pass`).
-- **P5.7.5 ⏳ — prefill 35 couches, no generation. DÉCISION DE DESIGN OUVERTE :**
-  - **Blocage mémoire** : le `Gemma4TextModel` complet en fp32 (~17 Go, `embed_tokens_per_layer` fp32 = 9.4 Go) **ne tient pas** dans les 23 Go de la VM 3090. Oracle relancé en **bf16** (~9 Go, dtype natif checkpoint) → `fixtures/p5_7_5_prefill.safetensors` (last_hidden_state, cos/sin sliding+full, masque).
-  - **Stratégie de précision à trancher** : oracle bf16 vs moteur ZML fp32 → comparaison **lâche** (drift bf16 sur 35 couches). Options : (a) moteur ZML en bf16 pour matcher HF (matmul bf16 + norm fp32) ; (b) oracle fp32 via load_state_dict(assign=True)+meta (matérialiser les buffers rotary) ou machine ≥24 Go ; (c) tolérance structurelle (~1e-1 abs) acceptant que la comparaison prouve le CÂBLAGE (35 couches + KV sharing + dispatch), pas la précision bit. **Recommandation : (b) si faisable (rigueur fp32 conservée), sinon (c) documenté.**
-  - **Build moteur** (composition d'ops validées, non encore écrit) : embedding (P5.4) + PLE frontend (P4.4) → boucle 35 couches dispatchées sliding/full (P5.3/P5.7.4) avec **KV sharing YOCO** (capter K/V de layer 13 sliding + 14 full, réutilisés par readers 15-34) → final norm. Runner unrollé (idiome qwen `[]TransformerLayer`).
+- ~~**P5.7.5-prep**~~ ✅ **(2 juin) — contrat de précision verrouillé AVANT le moteur.** Décision Régis :
+  **option 1 — oracle HYBRIDE** (fp32 partout **sauf** `embed_tokens_per_layer` en bf16). Doc :
+  `docs/P5_7_5_precision_contract.md`. Gate **docs-only** (pas de runner). Seuils : PASS `max_abs ≤ 1e-2`
+  **ET** `mean_abs ≤ 1e-4` ; WARN `1e-2 < max_abs ≤ 1e-1` (investiguer câblage) ; FAIL `> 1e-1` / NaN /
+  mismatch distribution. Options rejetées : (2) moteur ZML bf16, (3) tolérance 1e-1 comme critère premier.
+- **P5.7.5 ⏳ — prefill 35 couches, no generation (phase moteur, contrat §ci-dessus committé) :**
+  - **Blocage mémoire (chiffré sur manifest réel)** : modèle texte runtime = **18,51 Go** fp32 (4,629 B
+    params, lm_head tied) ; pic de chargement full fp32 ≈ **27,8 Go** (modèle + state_dict bf16 co-résidents)
+    **> VM 23 Go**. `embed_tokens_per_layer` `[262144,8960]` = **9,40 Go** fp32 (50,7 % des params), bf16 sur
+    disque de toute façon → l'upcast ne récupère rien (50,7 % des params résidents).
+  - **Oracle HYBRIDE retenu** : fp32 partout sauf `embed_tokens_per_layer` bf16 → **13,82 Go** résidents,
+    pic ≈ 23,1 Go (chargement *streaming/assign* requis, cf contrat §2.2). **Bit-identique à un oracle full
+    fp32** (gather exact + ×√256=16 puissance de 2 exacte ; `token_identity` fusionné en fp32 au frontend PLE,
+    validé P3/P4.4). Rigueur
+    fp32 **intégralement préservée sur les 35 couches**. ⚠️ Le script actuel `38_p5_7_5_prefill_oracle.py`
+    est **full bf16** → à **régénérer en hybride** ; fixture `p5_7_5_prefill.safetensors` **périmé** (contrat §6/§9).
+  - **Build moteur** (composition d'ops validées, non encore écrit) : embedding (P5.4) + PLE frontend (P4.4) → boucle 35 couches dispatchées sliding/full (P5.3/P5.7.4) avec **KV sharing YOCO** (capter K/V de layer 13 sliding + 14 full, réutilisés par readers 15-34) → final norm. Runner unrollé (idiome qwen `[]TransformerLayer`). Côté ZML : `embed_tokens_per_layer` bf16 + gather→fp32 (parité mémoire, contrat §9.2).
 - **P5.7.6** — comparaison logits vs HF (le test e2e décisif) — head P5.5 sur le last_hidden de P5.7.5.
 - **P5.7.7** — decode 1 token (KV cache incrémental, pos_idx).
 - **P5.7.8** — decode N tokens (génération).
