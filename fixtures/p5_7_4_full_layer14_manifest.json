@@ -1,0 +1,185 @@
+{
+  "source": "P5.7.4 oracle couche FULL attention (layer 14 producer, head_dim 512, RoPE manuelle)",
+  "spec_refs": [
+    "Gemma4TextDecoderLayer.forward (module r\u00e9el) ; full_attention rotary proportional partial"
+  ],
+  "layer_idx": 14,
+  "config": {
+    "hidden": 1536,
+    "intermediate": 6144,
+    "head_dim": 512,
+    "n_heads": 8,
+    "n_kv": 1,
+    "ple_dim": 256,
+    "seq_len": 4,
+    "layer_type": "full_attention",
+    "rope": "proportional partial 0.25 theta1e6 (manuelle)"
+  },
+  "layer_scalar": [
+    0.028564453125
+  ],
+  "tensors": {
+    "layer_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "per_layer_input": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "cos_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "sin_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "attn_mask": {
+      "shape": [
+        1,
+        1,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    },
+    "layer_out": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__input_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__q_proj__weight": {
+      "shape": [
+        4096,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__q_norm__weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__k_proj__weight": {
+      "shape": [
+        512,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__k_norm__weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__v_proj__weight": {
+      "shape": [
+        512,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__o_proj__weight": {
+      "shape": [
+        1536,
+        4096
+      ],
+      "dtype": "float32"
+    },
+    "w__post_attention_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__pre_feedforward_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__gate_proj__weight": {
+      "shape": [
+        6144,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__up_proj__weight": {
+      "shape": [
+        6144,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__down_proj__weight": {
+      "shape": [
+        1536,
+        6144
+      ],
+      "dtype": "float32"
+    },
+    "w__post_feedforward_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__per_layer_input_gate__weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__per_layer_projection__weight": {
+      "shape": [
+        1536,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "w__post_per_layer_input_norm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__layer_scalar": {
+      "shape": [
+        1
+      ],
+      "dtype": "float32"
+    }
+  },
+  "expected_zml_max_abs_le": 0.0005,
+  "note": "g\u00e9n\u00e9ralise P5.3 (sliding) \u00e0 full : head_dim 512 + RoPE manuelle partielle (P5.6/P5.6.K), reste identique."
+}

@@ -268,3 +268,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.4 — ZML couche FULL attention complète (layer 14, head_dim 512 + RoPE manuelle).
+zig_binary(
+    name = "gemma4_full_layer",
+    main = "gemma4_full_layer.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
