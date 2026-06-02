@@ -64,6 +64,18 @@ validé (P5.3) → on **isole l'attention + cache** : on compare la sortie du mo
 **Ce que le pilote prouve** : `scatterSlices` append + `pos_idx` + mask S=1 + reuse reader YOCO sur cache
 grandi — *toute* la dynamique decode, sur sliding. Le reste devient de l'extension.
 
+### Micro-gate d'isolation des primitives (dette decode-1 fermée)
+
+La revue adversariale a noté que `scatterSlices` et `zml.nn.rope(pos)` avaient été introduites **ensemble**
+dans le composite. On les a isolées rétroactivement (runner autonome `zml_runner/gemma4_decprim.zig`,
+oracle déterministe `scripts/41_p5_7_7_decode_prim_oracle.py`, sans modèle) — **3/3 PASS, égalité exacte 0.0** :
+- `scatterSlices` à pos=4 **et** pos=2 vs copie numpy → ciblage **dynamique** de la colonne + override +
+  passthrough des axes b/h/hd.
+- `rope(pos=4) == rope(arange)[4]` bit-exact → **prouve que l'argument `pos` est utilisé** (sinon position 0
+  ≠ 4) ; ≡ HF via P5.2.C.3 (rope-arange déjà validé vs `apply_rotary_pos_emb`).
+- Le `0.0` est ici correct (ops structurelles / calcul identique, pas un matmul) → pas de drapeau jaune.
+- tag `p5.7.7-decprim-isolation-pass`. **decode-3 repose désormais sur des primitives prouvées individuellement.**
+
 ## Esquisse de la suite (à reconfirmer après le pilote)
 
 decode-1 (pilote sliding) → **decode-2** (couche 14 **full** : append + rope manuelle à pos p ; vérifier

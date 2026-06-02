@@ -300,3 +300,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.7 — primitives decode isolées (scatterSlices + rope(pos)) : ferme la dette d'isolation de decode-1.
+zig_binary(
+    name = "gemma4_decprim",
+    main = "gemma4_decprim.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
