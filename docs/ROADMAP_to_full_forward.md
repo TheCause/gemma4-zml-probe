@@ -103,8 +103,16 @@ Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
     est **full bf16** → à **régénérer en hybride** ; fixture `p5_7_5_prefill.safetensors` **périmé** (contrat §6/§9).
   - **Build moteur** (composition d'ops validées, non encore écrit) : embedding (P5.4) + PLE frontend (P4.4) → boucle 35 couches dispatchées sliding/full (P5.3/P5.7.4) avec **KV sharing YOCO** (capter K/V de layer 13 sliding + 14 full, réutilisés par readers 15-34) → final norm. Runner unrollé (idiome qwen `[]TransformerLayer`). Côté ZML : `embed_tokens_per_layer` bf16 + gather→fp32 (parité mémoire, contrat §9.2).
 - **P5.7.6** — comparaison logits vs HF (le test e2e décisif) — head P5.5 sur le last_hidden de P5.7.5.
-- **P5.7.7** — decode 1 token (KV cache incrémental, pos_idx).
-- **P5.7.8** — decode N tokens (génération).
+- **P5.7.7** — decode incrémental (KV cache, pos_idx). Sous-gates (design `docs/P5_7_7_decode.md`) :
+  - ~~**decode-1**~~ ✅ **(2 juin)** pilote writer 13 sliding × reader 15 sliding. Isole la mécanique neuve
+    (scatterSlices append col p + pos_idx rope=4 + mask S=1 + reuse reader YOCO du cache grandi) vs oracle
+    HF réel (hooks self_attn). 6/6 checks PASS : cache_after 1.8e-7, k/v_new 1.8e-7/9.5e-7, attn_out 13/15
+    7.6e-6/5.7e-6. Revue adversariale 3 lentilles (non-vacuité real 0.92, fidélité real 0.88, indép-oracle
+    « suspect » = axiome HF, pas de bug). tag `p5.7.7-decode1-pilot-pass`. Runner `gemma4_decode1.zig`,
+    oracle `scripts/40_p5_7_7_decode_pilot_oracle.py`.
+  - **decode-2** — couche 14 **full** : append + rope manuelle à pos p ; vérifier `attention_k_eq_v` (V=K ?).
+  - **decode-3** — 35 couches : 2 caches multi-slots, dispatch, → norm → **logits → argmax == HF** (e2e).
+- **P5.7.8** — decode N tokens (boucle génération).
 
 Prérequis avant P5.7 : audit closeout fait (`docs/P5_6_closeout.md`, base saine, 0 gap).
 

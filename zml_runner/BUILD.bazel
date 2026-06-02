@@ -292,3 +292,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.7 decode-1 — pilote decode incrémental (writer 13 × reader 15) : scatterSlices append + pos_idx.
+zig_binary(
+    name = "gemma4_decode1",
+    main = "gemma4_decode1.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
