@@ -284,3 +284,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.6 — ZML logits (lm_head tied vocab complet + softcap 30) sur last_hidden validé ; top-1 vs oracle.
+zig_binary(
+    name = "gemma4_logits",
+    main = "gemma4_logits.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

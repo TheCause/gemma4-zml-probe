@@ -108,6 +108,15 @@ def main() -> None:
     last_hidden = out.last_hidden_state.to(torch.float32).contiguous().clone()  # [1,4,1536] post final norm
     assert tuple(last_hidden.shape) == (1, SEQ_LEN, 1536)
     assert not torch.isnan(last_hidden).any()
+
+    # Logits (P5.7.6) : lm_head tied = embed_tokens.weight (poids BRUT, sans embed_scale en sortie),
+    # puis softcap final_logit_softcapping=30. C'est ce que calcule Gemma4ForCausalLM.
+    softcap = float(getattr(tc, "final_logit_softcapping", 30.0))
+    lm_w = model.embed_tokens.weight.to(torch.float32)  # [vocab, 1536]
+    logits = last_hidden @ lm_w.t()                      # [1,4,vocab]
+    logits = (softcap * torch.tanh(logits / softcap)).contiguous()
+    argmax = logits.argmax(dim=-1)                       # [1,4] token prédit par position
+    print(f"  logits shape {tuple(logits.shape)} ; argmax par position = {argmax.flatten().tolist()}")
     # out.hidden_states a 36 entrées ; la dernière (index 35) est la sortie POST-final-norm = alias de
     # last_hidden_state. On garde les 35 premières (00=embeddings, kk=sortie couche kk-1 PRÉ-norm) +
     # last_hidden séparé. clone() casse tout partage mémoire (sinon safetensors refuse).
@@ -147,6 +156,7 @@ def main() -> None:
         "cos_full": cos_f.contiguous(), "sin_full": sin_f.contiguous(),
         "attn_mask": attn_mask.contiguous(),
         "last_hidden": last_hidden,
+        "logits": logits,  # [1,4,vocab] softcapped — référence P5.7.6
         # KV partagé YOCO (mode reader du moteur). hidden_15 (résiduel entrant couche 15) = hidden_15 ci-dessous.
         "kv_k_sliding": kv_k_sliding.to(torch.float32).contiguous(),
         "kv_v_sliding": kv_v_sliding.to(torch.float32).contiguous(),

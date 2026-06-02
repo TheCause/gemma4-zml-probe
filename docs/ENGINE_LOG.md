@@ -68,3 +68,11 @@ Moteur refactoré : helper `runLayer` partagé + 3 modes (mémoire VM 24 Go ne t
 - Modes CLI : `gemma4_prefill <ckpt_slim> <fixture> [producer|reader|reader2]`. Checkpoint slim = `weights/model_text_layers.safetensors` (35 couches + frontend + norm, sans embeddings/vision, pour la mémoire). Oracle = `scripts/39_..._hybrid.py` (2 fix : layer_scalar buffers + embed_scale fp32).
 
 **Reste projet** : P5.7.6 (logits vs HF : head P5.5 sur last_hidden), P5.7.7/.8 (decode KV cache incrémental). Mémoire : la full-35-en-un-process nécessiterait l'exécution étagée (per-layer) — non requise pour la validation (composition suffit), mais utile pour un runtime de prod.
+
+### 2 juin — 🎯🎯🎯 P5.7.6 LOGITS VALIDÉ (top-1 identique 4/4)
+`zml_runner/gemma4_logits.zig` : lm_head tied (= `embed_tokens.weight` brut, vocab **262144**) + softcap 30·tanh(x/30), sur le `last_hidden` validé. Comparé à l'oracle (script 39 exporte `logits` = `softcap(last_hidden @ embed_tokens.T)`).
+- **argmax (token prédit) identique sur les 4 positions** : 236761 / 99998 / 2078 / 108 (= HF). **flips temp=0 = 0/4**. logits `max_abs = 3.8e-5`.
+- **Chaîne complète validée e2e** : forward 35 couches + YOCO → last_hidden → lm_head + softcap → **logits → tokens identiques à Gemma-4-E2B-it HF**. embed_tokens (lm_head) lu du checkpoint complet ; CLI `gemma4_logits <model.safetensors> <fixture>`.
+- **Gemma-4-E2B-it est correctement porté en ZML — prouvé bout-en-bout (hidden states bit-near + tokens identiques).**
+
+**Reste** : P5.7.7/.8 (decode incrémental : KV cache prefill→decode, pos_idx, boucle génération). Effort substantiel (structure différente, mur mémoire) — la validation de port (forward+logits) étant le cœur scientifique, le decode est l'extension runtime.
