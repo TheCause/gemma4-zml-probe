@@ -1,14 +1,20 @@
-# Venvs / caches Python
+# Venvs / Python caches
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
 
-# Poids HF lourds (downloadable depuis le repo distant)
+# Hugging Face model weights (download separately, see README)
 weights/
 
-# Variables d env locales
+# Local environment / secrets
 .env
 
-# Generated P4.4 fixture (regenerable from .npy via scripts/08)
+# Regenerable fixtures (produced by the oracle scripts)
 fixtures/*.safetensors
+fixtures/*.npy
+fixtures/*.pt
+
+# Run logs
+logs/
