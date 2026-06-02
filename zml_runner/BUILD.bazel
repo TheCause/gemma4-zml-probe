@@ -316,3 +316,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.7 decode-3 — moteur decode e2e (35 couches, 1 token) -> logits == HF.
+zig_binary(
+    name = "gemma4_decode3",
+    main = "gemma4_decode3.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

@@ -117,8 +117,15 @@ Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
     *Limite assumée* : la rope full utilise les cos/sin de l'oracle (proportional/partial non recalculée
     en ZML, comme P5.7.4) → le « pos » full est validé via HF (position_ids=[4]) + application, pas un
     calcul rope ZML indépendant (le path `zml.nn.rope(pos)` sliding, lui, est isolé en `decprim`).
-  - **decode-3** — 35 couches : 2 caches multi-slots (sliding 256 + full 512), dispatch, → norm →
-    **logits → argmax == HF** (e2e). Les 2 types de couche en decode sont désormais prouvés (decode-1 + 2).
+  - ~~**decode-3**~~ ✅ **(2 juin)** MOTEUR decode e2e (35 couches, 1 token). 15 caches producers (12
+    sliding + 3 full) empaquetés en 2 tenseurs multi-slots, dispatch sliding(`zml.nn.rope`)/full(`manualRope`),
+    YOCO writers 13/14 → readers, scatter append à pos p, → norm → lm_head+softcap. **3 critères PASS** :
+    last_hidden 2.9e-4, **logits 1.0e-4** (magnitudes, cf P5.7.6), **argmax token suivant ZML=1018 == HF**.
+    Tourne en **1 process** (S=1 tient en VM 24 Go). Revue adversariale (routage real 0.99, fidélité
+    « suspect » 0.62 → unique point actionnable = magnitudes logits, ajouté → 1e-4). Runner
+    `gemma4_decode3.zig`, oracle `scripts/43`. tag `p5.7.7-decode3-e2e-pass`.
+- **P5.7.8** — decode N tokens (boucle génération) : **reste à faire** (faible risque — threader le cache
+  grandi de step en step + sampling). **Le decode est fonctionnellement prouvé (1 token == HF).**
 - **P5.7.8** — decode N tokens (boucle génération).
 
 Prérequis avant P5.7 : audit closeout fait (`docs/P5_6_closeout.md`, base saine, 0 gap).
