@@ -355,7 +355,105 @@ const Engine = struct {
         const last_hidden = rmsScaleD(hidden, c(self.final_norm));
         return .{ t29, last_hidden, hidden, hidden, hidden, hidden, hidden, hidden };
     }
+
+    /// Mode full : les 35 couches en UN forward (embeds -> 0..34 + KV YOCO -> final norm).
+    /// Tient en mémoire seulement si compilé en `opt` (réutilisation de buffers XLA). Retour :
+    /// {L0, L14, L24, last_hidden, _, _, _, _} (taps frontières + last_hidden).
+    pub fn forwardFull(self: Engine, rt: Runtime) Out8 {
+        const embeds = rt.embed_slice.convert(.f32).scale(EMBED_SCALE);
+        const ple = self.perLayerInputs(rt, embeds);
+        var hidden = embeds;
+        var shared = SharedKV{};
+        var t0 = embeds;
+        var t14 = embeds;
+        var t24 = embeds;
+        for (self.layers, 0..) |layer, i| {
+            const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+            hidden = runLayer(layer, i, hidden, ple_i, rt, &shared);
+            switch (i) {
+                0 => t0 = hidden,
+                14 => t14 = hidden,
+                24 => t24 = hidden,
+                else => {},
+            }
+        }
+        const last_hidden = rmsScaleD(hidden, c(self.final_norm));
+        return .{ t0, t14, t24, last_hidden, hidden, hidden, hidden, hidden };
+    }
+
+    // ===== Mode CHAIN : 3 chunks enchaînés en un process (mémoire bornée à 1 chunk) =====
+    // forwardP -> (hidden_14, KV writers) ; forwardR (15-24) -> hidden_24 ; forwardR2 (25-34)+norm
+    // -> last_hidden. Le main override rt_buf.hidden_15<-hidden_14, rt_buf.hidden_25<-hidden_24,
+    // rt_buf KV<-KV producer, et deinit chaque exe avant le suivant.
+
+    pub fn forwardP(self: Engine, rt: Runtime) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        const embeds = rt.embed_slice.convert(.f32).scale(EMBED_SCALE);
+        const ple = self.perLayerInputs(rt, embeds);
+        var hidden = embeds;
+        var shared = SharedKV{};
+        for (self.layers[0..FIRST_KV_SHARED], 0..) |layer, i| {
+            const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+            hidden = runLayer(layer, i, hidden, ple_i, rt, &shared);
+        }
+        return .{ hidden, shared.k_sliding.?, shared.v_sliding.?, shared.k_full.?, shared.v_full.? };
+    }
+
+    /// Chunk reader générique [start,end) depuis rt.hidden_15 (réinjecté par le main entre stages),
+    /// KV partagé de la fixture. apply_norm = true sur le dernier chunk (final norm -> last_hidden).
+    /// Chunks de 5 couches (MLP double-wide 12288) -> exec ~4 Go -> pic ~18 Go (mémoire bornée fiable).
+    fn readerRange(self: Engine, rt: Runtime, comptime start: usize, comptime end: usize, comptime apply_norm: bool) zml.Tensor {
+        const embeds = rt.embed_slice.convert(.f32).scale(EMBED_SCALE);
+        const ple = self.perLayerInputs(rt, embeds);
+        var shared = sharedFromRt(rt);
+        var hidden = rt.hidden_15; // réinjecté par le main : hidden_14 puis sortie du chunk précédent
+        for (self.layers[start..end], start..) |layer, i| {
+            const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+            hidden = runLayer(layer, i, hidden, ple_i, rt, &shared);
+        }
+        return if (apply_norm) rmsScaleD(hidden, c(self.final_norm)) else hidden;
+    }
+    pub fn forwardR1(self: Engine, rt: Runtime) zml.Tensor {
+        return self.readerRange(rt, 15, 20, false);
+    }
+    pub fn forwardR2(self: Engine, rt: Runtime) zml.Tensor {
+        return self.readerRange(rt, 20, 25, false);
+    }
+    pub fn forwardR3(self: Engine, rt: Runtime) zml.Tensor {
+        return self.readerRange(rt, 25, 30, false);
+    }
+    pub fn forwardR4(self: Engine, rt: Runtime) zml.Tensor {
+        return self.readerRange(rt, 30, 35, true);
+    }
 };
+
+/// Lance un chunk reader (1 sortie) : compile -> call -> sync (matérialise = libère le working set) ->
+/// deinit exe. Retourne le buffer de sortie (à réinjecter dans rt_buf.hidden_15 par l'appelant).
+fn runReaderStage(
+    comptime method: anytype,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    engine: Engine,
+    eng_buf: zml.Bufferized(Engine),
+    rt: Runtime,
+    rt_buf: zml.Bufferized(Runtime),
+    sharding: zml.sharding.Sharding,
+) !zml.Buffer {
+    var exe = try platform.compile(allocator, io, engine, method, .{rt}, .{ .shardings = &.{sharding} });
+    var a = try exe.args(allocator);
+    var r = try exe.results(allocator);
+    a.set(.{ eng_buf, rt_buf });
+    exe.call(a, &r);
+    var out: zml.Buffer = r.get(zml.Buffer);
+    {
+        var s = try out.toSliceAlloc(allocator, io);
+        s.free(allocator);
+    }
+    a.deinit(allocator);
+    r.deinit(allocator);
+    exe.deinit();
+    return out;
+}
 
 // ---- Oracle (depuis la fixture) ----
 const Oracle = struct {
@@ -442,6 +540,8 @@ pub fn main(init: std.process.Init) !void {
     const mode = if (process_args.len >= 4) process_args[3] else "producer";
     const is_reader = std.mem.eql(u8, mode, "reader");
     const is_reader2 = std.mem.eql(u8, mode, "reader2");
+    const is_full = std.mem.eql(u8, mode, "full");
+    const is_chain = std.mem.eql(u8, mode, "chain");
 
     log.info("P5.7.5 — ZML moteur prefill — mode {s}", .{mode});
 
@@ -464,17 +564,91 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("Materializing weights...", .{});
     const eng_buf = try engine.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
-    const rt_buf = try rt.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
+    var rt_buf = try rt.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     var orc_buf = try oracle.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     store_ck.deinit();
     reg_ck.deinit();
     log.info("Buffers loaded (checkpoint registry libéré).", .{});
+
+    // ===== Mode CHAIN : forward complet 35 couches en un process, mémoire bornée (1 chunk à la fois) =====
+    if (is_chain) {
+        // Stage P (producer 0-14) -> hidden_14 + KV writers.
+        log.info("CHAIN stage P (couches 0-14)...", .{});
+        var exe_p = try platform.compile(allocator, io, engine, .forwardP, .{rt}, .{ .shardings = &.{sharding} });
+        var args_p = try exe_p.args(allocator);
+        var res_p = try exe_p.results(allocator);
+        args_p.set(.{ eng_buf, rt_buf });
+        exe_p.call(args_p, &res_p);
+        var h14, var ksl, var vsl, var kf, var vf = res_p.get(struct { zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer });
+        // Forcer le calcul du producer (exec lazy) + libérer son working set device AVANT de compiler le
+        // reader (sinon les working sets s'accumulent : 14.6->17.6->22.6 Go). Matérialiser = sync.
+        {
+            var s = try h14.toSliceAlloc(allocator, io);
+            s.free(allocator);
+            var s1 = try ksl.toSliceAlloc(allocator, io);
+            s1.free(allocator);
+            var s2 = try vsl.toSliceAlloc(allocator, io);
+            s2.free(allocator);
+            var s3 = try kf.toSliceAlloc(allocator, io);
+            s3.free(allocator);
+            var s4 = try vf.toSliceAlloc(allocator, io);
+            s4.free(allocator);
+        }
+        args_p.deinit(allocator);
+        res_p.deinit(allocator);
+        exe_p.deinit(); // libère le working set du chunk P avant le suivant
+
+        // Réinjecter les sorties du producer dans les slots d'entrée du reader (override rt_buf).
+        // KV partagé (producer) -> rt_buf ; hidden_15 réinjecté entre chunks.
+        rt_buf.k_sliding = ksl;
+        rt_buf.v_sliding = vsl;
+        rt_buf.k_full = kf;
+        rt_buf.v_full = vf;
+        rt_buf.hidden_15 = h14;
+
+        // 4 chunks readers de 5 couches (MLP double-wide -> exec ~4 Go -> pic ~18 Go/chunk).
+        // hidden threadé via rt_buf.hidden_15 (réinjecté). KV constant (producer).
+        log.info("CHAIN stage R1 (15-19)...", .{});
+        var h20 = try runReaderStage(.forwardR1, allocator, io, platform, engine, eng_buf, rt, rt_buf, sharding);
+        rt_buf.hidden_15 = h20;
+        log.info("CHAIN stage R2 (20-24)...", .{});
+        var h25 = try runReaderStage(.forwardR2, allocator, io, platform, engine, eng_buf, rt, rt_buf, sharding);
+        rt_buf.hidden_15 = h25;
+        log.info("CHAIN stage R3 (25-29)...", .{});
+        var h30 = try runReaderStage(.forwardR3, allocator, io, platform, engine, eng_buf, rt, rt_buf, sharding);
+        rt_buf.hidden_15 = h30;
+        log.info("CHAIN stage R4 (30-34 + final norm)...", .{});
+        var last = try runReaderStage(.forwardR4, allocator, io, platform, engine, eng_buf, rt, rt_buf, sharding);
+        defer {
+            last.deinit();
+            h14.deinit();
+            ksl.deinit();
+            vsl.deinit();
+            kf.deinit();
+            vf.deinit();
+            h20.deinit();
+            h25.deinit();
+            h30.deinit();
+        }
+
+        log.info("CHAIN — forward complet 35 couches en un process. last_hidden vs oracle :", .{});
+        const ok = try compareTap(allocator, io, "CHAIN last_hidden", 35, &last, &orc_buf.last_hidden);
+        if (ok) {
+            log.info("P5.7.5 mode=chain PASS — 35 couches en un process, mémoire bornée (5 chunks)", .{});
+        } else {
+            log.err("P5.7.5 mode=chain : divergence last_hidden", .{});
+            return error.PrefillMismatch;
+        }
+        return;
+    }
 
     log.info("Compiling forward...", .{});
     var exe = if (is_reader)
         try platform.compile(allocator, io, engine, .forwardReader, .{rt}, .{ .shardings = &.{sharding} })
     else if (is_reader2)
         try platform.compile(allocator, io, engine, .forwardReader2, .{rt}, .{ .shardings = &.{sharding} })
+    else if (is_full)
+        try platform.compile(allocator, io, engine, .forwardFull, .{rt}, .{ .shardings = &.{sharding} })
     else
         try platform.compile(allocator, io, engine, .forwardProducer, .{rt}, .{ .shardings = &.{sharding} });
     defer exe.deinit();
@@ -511,6 +685,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (is_reader2) {
         all_pass = (try compareTap(allocator, io, "tap L29 -> hidden_30", 29, &r0, &orc_buf.h30)) and all_pass;
         all_pass = (try compareTap(allocator, io, "last_hidden (post-norm)", 35, &r1, &orc_buf.last_hidden)) and all_pass;
+    } else if (is_full) {
+        all_pass = (try compareTap(allocator, io, "tap L0", 0, &r0, &orc_buf.h01)) and all_pass;
+        all_pass = (try compareTap(allocator, io, "tap L14", 14, &r1, &orc_buf.h15)) and all_pass;
+        all_pass = (try compareTap(allocator, io, "tap L24", 24, &r2, &orc_buf.h25)) and all_pass;
+        all_pass = (try compareTap(allocator, io, "last_hidden (post-norm)", 35, &r3, &orc_buf.last_hidden)) and all_pass;
     } else {
         all_pass = (try compareTap(allocator, io, "STAGE0 embeds vs h00", 0, &r0, &orc_buf.h00)) and all_pass;
         all_pass = (try compareTap(allocator, io, "tap L0 (sliding prod)", 0, &r1, &orc_buf.h01)) and all_pass;
