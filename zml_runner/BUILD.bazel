@@ -236,3 +236,11 @@ zig_binary(
         "//zml",
     ],
 )
+
+# P5.3 — ZML couche décodeur sliding complète (layer 13 producer : attn + MLP + PLE block).
+zig_binary(
+    name = "gemma4_layer",
+    main = "gemma4_layer.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

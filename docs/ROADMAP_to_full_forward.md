@@ -19,7 +19,7 @@ final_logit_softcapping=30.0. `full_attention` aux couches 4,9,14,19,24,29,34 (r
 | Gate | Contenu | Maillon neuf | Risque | Dépend |
 |---|---|---|---|---|
 | ~~**P5.2.H — MLP**~~ ✅ | pre_ff_norm → gate/up → `gelu(gate)*up` → down → post_ff_norm → +res. **intermediate=12288 (double-wide, layers 15-34)** ; 6144 (layers 0-14). `Tensor.gelu`=gelu_pytorch_tanh. scan max_abs 5.34e-5. tag `p5.2-h-mlp-zml-pass` | — | LOW | G ✅ |
-| **P5.3 — couche décodeur (sliding)** | assemble attention sublayer (E/F/G) + MLP (H) en 1 couche end-to-end | composition | LOW | H |
+| ~~**P5.3 — couche décodeur (sliding)**~~ ✅ | couche RÉELLE complète (input_ln + attn + MLP + bloc PLE per-layer + layer_scalar) vs `Gemma4TextDecoderLayer` module. scan **6.72e-5** (PASS 1er essai). tag `p5.3-layer-zml-pass` | composition | ✅ | H ✅ |
 | **P5.4 — embedding + scale** | `embed_tokens[ids] * √1536` | gather/lookup ZML | MED | — |
 | **P5.5 — head** | final `norm` → `lm_head` (tied, vocab 262144) → softcap `30·tanh(x/30)` | gather/big-dot + softcap (tanh) | MED | — |
 | ~~**P5.6 — layer 14 full attn RoPE**~~ ✅ | RoPE manuelle partielle (Q-path). **DÉCOUVERTE : full attn = head_dim 512** (q_proj [4096,1536]), partial_rotary 0.25 (128/512 tournent), theta=1e6, scaling=1.0. RoPE manuelle (cos/sin oracle 512-wide, `rotate_half` via split/neg/concat, `q*cos+rh*sin`). scan max_abs 7.99e-6. **RISQUE LEVÉ.** tag `p5.6-full-qrope-zml-pass` | RoPE manuelle (PAS `zml.nn.rope`) | ✅ | — |
@@ -93,7 +93,7 @@ seront validées en ZML** (assemblage = composition mécanique).
 - **P5.4** (embedding gather + scale √1536, slice vocab 4096) — `p5.4-embed-zml-pass` — **bit-exact**.
 - **P5.5** (head : final norm + lm_head tied + softcap 30·tanh(x/30), slice vocab 4096) — `p5.5-head-zml-pass` — scan 5.44e-5.
 
-## ✅ TOUTES LES OPS DISTINCTES DU FORWARD VALIDÉES EN ZML (1 juin 2026)
+## ✅ COUCHE DÉCODEUR SLIDING COMPLÈTE VALIDÉE E2E (P5.3, 2 juin) + TOUTES OPS DISTINCTES (1 juin)
 gather+scale · rmsNorm(+scale, pattern Llama) · dot (toutes projections + lm_head) · RoPE sliding (zml.nn.rope) + RoPE full partial MANUELLE (split/neg/concat + cos/sin oracle) · QK GQA (splitAxis) · sliding mask (causalAttnMask) · softmax(.k) · context GQA · gelu (Tensor.gelu=gelu_pytorch_tanh) · residual add · softcap (tanh) · KV-sharing routing (policy). Inconnus architecturaux résolus : double-wide MLP (12288, layers 15-34), full attn head_dim 512 + partial rotary 0.25, tied lm_head, embed_scale √1536, softcap 30. **Reste = INTÉGRATION (composition d'ops validées) : P5.3 (couche e2e), P5.7 (35 couches + KV cache + PLE).**
 
 ## Découvertes architecturales (vs hypothèses initiales)

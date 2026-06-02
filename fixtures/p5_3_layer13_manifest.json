@@ -1,0 +1,191 @@
+{
+  "source": "P5.3 PyTorch oracle couche d\u00e9codeur sliding compl\u00e8te (layer 13 producer)",
+  "spec_refs": [
+    "Gemma4TextDecoderLayer.forward L1395-1438 (module R\u00c9EL, pas r\u00e9-d\u00e9rivation)"
+  ],
+  "layer_idx": 13,
+  "config": {
+    "hidden": 1536,
+    "intermediate": 6144,
+    "head_dim": 256,
+    "n_heads": 8,
+    "n_kv": 1,
+    "ple_dim": 256,
+    "seq_len": 4,
+    "sliding_window": 512,
+    "layer_type": "sliding"
+  },
+  "layer_scalar": [
+    0.08837890625
+  ],
+  "tensors": {
+    "layer_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "per_layer_input": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "cos_sliding": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "sin_sliding": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "attn_mask": {
+      "shape": [
+        1,
+        1,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    },
+    "layer_out": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__input_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__q_proj__weight": {
+      "shape": [
+        2048,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__q_norm__weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__k_proj__weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__k_norm__weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__v_proj__weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__self_attn__o_proj__weight": {
+      "shape": [
+        1536,
+        2048
+      ],
+      "dtype": "float32"
+    },
+    "w__post_attention_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__pre_feedforward_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__gate_proj__weight": {
+      "shape": [
+        6144,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__up_proj__weight": {
+      "shape": [
+        6144,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__mlp__down_proj__weight": {
+      "shape": [
+        1536,
+        6144
+      ],
+      "dtype": "float32"
+    },
+    "w__post_feedforward_layernorm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__per_layer_input_gate__weight": {
+      "shape": [
+        256,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__per_layer_projection__weight": {
+      "shape": [
+        1536,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "w__post_per_layer_input_norm__weight": {
+      "shape": [
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "w__layer_scalar": {
+      "shape": [
+        1
+      ],
+      "dtype": "float32"
+    }
+  },
+  "pipeline": [
+    "residual=h; h=input_layernorm(h); h=self_attn(h,cos,sin,mask); h=post_attn_norm(h); h+=residual",
+    "residual=h; h=pre_ff_norm(h); h=mlp(h); h=post_ff_norm(h); h+=residual",
+    "residual=h; h=post_per_layer_input_norm(per_layer_projection(gelu(per_layer_input_gate(h))*per_layer_input)); h+=residual",
+    "h*=layer_scalar"
+  ],
+  "expected_zml_max_abs_le": 0.0005,
+  "note": "capstone composition (attention E/F/G + MLP H + input_ln + bloc PLE per-layer). Producer = KV local."
+}
