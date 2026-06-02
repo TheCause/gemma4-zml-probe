@@ -324,3 +324,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.8 — boucle de génération decode (N tokens) -> séquence == HF greedy.
+zig_binary(
+    name = "gemma4_decode4",
+    main = "gemma4_decode4.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

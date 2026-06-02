@@ -124,8 +124,18 @@ Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
     Tourne en **1 process** (S=1 tient en VM 24 Go). Revue adversariale (routage real 0.99, fidélité
     « suspect » 0.62 → unique point actionnable = magnitudes logits, ajouté → 1e-4). Runner
     `gemma4_decode3.zig`, oracle `scripts/43`. tag `p5.7.7-decode3-e2e-pass`.
-- **P5.7.8** — decode N tokens (boucle génération) : **reste à faire** (faible risque — threader le cache
-  grandi de step en step + sampling). **Le decode est fonctionnellement prouvé (1 token == HF).**
+- ~~**P5.7.8**~~ ✅ **(2 juin)** BOUCLE DE GÉNÉRATION (N=4 tokens). Cache threadé de step en step (idiome
+  llama : scatter à `(.slot, .k=pos)` dans le cache empaqueté, retourné et réinjecté par le main ;
+  sélection du step par `dynamicSlice`, mask par step). **Séquence ZML == HF greedy** :
+  `[1018, 6398, 25967, 53121]` (4/4, positions 4-7). Tourne en 1 process. Revue adversariale **real 0.88**
+  (threading non-vacant : un cache mal threadé ferait diverger step 2+). Runner `gemma4_decode4.zig`,
+  oracle `scripts/44`. tag `p5.7.8-generation-pass`.
+
+## 🏁 PORTAGE COMPLET — Gemma-4-E2B-it tourne en ZML, sortie identique à HuggingFace
+**prefill** (P5.7.5, last_hidden 1e-5) + **logits** (P5.7.6, tokens == HF) + **decode 1 token** (P5.7.7
+decode-3, last_hidden+logits+argmax == HF) + **génération N tokens** (P5.7.8, séquence == HF greedy).
+Chaque maillon prouvé bit-à-bit vs PyTorch. Reste (optionnel) : sliding window >512 (ring-buffer),
+sampling stochastique, perf/fast-prefill, batch.
 - **P5.7.8** — decode N tokens (boucle génération).
 
 Prérequis avant P5.7 : audit closeout fait (`docs/P5_6_closeout.md`, base saine, 0 gap).
