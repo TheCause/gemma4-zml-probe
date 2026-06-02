@@ -1,0 +1,70 @@
+{
+  "source": "P5.7.5 oracle prefill 35 couches (Gemma4TextModel r\u00e9el -> last_hidden_state)",
+  "input_ids": [
+    2,
+    105,
+    2048,
+    4095
+  ],
+  "seq_len": 4,
+  "tensors": {
+    "input_ids": {
+      "shape": [
+        1,
+        4
+      ],
+      "dtype": "int32"
+    },
+    "cos_sliding": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "sin_sliding": {
+      "shape": [
+        1,
+        4,
+        256
+      ],
+      "dtype": "float32"
+    },
+    "cos_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "sin_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "attn_mask": {
+      "shape": [
+        1,
+        1,
+        4,
+        4
+      ],
+      "dtype": "float32"
+    },
+    "last_hidden": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    }
+  },
+  "expected_zml_max_abs_le": 0.002,
+  "note": "poids depuis checkpoint r\u00e9el c\u00f4t\u00e9 ZML ; embedding+PLE+35 couches+final norm ; KV sharing YOCO."
+}
