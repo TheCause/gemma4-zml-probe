@@ -276,3 +276,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.7.5 — ZML MOTEUR PREFILL 35 couches (forward complet : embed + PLE + dispatch sliding/full + YOCO + final norm).
+zig_binary(
+    name = "gemma4_prefill",
+    main = "gemma4_prefill.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
