@@ -20,8 +20,9 @@ final_logit_softcapping=30.0. `full_attention` aux couches 4,9,14,19,24,29,34 (r
 |---|---|---|---|---|
 | ~~**P5.2.H — MLP**~~ ✅ | pre_ff_norm → gate/up → `gelu(gate)*up` → down → post_ff_norm → +res. **intermediate=12288 (double-wide, layers 15-34)** ; 6144 (layers 0-14). `Tensor.gelu`=gelu_pytorch_tanh. scan max_abs 5.34e-5. tag `p5.2-h-mlp-zml-pass` | — | LOW | G ✅ |
 | ~~**P5.3 — couche décodeur (sliding)**~~ ✅ | couche RÉELLE complète (input_ln + attn + MLP + bloc PLE per-layer + layer_scalar) vs `Gemma4TextDecoderLayer` module. scan **6.72e-5** (PASS 1er essai). tag `p5.3-layer-zml-pass` | composition | ✅ | H ✅ |
-| **P5.4 — embedding + scale** | `embed_tokens[ids] * √1536` | gather/lookup ZML | MED | — |
-| **P5.5 — head** | final `norm` → `lm_head` (tied, vocab 262144) → softcap `30·tanh(x/30)` | gather/big-dot + softcap (tanh) | MED | — |
+| ~~**P5.4 — embedding + scale**~~ ✅ | `embed_tokens[ids] * √1536` (gather ZML). **bit-exact**. tag `p5.4-embed-zml-pass` | gather/lookup | ✅ | — |
+| ~~**P5.5 — head**~~ ✅ | final `norm` → `lm_head` (tied) → softcap `30·tanh(x/30)`. scan 5.44e-5. tag `p5.5-head-zml-pass` | softcap (tanh) | ✅ | — |
+| ~~**P5.6.K — K full-rope**~~ ✅ | RoPE manuelle partielle K (layer 14, gap fermé par audit closeout). scan 2.68e-7. tag `p5.6k-full-krope-zml-pass` | — (= P5.6 sur K) | ✅ | — |
 | ~~**P5.6 — layer 14 full attn RoPE**~~ ✅ | RoPE manuelle partielle (Q-path). **DÉCOUVERTE : full attn = head_dim 512** (q_proj [4096,1536]), partial_rotary 0.25 (128/512 tournent), theta=1e6, scaling=1.0. RoPE manuelle (cos/sin oracle 512-wide, `rotate_half` via split/neg/concat, `q*cos+rh*sin`). scan max_abs 7.99e-6. **RISQUE LEVÉ.** tag `p5.6-full-qrope-zml-pass` | RoPE manuelle (PAS `zml.nn.rope`) | ✅ | — |
 | **P5.7 — assemblage multi-couches / end-to-end** | boucle 35 couches, KV-sharing YOCO câblé, embedding→couches→norm→lm_head→logits vs HF | intégration (KV cache, masques, rotary partagés) | HIGH | tous |
 
@@ -72,8 +73,20 @@ Au-delà de la composition : (1) loader 35 couches (producers 0-14 vs readers 15
 `shared_kv_states`, readers lisent (sliding→13, full→14) via policy table P5.1 (validée) ;
 (3) **PLE** par couche (P4.4) ; (4) masques sliding S≥512 + full ; (5) rotary sliding+full pré-calc ;
 (6) embedding (P5.4) → couches → norm+head (P5.5) ; (7) génération (decode incrémental) optionnelle.
-Phase d'ingénierie runtime (pas validation d'op). Sous-découper : P5.7.a (loader + 1 forward prefill
-complet vs HF logits) puis P5.7.b (decode/génération). Idéal en contexte frais.
+Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
+
+**Sous-découpage P5.7 (un seul nouveau type de complexité par gate — proposé Régis 2 juin) :**
+- **P5.7.0** — loader manifest only (lister/mapper les poids des 35 couches, aucun compute).
+- **P5.7.1** — load embeddings + poids d'UNE couche (vérifier le chargement ZML).
+- **P5.7.2** — load les 35 couches en mémoire, no compute (budget mémoire, ~2 Md params).
+- **P5.7.3** — precompute policy/runtime plan (KV-sharing producers→readers via P5.1, rotary sliding+full, masks).
+- **P5.7.4** — prefill 1 couche via le dispatcher (sliding ET full ; **le K-full-rope p5.6k s'y instancie**).
+- **P5.7.5** — prefill 35 couches, no generation.
+- **P5.7.6** — comparaison logits vs HF (le test e2e décisif).
+- **P5.7.7** — decode 1 token (KV cache incrémental, pos_idx).
+- **P5.7.8** — decode N tokens (génération).
+
+Prérequis avant P5.7 : audit closeout fait (`docs/P5_6_closeout.md`, base saine, 0 gap).
 
 ## Discipline (inchangée)
 Oracle PyTorch = source de vérité (lire `modeling_gemma4.py`, ne rien supposer). Gate atomique :
