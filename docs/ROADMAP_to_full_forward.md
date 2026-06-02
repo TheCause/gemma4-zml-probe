@@ -110,8 +110,15 @@ Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
     7.6e-6/5.7e-6. Revue adversariale 3 lentilles (non-vacuité real 0.92, fidélité real 0.88, indép-oracle
     « suspect » = axiome HF, pas de bug). tag `p5.7.7-decode1-pilot-pass`. Runner `gemma4_decode1.zig`,
     oracle `scripts/40_p5_7_7_decode_pilot_oracle.py`.
-  - **decode-2** — couche 14 **full** : append + rope manuelle à pos p ; vérifier `attention_k_eq_v` (V=K ?).
-  - **decode-3** — 35 couches : 2 caches multi-slots, dispatch, → norm → **logits → argmax == HF** (e2e).
+  - ~~**decode-2**~~ ✅ **(2 juin)** pilote writer 14 full × reader 19 full. head_dim **512** + `manualRope`
+    (cos/sin oracle à pos p, mécanisme P5.7.4) + scatter 512-wide + reader full. `attention_k_eq_v=False`
+    (V séparé, confirmé config). 6/6 PASS : cache_after 6e-8/2.9e-6, k/v_new 6e-8/2.9e-6, attn_out 14/19
+    2.1e-5/4.2e-5. tag `p5.7.7-decode2-full-pass`. Runner `gemma4_decode2.zig`, oracle `scripts/42`.
+    *Limite assumée* : la rope full utilise les cos/sin de l'oracle (proportional/partial non recalculée
+    en ZML, comme P5.7.4) → le « pos » full est validé via HF (position_ids=[4]) + application, pas un
+    calcul rope ZML indépendant (le path `zml.nn.rope(pos)` sliding, lui, est isolé en `decprim`).
+  - **decode-3** — 35 couches : 2 caches multi-slots (sliding 256 + full 512), dispatch, → norm →
+    **logits → argmax == HF** (e2e). Les 2 types de couche en decode sont désormais prouvés (decode-1 + 2).
 - **P5.7.8** — decode N tokens (boucle génération).
 
 Prérequis avant P5.7 : audit closeout fait (`docs/P5_6_closeout.md`, base saine, 0 gap).
