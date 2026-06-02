@@ -244,3 +244,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# P5.6.K — ZML full_attention K-rope manuelle partielle (layer 14, ferme gap K-full-rope).
+zig_binary(
+    name = "gemma4_full_krope",
+    main = "gemma4_full_krope.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

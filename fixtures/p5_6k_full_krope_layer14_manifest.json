@@ -1,0 +1,76 @@
+{
+  "source": "P5.6.K PyTorch oracle full_attention K-rope (layer 14, partial rotary manuelle)",
+  "spec_refs": [
+    "miroir P5.6 (Q) sur K : m\u00eames cos/sin full 512-wide, 1 t\u00eate kv"
+  ],
+  "layer_idx": 14,
+  "config": {
+    "hidden": 1536,
+    "n_kv": 1,
+    "head_dim": 512,
+    "seq_len": 4,
+    "rope": "proportional partial 0.25 theta1e6 scaling1.0"
+  },
+  "tensors": {
+    "hidden_input": {
+      "shape": [
+        1,
+        4,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "k_proj_weight": {
+      "shape": [
+        512,
+        1536
+      ],
+      "dtype": "float32"
+    },
+    "k_norm_weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "float32"
+    },
+    "cos_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "sin_full": {
+      "shape": [
+        1,
+        4,
+        512
+      ],
+      "dtype": "float32"
+    },
+    "k_after_rope": {
+      "shape": [
+        1,
+        4,
+        1,
+        512
+      ],
+      "dtype": "float32"
+    }
+  },
+  "zml_pipeline_hint": [
+    "k = hidden_input.dot(k_proj_weight,.h) -> reshape [1,4,1,512] withTags {.b,.s,.nh,.hd}",
+    "k = rmsNorm(k,.hd,1e-6).mul(k_norm_weight.broad)",
+    "rh = concat(-k.split(.hd,{256,256})[1], k.split(.hd,{256,256})[0], .hd)",
+    "k_rope = k.mul(cos.broad).add(rh.mul(sin.broad))   # cos/sin {.b,.s,.hd=512}",
+    "compare vs k_after_rope [1,4,1,512], tol 1e-4"
+  ],
+  "expected_zml_max_abs_le": 0.0001,
+  "checks": {
+    "manual_vs_apply": 0.0,
+    "pos0_identity": 0.0,
+    "pos3_active": 0.08207203447818756
+  },
+  "note": "ferme le gap K-full-rope de l'audit P5.6.closeout (technique identique \u00e0 P5.6 Q)."
+}
