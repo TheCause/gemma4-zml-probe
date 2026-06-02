@@ -76,13 +76,20 @@ Au-delà de la composition : (1) loader 35 couches (producers 0-14 vs readers 15
 Phase d'ingénierie runtime (pas validation d'op). **Idéal en contexte frais.**
 
 **Sous-découpage P5.7 (un seul nouveau type de complexité par gate — proposé Régis 2 juin) :**
-- **P5.7.0** — loader manifest only (lister/mapper les poids des 35 couches, aucun compute).
-- **P5.7.1** — load embeddings + poids d'UNE couche (vérifier le chargement ZML).
-- **P5.7.2** — load les 35 couches en mémoire, no compute (budget mémoire, ~2 Md params).
-- **P5.7.3** — precompute policy/runtime plan (KV-sharing producers→readers via P5.1, rotary sliding+full, masks).
-- **P5.7.4** — prefill 1 couche via le dispatcher (sliding ET full ; **le K-full-rope p5.6k s'y instancie**).
-- **P5.7.5** — prefill 35 couches, no generation.
-- **P5.7.6** — comparaison logits vs HF (le test e2e décisif).
+- ~~**P5.7.0**~~ ✅ — loader manifest only (lister/mapper les poids des 35 couches, aucun compute).
+  Script `scripts/34_p5_7_0_loader_manifest.py`, manifest `fixtures/p5_7_0_loader_manifest.json`.
+  Résumé : 600 clés disque attendues, 540 tenseurs runtime à charger, 60 clés K/V reader ignorées au
+  runtime (YOCO), `v_norm` documenté comme op RMSNorm sans poids. Validation checkpoint optionnelle
+  via `--require-weights`; sautée localement si `weights/model.safetensors` absent.
+- ~~**P5.7.1**~~ ✅ — load embeddings + 1 couche depuis le checkpoint RÉEL bf16, bit-exact (tag `p5.7.1-load-zml-pass`).
+- ~~**P5.7.2**~~ ✅ — load les 35 couches (597 tenseurs, []LayerW + prefix/withLayer), shapes par-couche OK (tag `p5.7.2-loadall-zml-pass`).
+- ~~**P5.7.3**~~ ✅ — runtime plan 35 couches (dispatch type/reader/target/dims/rope/mask), `fixtures/p5_7_3_runtime_plan.json` (tag `p5.7.3-runtime-plan-done`).
+- ~~**P5.7.4**~~ ✅ — couche FULL attention complète (layer 14, head_dim 512 + RoPE manuelle) vs module réel, scan 1.63e-5. **Les 2 types de couche validés e2e** (sliding P5.3 + full P5.7.4) (tag `p5.7.4-full-layer-zml-pass`).
+- **P5.7.5 ⏳ — prefill 35 couches, no generation. DÉCISION DE DESIGN OUVERTE :**
+  - **Blocage mémoire** : le `Gemma4TextModel` complet en fp32 (~17 Go, `embed_tokens_per_layer` fp32 = 9.4 Go) **ne tient pas** dans les 23 Go de la VM 3090. Oracle relancé en **bf16** (~9 Go, dtype natif checkpoint) → `fixtures/p5_7_5_prefill.safetensors` (last_hidden_state, cos/sin sliding+full, masque).
+  - **Stratégie de précision à trancher** : oracle bf16 vs moteur ZML fp32 → comparaison **lâche** (drift bf16 sur 35 couches). Options : (a) moteur ZML en bf16 pour matcher HF (matmul bf16 + norm fp32) ; (b) oracle fp32 via load_state_dict(assign=True)+meta (matérialiser les buffers rotary) ou machine ≥24 Go ; (c) tolérance structurelle (~1e-1 abs) acceptant que la comparaison prouve le CÂBLAGE (35 couches + KV sharing + dispatch), pas la précision bit. **Recommandation : (b) si faisable (rigueur fp32 conservée), sinon (c) documenté.**
+  - **Build moteur** (composition d'ops validées, non encore écrit) : embedding (P5.4) + PLE frontend (P4.4) → boucle 35 couches dispatchées sliding/full (P5.3/P5.7.4) avec **KV sharing YOCO** (capter K/V de layer 13 sliding + 14 full, réutilisés par readers 15-34) → final norm. Runner unrollé (idiome qwen `[]TransformerLayer`).
+- **P5.7.6** — comparaison logits vs HF (le test e2e décisif) — head P5.5 sur le last_hidden de P5.7.5.
 - **P5.7.7** — decode 1 token (KV cache incrémental, pos_idx).
 - **P5.7.8** — decode N tokens (génération).
 
@@ -105,6 +112,9 @@ seront validées en ZML** (assemblage = composition mécanique).
 - **P5.6** (full attn Q-rope manuelle partielle, layer 14, head_dim 512) — `p5.6-full-qrope-zml-pass` — scan 7.99e-6. **Risque levé.**
 - **P5.4** (embedding gather + scale √1536, slice vocab 4096) — `p5.4-embed-zml-pass` — **bit-exact**.
 - **P5.5** (head : final norm + lm_head tied + softcap 30·tanh(x/30), slice vocab 4096) — `p5.5-head-zml-pass` — scan 5.44e-5.
+- **P5.7.0** (loader manifest only, 35 couches, no compute) — `fixtures/p5_7_0_loader_manifest.json`.
+  600 clés disque attendues ; 540 tenseurs runtime à charger ; 60 K/V reader disk-only ignorés ; validation
+  checkpoint prête via `python scripts/34_p5_7_0_loader_manifest.py --require-weights` quand les poids sont présents.
 
 ## ✅ COUCHE DÉCODEUR SLIDING COMPLÈTE VALIDÉE E2E (P5.3, 2 juin) + TOUTES OPS DISTINCTES (1 juin)
 gather+scale · rmsNorm(+scale, pattern Llama) · dot (toutes projections + lm_head) · RoPE sliding (zml.nn.rope) + RoPE full partial MANUELLE (split/neg/concat + cos/sin oracle) · QK GQA (splitAxis) · sliding mask (causalAttnMask) · softmax(.k) · context GQA · gelu (Tensor.gelu=gelu_pytorch_tanh) · residual add · softcap (tanh) · KV-sharing routing (policy). Inconnus architecturaux résolus : double-wide MLP (12288, layers 15-34), full attn head_dim 512 + partial rotary 0.25, tied lm_head, embed_scale √1536, softcap 30. **Reste = INTÉGRATION (composition d'ops validées) : P5.3 (couche e2e), P5.7 (35 couches + KV cache + PLE).**
