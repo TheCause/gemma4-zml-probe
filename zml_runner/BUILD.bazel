@@ -353,3 +353,11 @@ zig_binary(
         "//zml",
     ],
 )
+
+# Q4 — ZML MOTEUR decode 1-step AVEC V-quant (MSE V-only) inséré au point cache ; decode == HF-V-quant.
+zig_binary(
+    name = "gemma4_decode_vq",
+    main = "gemma4_decode_vq.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
