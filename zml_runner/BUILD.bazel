@@ -332,3 +332,13 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+zig_binary(
+    name = "gemma4_hadq",
+    main = "gemma4_hadq.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
