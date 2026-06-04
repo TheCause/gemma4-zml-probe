@@ -361,3 +361,11 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# Q5 — ZML BOUCLE génération decode AVEC V-quant (MSE V-only) ; séquence == HF-V-quant greedy.
+zig_binary(
+    name = "gemma4_gen_vq",
+    main = "gemma4_gen_vq.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
