@@ -342,3 +342,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+# Q3 — ZML MSE V-only quantizer chain (norm + Hadamard + nearest-centroid + inverse) vs oracle.
+zig_binary(
+    name = "gemma4_vquant",
+    main = "gemma4_vquant.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
