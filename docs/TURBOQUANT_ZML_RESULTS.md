@@ -79,8 +79,9 @@ suivant HF-V-quant à chaque step.
 
 **Portage V-quant : 4/4 tokens argmax-match — séquence ZML-V-quant == HF-V-quant greedy.**
 
-Le portage n'ajoute donc aucune erreur au-delà de la quantification elle-même : le quantizer ZML (prouvé
-bit-exact en Q3, inséré sans régression en Q4) reproduit fidèlement la génération HF sous V-quant. Fixture :
+Le portage n'ajoute donc aucune erreur au-delà de la quantification elle-même : le quantizer ZML (validé
+à max_abs ≤ 1e-4, flips frontière < 5 %, en Q3 ; inséré sans régression en Q4) reproduit fidèlement la
+génération HF sous V-quant. Fixture :
 `/data/gemma4-zml-probe/decode_vq_gen.safetensors` ; manifeste : `decode_vq_gen_manifest.json`.
 
 ---
