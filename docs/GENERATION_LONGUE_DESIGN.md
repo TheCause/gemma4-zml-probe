@@ -33,13 +33,18 @@ La table `embed_tokens_per_layer.weight` (`[vocab, 8960]`, 8960 = 35×256) exist
 
 La génération longue **fait évoluer `engine.zig` lui-même** (le socle publié), **pas une copie** — sinon on retombe dans le travers que le socle modulaire visait à éliminer (copier le moteur par hypothèse).
 
-**Garantie de non-régression** : **E1 et E2 restent verts à chaque commit**. C'est possible parce que les changements sont rétro-compatibles : `KMAX_SLIDING` / `KMAX_FULL` deviennent des paramètres **comptime** dont la valeur par défaut reproduit le comportement actuel, et le modulo `pos % KMAX_SLIDING` est l'identité tant que `pos < KMAX_SLIDING` (cas E1/E2 : positions 0..7, KMAX=8). La technique de preuve HLO (`diff -rq` des dumps `--xla_dump_to`) reste l'arme de non-régression.
+**Garantie de non-régression** : **E1 et E2 restent verts à chaque commit**. C'est possible parce que les nouveautés sont gardées derrière des **paramètres comptime** dont la valeur par défaut **n'émet aucune nouvelle op** :
+
+- `KMAX_SLIDING` / `KMAX_FULL` : tailles de cache comptime, défaut **8** (= `SEQ_LEN + N_DECODE` actuel) → fixture E1/E2 (KMAX=8) chargée inchangée.
+- `ring: bool` comptime, défaut **`false`** : en `false`, le scatter/lecture sliding reste à `.k = pos` (chemin decode4 actuel, **aucune op modulo émise**) ; en `true` (L1b), `.k = pos % KMAX_SLIDING`.
+
+⚠️ **La preuve HLO exige l'élision comptime, pas l'identité numérique.** Émettre `pos % 8` produirait une op modulo absente de decode4 → le `diff -rq` des dumps `--xla_dump_to` divergerait **même si les tokens coïncident**. Donc en config E1/E2 (`ring=false`), le modulo doit être **comptime-supprimé** (`if (ring) … else …`), pas calculé. Idem pour la sélection de masque (§5.3) : en config par défaut, un seul masque est émis, comme aujourd'hui. La preuve HLO (`diff -rq`) reste l'arme de non-régression à chaque commit.
 
 ## 4. Découpage en gates
 
 | Gate | Contenu | Oracle / critère |
 |------|---------|------------------|
-| **L0** | Script Python : génère N ≈ 2048 tokens greedy HF (sliding window actif côté HF) + fixture `gen_long.safetensors` (`embeds`, `embptls`, `cos/sin`, **masques bande**, `positions`, `expected`, `cache0` du prompt). Dérivé de `scripts/45_gen_vq_oracle.py`. | produit l'oracle (pas de gate) |
+| **L0** | Script Python : fixture `gen_long.safetensors`. **Réécriture ciblée** de `scripts/45_gen_vq_oracle.py` (≠ simple dérivation) — delta concret : (a) générer N ≈ 2048 tokens greedy HF avec le **sliding window 512 réellement actif** + `min_new_tokens` / EOS ignoré pour garantir la longueur ; (b) émettre **deux masques** `masks_sliding` (bande, `.k=KMAX_SLIDING`) et `masks_full` (causal plein, `.k=KMAX_FULL`) au lieu du masque causal unique `.k=8` ; (c) dimensionner les caches sliding/full à `.k = L_max` ; (d) **retirer les hooks V-quant** (compression hors-scope, §8). Tenseurs produits : `embeds`, `embptls`, `cos/sin`, `masks_sliding`, `masks_full`, `positions`, `expected`, `cache0` du prompt. | produit l'oracle (pas de gate) |
 | **L1a** | Cache sliding **linéaire borné** (`.k = L_max`), scatter à `pos`, masque **bande causale** `[pos-511, pos]`. Replay (embeds depuis fixture). | argmax == HF sur les N tokens |
 | **L1b** | Conversion en **vrai ring-buffer 512** : scatter `pos % 512`, masque **circulaire** (host). Replay. | argmax == HF sur les N tokens |
 | **L2** | Inférence **autonome host-orchestrée** : host fait argmax → gather `embed_tokens[tok]` + `embed_tokens_per_layer[tok]` → calcule `cos/sin` + masque pour `pos+1` → réinjecte. **Prefill du prompt conservé via `cache0`** (D5), seule la phase decode est autonome. | séquence générée == HF greedy |
@@ -56,16 +61,21 @@ Chaque gate est validé **par perturbation** (corrompre l'oracle → le gate doi
 
 Rappel topologie (socle actuel) : couches 0..14 = producteurs de KV ; couches ≥ 15 = lecteurs (partagent le KV des writers 13 sliding / 14 full, archi YOCO/shared-KV). Le ring ne concerne que les **slots sliding** ; les **slots full** restent linéaires `L_max`.
 
-### 5.2 Indexation (le seul vrai changement de logique dans `runLayerGen`)
-- **Sliding** : `slot_k = pos % KMAX_SLIDING` pour le scatter **et** la lecture (vs `pos` aujourd'hui).
-- **Full** : inchangé, `pos`.
+### 5.2 Indexation du cache
+Sous garde `comptime ring` (§3) :
+- **Sliding**, `ring = true` (L1b) : `slot_k = pos % KMAX_SLIDING` pour le scatter **et** la lecture. `ring = false` (E1/E2, L1a) : `slot_k = pos` (chemin actuel, modulo comptime-élidé).
+- **Full** : toujours `pos` (jamais de ring).
 
-### 5.3 Masque
-Le masque **reste une entrée** (`Packed.masks`), calculé **côté host** :
-- L1a : bande causale `[max(0, pos-511), pos]`.
-- L1b : même fenêtre sémantique, mais ré-indexée pour le wrap circulaire du ring.
+### 5.3 Masque — **deux entrées par type de couche** (correction post-revue)
+Point de design porteur : le masque est appliqué **identiquement à toutes les couches** (`engine.zig:268`, `scores.add(mask.broad(scores.shape()))`), et sa dimension `.k` **doit égaler `cache_k.dim(.k)`** pour broadcaster. Dès que le cache sliding a `.k = 512` et le cache full `.k = L_max`, **un masque unique ne peut pas servir les deux** (le code actuel ne marche que parce que sliding et full partagent KMAX=8).
 
-→ `engine.zig` ne touche **que l'indexation du cache**, pas la sémantique du masque. C'est ce qui rend le diff minimal.
+→ Le masque devient **deux entrées** dans `Packed`, calculées côté host :
+- `masks_sliding` (`.k = KMAX_SLIDING`) : bande causale `[max(0, pos-511), pos]` (L1a), ré-indexée pour le wrap circulaire (L1b).
+- `masks_full` (`.k = KMAX_FULL`) : **causale pleine** (les couches full ne sont **jamais** fenêtrées — cf. §1/§5.1 ; leur appliquer la bande corromprait silencieusement les couches dont la correction est la plus critique).
+
+`runLayerGen` reçoit les deux masques (issus de `Packed` via `pickStep`) et sélectionne par **`comptime isFull(i)`** : `const mask = if (isFull(i)) mask_full else mask_sliding;`. Ça couvre producers **et** readers (un reader hérite du type de son writer, déjà porté par `isFull(i)`).
+
+**Compatibilité E1/E2** : en config par défaut (`KMAX_SLIDING == KMAX_FULL == 8`), les deux entrées ont la même forme et le même contenu causal → pour préserver le HLO de decode4, le défaut **émet un seul masque** (le dédoublement est lui aussi gardé comptime). Le diff `engine.zig` reste localisé (indexation + sélection de masque par type, toutes deux comptime), mais l'affirmation initiale « masque unique intact » est **abandonnée**.
 
 ### 5.4 Positions
 Déjà threadées (`positions[step]`), inchangées sur le principe ; étendues à N ≈ 2048.
@@ -94,7 +104,7 @@ Le prefill du prompt reste fourni par `cache0` (fixture), comme aujourd'hui.
 - **Oracle L0 / EOS** : greedy peut atteindre EOS avant N tokens → forcer `min_new_tokens` ou ignorer EOS pour produire une séquence de longueur fixe testable.
 - **Ring circulaire (L1b)** : neutralisé par test de perturbation + contrôle de non-vacuité (corrompre l'oracle doit faire FAIL le scan global).
 - **Mémoire** : `L_max = 2048` → cache full ≈ 30 MB ; négligeable sur la 3090 (24 GB).
-- **Non-régression** : à chaque commit, re-run E1 (preuve HLO `diff -rq`) + E2. Tout commit qui les casse est rejeté.
+- **Non-régression** : à chaque commit, re-run E1 (preuve HLO `diff -rq`) + E2. Tout commit qui les casse est rejeté. E1/E2 tournent en **config par défaut** (`ring=false`, `KMAX_SLIDING=KMAX_FULL=8`, masque unique) : la fixture KMAX=8 et la brique TurboQuant chargent inchangées, et le graphe émis est byte-identique à decode4/gen_vq.
 - **Compute** : exécution sur la 3090 (`ssh ia@192.168.1.163`, workspace `/data/rqz_workspace/zml/examples/rqz/`, checkpoint `/data/gemma4-zml-probe/weights/model.safetensors`), via `deploy_to_3090.sh`. Fixtures volumineuses laissées sur la 3090 (gitignorées). Aucune commande à coller pour Régis.
 
 ## 8. Hors-scope (YAGNI)
