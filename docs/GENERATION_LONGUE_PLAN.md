@@ -55,7 +55,8 @@ Plus, pour Task 0 (et tout commit prétendant « HLO inchangé ») : preuve HLO 
 | `zml_runner/engine.zig` | Socle decode. Gagne : `Cache(KMAX_SLIDING, KMAX_FULL)` et `Packed(mode)` paramétrés comptime, flag `ring`, sélection de masque par `comptime isFull(i)`. | Modifier |
 | `zml_runner/gemma4_engine_e1.zig`, `gemma4_engine_e2.zig` | Runners de non-régression. **Doivent rester PASS.** Adaptés seulement si la signature des types change (instanciation en config défaut). | Modifier a minima |
 | `scripts/46_gen_long_oracle.py` | L0 : oracle HF 2048 tokens + fixture `gen_long.safetensors` (2 masques, caches `L_max`). | Créer |
-| `zml_runner/gemma4_gen_long.zig` | Runner L1a/L1b : replay long, compare argmax vs `expected`. | Créer |
+| `zml_runner/gemma4_gen_long.zig` | Runner L1a : replay long linéaire borné, compare argmax vs `expected`. | Créer |
+| `zml_runner/gemma4_gen_long_ring.zig` | Runner L1b : replay long ring 512 (instanciation `ring=true`). | Créer |
 | `zml_runner/gemma4_gen_auto.zig` | Runner L2 : decode autonome host-orchestré (argmax + gather + cos/sin/masque host). | Créer |
 | `zml_runner/BUILD.bazel` | Cibles `gemma4_gen_long`, `gemma4_gen_auto` (avec `srcs=["engine.zig"]`). | Modifier |
 | `docs/ENGINE_LOG.md` | Journal des gates (pattern projet). | Modifier (append) |
@@ -81,11 +82,13 @@ XLA_FLAGS="--xla_dump_to=/tmp/hlo_e1_before" bazel run //examples/rqz:gemma4_eng
 ```
 Garder `/tmp/hlo_e1_before` pour le diff final (Step 7).
 
-- [ ] **Step 2 : Paramétrer `Cache` par comptime `KMAX_SLIDING`/`KMAX_FULL`**
+- [ ] **Step 2 : Exposer `KMAX_SLIDING`/`KMAX_FULL` comme scalaires comptime (la dim cache est déjà inférée de la fixture)**
 
-Transformer `Cache` (engine.zig:150) en fonction de type `fn Cache(comptime KMAX_SLIDING: i64, comptime KMAX_FULL: i64) type`. Les `createTensor("cache_sl_k", .{...})` gardent le tag `.k` mais la dim provient du paramètre. Définir un alias par défaut `pub const CacheDefault = Cache(8, 8);` utilisé par E1/E2.
+⚠️ Important : `Cache.init` (engine.zig:156-163) crée `cache_sl_k`/`fl_k` avec `createTensor(..., null)` → la dim `.k` est **inférée du safetensors chargé**, pas codée en Zig. Donc on n'a **pas** besoin de reparamétrer `Cache` pour changer la taille `.k` (elle suit la fixture : 8 aujourd'hui, `L_max`/512 demain). `Cache` reste tel quel.
 
-> Le tag `.k` reste le même nom ; seules les **dimensions** diffèrent entre sliding et full. Vérifier que `scores`/`mask` broadcast (engine.zig:266-268) tient toujours en défaut (sliding==full==8).
+Le besoin réel : avoir `KMAX_SLIDING` comme **scalaire comptime** côté Zig pour (a) le modulo du ring (Step 4) et (b) le check d'égalité de forme du dédoublement de masque. On les place donc dans la config `EngineModel` (Step 4), pas dans `Cache`.
+
+> Vérifier que `scores`/`mask` broadcast (engine.zig:266-268) tient toujours en défaut (un seul masque, `.k` sliding==full venant de la même fixture KMAX=8).
 
 - [ ] **Step 3 : Paramétrer `Packed` par un mode comptime (masque simple vs double)**
 
@@ -95,21 +98,36 @@ Transformer `Cache` (engine.zig:150) en fonction de type `fn Cache(comptime KMAX
 
 Alias défaut `pub const PackedDefault = Packed(false);`. (Cf. spec §5.3 : `zml.io.load` réfléchit sur les champs → la paramétrisation doit être au niveau **type**, pas un `if` runtime.)
 
-- [ ] **Step 4 : Ajouter `ring` et la sélection de masque dans `runLayerGen` (gardés comptime, défaut neutre)**
+- [ ] **Step 4 : Étendre la signature `EngineModel` + ajouter `ring`/sélection de masque dans `runLayerGen` (gardés comptime, défaut neutre)**
 
-Threader deux comptime à `EngineModel` : `ring: bool = false`, et le mode masque. Dans `runLayerGen` :
+`EngineModel` est aujourd'hui `EngineModel(comptime Brick: type)` (engine.zig:292). **Nouvelle signature** : ajouter un 2e paramètre comptime de config avec des champs **defaulted** :
+```zig
+pub const EngineCfg = struct {
+    ring: bool = false,
+    two_masks: bool = false,
+    kmax_sliding: i64 = 8,
+    kmax_full: i64 = 8,
+};
+pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type { ... }
+```
+- E1 : `engine.EngineModel(struct{}, .{})` (tout par défaut → neutre).
+- E2 : `engine.EngineModel(TurboQuantVBrick, .{})`.
+- L1a : `EngineModel(struct{}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX })`.
+- L1b : `…{ .ring = true, .two_masks = true, .kmax_sliding = 512, .kmax_full = L_MAX }`.
+
+`cfg` est lisible dans `forward`/`runLayerGen` (capturé par la closure de type). Dans `runLayerGen` :
 ```zig
 // scatter sliding — modulo COMPTIME-élidé en défaut
-const write_k = if (ring) pos_u.rem(KMAX_SLIDING_scalar) else pos_u;   // ring=false -> aucune op rem émise
+const write_k = if (cfg.ring) pos_u.rem(Tensor.scalar(@intCast(cfg.kmax_sliding), .u32)) else pos_u; // ring=false -> aucune op rem
 // ...
 // sélection de masque par type de couche
-const mask = if (two_masks) (if (isFull(i)) mask_full else mask_sliding) else mask_single;
+const mask = if (cfg.two_masks) (if (isFull(i)) mask_full else mask_sliding) else mask_single;
 ```
-⚠️ Le `if (ring)` et le `if (two_masks)` sont sur des **comptime bool** → en défaut, la branche morte n'émet rien (ni `rem`, ni second masque). C'est la condition de l'égalité HLO.
+⚠️ `cfg.ring` et `cfg.two_masks` sont **comptime** → en défaut, la branche morte n'émet rien (ni `rem`, ni second masque). C'est la condition de l'égalité HLO. `runLayerGen` reçoit `mask_single` (mode défaut) **ou** `mask_sliding`+`mask_full` (mode `two_masks`) ; threader selon `cfg.two_masks`.
 
 - [ ] **Step 5 : Faire compiler E1/E2 en config défaut**
 
-`gemma4_engine_e1.zig` : `const Model = engine.EngineModel(struct{});` devient l'instanciation par défaut (ring=false, KMAX 8/8, masque simple). Idem E2 avec la brique. Adapter les `.init`/`Packed`/`Cache` aux alias `*Default`. Aucune autre logique modifiée.
+`gemma4_engine_e1.zig` : `const Model = engine.EngineModel(struct{}, .{});` (defaults → ring=false, KMAX 8/8, masque simple). Idem E2 : `EngineModel(TurboQuantVBrick, .{})`. `Packed` reste `Packed(false)` (champ `masks` unique). Aucune autre logique modifiée.
 
 - [ ] **Step 6 : Re-run E1 + E2 → PASS**
 
@@ -199,7 +217,7 @@ zig_binary(
 
 - [ ] **Step 2 : Runner replay long (calqué sur `gemma4_engine_e1.zig`)**
 
-Instancier `engine.EngineModel(struct{})` avec comptime `ring=false`, `two_masks=true`, `KMAX_SLIDING=L_MAX`, `KMAX_FULL=L_MAX`. `NUM_STEPS` lu depuis la fixture (taille de `expected`). Boucle : pour chaque step, `forward` → argmax → comparer `expected[step]`. Threader le cache grandi (comme E1 lignes 115-120).
+Instancier `engine.EngineModel(struct{}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX })` (ring=false → linéaire borné). `Packed(true)` (deux masques). `NUM_STEPS` lu depuis la fixture (taille de `expected`). Boucle : pour chaque step, `forward` → argmax → comparer `expected[step]`. Threader le cache grandi (comme E1 lignes 115-120).
 
 - [ ] **Step 3 : Build + run → PASS sur N tokens**
 
@@ -239,9 +257,9 @@ Ajouter au script 46 un mode `--ring` : `masks_sliding[k]` a `.k=512`, valide au
 
 > Vérité à respecter : le scatter ZML écrira K/V du token courant à `pos % 512`. Le masque doit pointer les mêmes slots physiques. Construire le masque depuis la même formule modulo que le scatter.
 
-- [ ] **Step 2 : Runner — activer `ring=true`**
+- [ ] **Step 2 : Runner — nouvelle cible `gemma4_gen_long_ring`**
 
-Dans `gemma4_gen_long.zig`, exposer un paramètre (comptime via constante en tête de fichier, ou 2e cible Bazel `gemma4_gen_long_ring`) instanciant `EngineModel` avec `ring=true`, `KMAX_SLIDING=512`, `KMAX_FULL=L_MAX`, `two_masks=true`.
+Créer un runner court `gemma4_gen_long_ring.zig` (ou factoriser le corps de `gemma4_gen_long.zig` et n'y changer que l'instanciation) qui instancie `engine.EngineModel(struct{}, .{ .ring = true, .two_masks = true, .kmax_sliding = 512, .kmax_full = L_MAX })`. Ajouter la cible Bazel `gemma4_gen_long_ring` (`srcs=["engine.zig"]`). On garde **deux cibles distinctes** (linéaire vs ring) pour rejouer L1a en non-régression à tout moment.
 
 - [ ] **Step 3 : Build + run → PASS**
 
