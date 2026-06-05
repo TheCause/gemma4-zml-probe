@@ -115,6 +115,8 @@ Le `load`/`Bufferized` de la sous-struct est géré nativement (`mem.zig`, `io.z
 E1 prouve que la factorisation ne casse rien ; E2 prouve que la brique branchée == la copie, **sans copie**.
 Discipline gate/oracle du projet (oracle → runner ZML → compare → commit+tag).
 
+**Preuve renforcée E1 (5 juin 2026)** — les 4 tokens argmax sont robustes, donc faibles comme *seule* preuve. L'identité `EngineModel(struct{})` ≡ `decode4` est établie au niveau du **graphe compilé** : dump XLA HLO des deux binaires (`XLA_FLAGS=--xla_dump_to`), **1037 fichiers générés, identiques byte-à-byte sauf 1** (`debug_options`, qui n'encode que le chemin de dump `/tmp/...`). Le calcul compilé est donc strictement identique (tous logits + last_hidden bit-à-bit), confirmant empiriquement le mécanisme comptime-mort. **Non-vacuité** : engine perturbé (`RMS_EPS` 1e-6→1e-2) → E1 **FAIL** → le gate discrimine. Détail instructif : la perturbation n'a cassé qu'**1 token sur 4** (3 argmax survivent) → l'argmax seul est insuffisant, **d'où la comparaison HLO** comme preuve d'identité fine.
+
 ## 5. Migration
 
 - `decode3.zig`, `decode4.zig`, `decode_vq.zig`, `gen_vq.zig` **restent intacts** (gates immuables =
