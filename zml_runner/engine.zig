@@ -79,10 +79,11 @@ fn manualRope(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, half: i64) zml.Te
     return x.mul(cos.broad(x.shape())).add(rh.mul(sin.broad(x.shape())));
 }
 
-/// Contexte passé à un point d'extension. `layer_idx`/`is_full` sont comptime (issus de l'inline for).
-/// `pos` (Tensor runtime) n'est PAS inclus : YAGNI — aucune brique actuelle ne le consomme (TurboQuant
-/// route sur `is_full`). S'ajoute trivialement quand une brique le demande.
-pub const LayerCtx = struct { layer_idx: usize, is_full: bool };
+/// Contexte (runtime) passé à un point d'extension, pour info/extensibilité. `is_full` n'y est PAS :
+/// il est passé en paramètre **comptime** séparé (cf hook) car il sélectionne entre des constantes de
+/// **shapes différentes** (codebook/Hadamard 256 vs 512) — un select runtime exigerait des shapes égales.
+/// `pos` non inclus : YAGNI (aucune brique ne le consomme). S'ajoutent trivialement au besoin.
+pub const LayerCtx = struct { layer_idx: usize };
 
 /// Chaîne MSE V-only prouvée en Q3 (norm fp16 + Hadamard + nearest-centroid + inverse).
 /// v:[.k,.hd], cb:[.c], Pi:[.e,.hd] -> v_hat:[.k,.hd]. `pub` pour partage par les briques.
@@ -241,8 +242,9 @@ fn runLayerGen(layer: LayerW, comptime i: usize, hidden: zml.Tensor, ple_i: zml.
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
         // comptime-mort pour une brique sans cette méthode (ex: struct{}) → V inchangé → bit-exact decode4.
         if (@hasDecl(@TypeOf(brick), "post_v_norm")) {
-            const ctx = LayerCtx{ .layer_idx = i, .is_full = full };
-            v = brick.post_v_norm(v, ctx);
+            // is_full passé en COMPTIME (la brique sélectionne une constante par shape) ; `comptime isFull(i)`
+            // car `i` est comptime mais `full` est un const runtime. ctx = info runtime.
+            v = brick.post_v_norm(v, comptime isFull(i), LayerCtx{ .layer_idx = i });
         }
         const v_new = v.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
@@ -298,10 +300,9 @@ pub fn EngineModel(comptime Brick: type) type {
 
         const Self = @This();
 
-        /// Initialise les poids depuis `base` (checkpoint). La brique est mise à `struct{}`-vide par
-        /// défaut ; une brique avec constantes (E2) exposera `init(View)` et sera câblée sur la fixture
-        /// (les constantes brick vivent dans un store distinct des poids — threading fait en Task 2).
-        pub fn init(allocator: std.mem.Allocator, base: zml.io.TensorStore.View) !Self {
+        /// Crée les poids (symboliques) depuis `base` (checkpoint) et assemble le model avec la brique
+        /// fournie. Helper partagé par `init` (brique vide, E1) et `initBrick` (brique chargée, E2).
+        fn initWith(allocator: std.mem.Allocator, base: zml.io.TensorStore.View, brick: Brick) !Self {
             const layers = try allocator.alloc(LayerW, NUM_LAYERS);
             const layers_base = base.withPrefix("layers");
             for (layers, 0..) |*layer, i| layer.* = LayerW.init(layers_base.withLayer(i));
@@ -311,8 +312,20 @@ pub fn EngineModel(comptime Brick: type) type {
                 .per_layer_projection_norm = base.createTensor("per_layer_projection_norm.weight", .{.p}, null),
                 .final_norm = base.createTensor("norm.weight", .{.d}, null),
                 .layers = layers,
-                .brick = .{},
+                .brick = brick,
             };
+        }
+
+        /// E1 : poids depuis `base`, brique vide (`struct{}` → `.{}`).
+        pub fn init(allocator: std.mem.Allocator, base: zml.io.TensorStore.View) !Self {
+            return initWith(allocator, base, .{});
+        }
+
+        /// E2 : poids depuis `base` (store des poids), brique construite via `brick_view` (store des
+        /// constantes brick, distinct). Les `Tensor` créés sont bindés à des stores différents : le LOAD
+        /// se fait en deux passes côté main (poids vs brique) puis assemblage manuel du `Bufferized`.
+        pub fn initBrick(allocator: std.mem.Allocator, base: zml.io.TensorStore.View, brick_view: zml.io.TensorStore.View) !Self {
+            return initWith(allocator, base, Brick.init(brick_view));
         }
 
         pub fn load(self: *const Self, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Self) {

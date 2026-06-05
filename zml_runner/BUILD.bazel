@@ -379,3 +379,12 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# E2 — brique TurboQuant branchée sur le socle : EngineModel(TurboQuantVBrick) == gen_vq (POC sans copie).
+zig_binary(
+    name = "gemma4_engine_e2",
+    main = "gemma4_engine_e2.zig",
+    srcs = ["engine.zig", "brick_turboquant.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
