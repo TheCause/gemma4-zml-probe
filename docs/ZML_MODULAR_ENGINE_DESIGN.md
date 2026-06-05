@@ -70,7 +70,8 @@ Passé à chaque point : `LayerCtx = struct { layer_idx, is_full (comptime), pos
 ### 3.3 Une brique = un type Zig
 
 - **Identité** : `struct {}` (vide) → aucun `@hasDecl` ne matche → le moteur ne fait rien →
-  `EngineModel(struct{})` reproduit `decode4` **bit-exact**. C'est l'**oracle de non-régression gratuit**.
+  `EngineModel(struct{})` reproduit `decode4` (**mêmes tokens générés** ; la branche brick est
+  comptime-morte donc le graphe MLIR est identique). C'est l'**oracle de non-régression gratuit**.
 - **TurboQuant V-quant** : une struct avec la méthode + ses constantes en champs `Tensor` :
 
 ```zig
@@ -108,7 +109,7 @@ Le `load`/`Bufferized` de la sous-struct est géré nativement (`mem.zig`, `io.z
 
 | Gate | Contenu | Oracle | Critère |
 |---|---|---|---|
-| **E1 — non-régression** | `EngineModel(struct{})` génère N tokens | `gemma4_decode4.zig` (intact) | **bit-exact** (mêmes tokens + last_hidden identique) |
+| **E1 — non-régression** | `EngineModel(struct{})` génère N tokens | `gemma4_decode4.zig` (intact) | **tokens identiques** (4 argmax == HF greedy ; la fixture n'a pas de réf `last_hidden`) — ✅ PASS (tag `engine-e1-noregression-pass`) |
 | **E2 — brique == POC** | `EngineModel(TurboQuantVBrick)` | `gemma4_gen_vq.zig` (le POC) | mêmes tokens générés (le socle remplace la copie) |
 
 E1 prouve que la factorisation ne casse rien ; E2 prouve que la brique branchée == la copie, **sans copie**.
