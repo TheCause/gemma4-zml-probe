@@ -168,29 +168,62 @@ pub const Cache = struct {
 };
 
 // Entrées par-step empaquetées (constantes sur la boucle ; sélectionnées par dynamicSlice(.step)).
-pub const Packed = struct {
-    embeds: zml.Tensor, // {step,b,s,d} bf16
-    embptls: zml.Tensor, // {step,b,s,lf} bf16
-    cos_full: zml.Tensor, // {step,b,s,hd=512}
-    sin_full: zml.Tensor,
-    masks: zml.Tensor, // {step,b,h,q,k}
-    positions: zml.Tensor, // {step} i32
+// Paramétré comptime par `two_masks` (cf engine DESIGN §5.3) :
+//   - false (défaut) : un seul masque `masks` — strictement identique à l'ancien `Packed`, donc la
+//     fixture E1/E2 (KMAX=8) charge inchangée et le graphe HLO est préservé.
+//   - true (génération longue) : deux masques `masks_sliding`/`masks_full` de tailles `.k` distinctes.
+// `zml.io.load` réfléchit RÉCURSIVEMENT sur les champs (chacun doit être un Tensor) → on retourne DEUX
+// structs distincts (pas de champ `void` conditionnel, que load ne saurait pas traiter).
+pub fn Packed(comptime two_masks: bool) type {
+    if (two_masks) return struct {
+        embeds: zml.Tensor, // {step,b,s,d} bf16
+        embptls: zml.Tensor, // {step,b,s,lf} bf16
+        cos_full: zml.Tensor, // {step,b,s,hd=512}
+        sin_full: zml.Tensor,
+        masks_sliding: zml.Tensor, // {step,b,h,q,k=KMAX_SLIDING} — fenêtre glissante
+        masks_full: zml.Tensor, // {step,b,h,q,k=KMAX_FULL} — causal plein
+        positions: zml.Tensor, // {step} i32
 
-    pub fn init(v: zml.io.TensorStore.View) Packed {
-        return .{
-            .embeds = v.createTensor("embeds", .{ .step, .b, .s, .d }, null),
-            .embptls = v.createTensor("embptls", .{ .step, .b, .s, .lf }, null),
-            .cos_full = v.createTensor("cos_full", .{ .step, .b, .s, .hd }, null),
-            .sin_full = v.createTensor("sin_full", .{ .step, .b, .s, .hd }, null),
-            .masks = v.createTensor("masks", .{ .step, .b, .h, .q, .k }, null),
-            .positions = v.createTensor("positions", .{.step}, null),
-        };
-    }
+        const Self = @This();
+        pub fn init(v: zml.io.TensorStore.View) Self {
+            return .{
+                .embeds = v.createTensor("embeds", .{ .step, .b, .s, .d }, null),
+                .embptls = v.createTensor("embptls", .{ .step, .b, .s, .lf }, null),
+                .cos_full = v.createTensor("cos_full", .{ .step, .b, .s, .hd }, null),
+                .sin_full = v.createTensor("sin_full", .{ .step, .b, .s, .hd }, null),
+                .masks_sliding = v.createTensor("masks_sliding", .{ .step, .b, .h, .q, .k }, null),
+                .masks_full = v.createTensor("masks_full", .{ .step, .b, .h, .q, .k }, null),
+                .positions = v.createTensor("positions", .{.step}, null),
+            };
+        }
+        pub fn load(self: *const Self, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Self) {
+            return zml.io.load(Self, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
+        }
+    };
+    return struct {
+        embeds: zml.Tensor, // {step,b,s,d} bf16
+        embptls: zml.Tensor, // {step,b,s,lf} bf16
+        cos_full: zml.Tensor, // {step,b,s,hd=512}
+        sin_full: zml.Tensor,
+        masks: zml.Tensor, // {step,b,h,q,k}
+        positions: zml.Tensor, // {step} i32
 
-    pub fn load(self: *const Packed, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Packed) {
-        return zml.io.load(Packed, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
-    }
-};
+        const Self = @This();
+        pub fn init(v: zml.io.TensorStore.View) Self {
+            return .{
+                .embeds = v.createTensor("embeds", .{ .step, .b, .s, .d }, null),
+                .embptls = v.createTensor("embptls", .{ .step, .b, .s, .lf }, null),
+                .cos_full = v.createTensor("cos_full", .{ .step, .b, .s, .hd }, null),
+                .sin_full = v.createTensor("sin_full", .{ .step, .b, .s, .hd }, null),
+                .masks = v.createTensor("masks", .{ .step, .b, .h, .q, .k }, null),
+                .positions = v.createTensor("positions", .{.step}, null),
+            };
+        }
+        pub fn load(self: *const Self, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Self) {
+            return zml.io.load(Self, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
+        }
+    };
+}
 
 // Compteur de step (scalaire u32, fourni/threadé par le main).
 pub const Ctrl = struct {
@@ -204,10 +237,23 @@ fn pickStep(t: zml.Tensor, step: zml.Tensor) zml.Tensor {
     return t.dynamicSlice(.{ .step = zml.Tensor.DynSlice{ .start = step, .len = 1 } }).squeeze(.step);
 }
 
+/// Config comptime du socle (cf engine DESIGN §3, §5). TOUS les champs ont une valeur par défaut qui
+/// reproduit le comportement decode4/E1 : `EngineModel(Brick, .{})` est strictement neutre (aucune op
+/// nouvelle émise) → graphe HLO byte-identique. La génération longue active `ring`/`two_masks` et fixe
+/// les tailles de fenêtre. `kmax_sliding` n'est utilisé que comme scalaire du modulo ring (la dim `.k`
+/// du cache, elle, est inférée de la fixture).
+pub const EngineCfg = struct {
+    ring: bool = false, // scatter sliding circulaire pos % kmax_sliding
+    two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
+    kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
+    kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
+};
+
 /// Forward decode d'UNE couche i en mode génération (cache threadé). Producer scatter K/V du token à
 /// (.slot, .k=pos) dans le cache empaqueté ; reader lit le slot du writer 13/14. `brick` est threadé
-/// pour le point d'extension post_v_norm (comptime-mort si la brique ne l'implémente pas).
-fn runLayerGen(layer: LayerW, comptime i: usize, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
+/// pour le point d'extension post_v_norm (comptime-mort si la brique ne l'implémente pas). `cfg` est
+/// comptime : ses branches inactives ne sont pas émises (neutralité HLO en config défaut).
+fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
     const full = isFull(i);
     const reader = isReader(i);
     const hd: i64 = if (full) HD_FULL else HD_SLIDING;
@@ -256,8 +302,11 @@ fn runLayerGen(layer: LayerW, comptime i: usize, hidden: zml.Tensor, ple_i: zml.
             cache_v = cache.fl_v.choose1d(.slot, fullSlot(i));
         } else {
             const slot = zml.Tensor.scalar(@as(u32, @intCast(slidingSlot(i))), .u32);
-            cache.sl_k = cache.sl_k.scatterSlices(.{ .slot = slot, .k = pos_u }, k_new, so);
-            cache.sl_v = cache.sl_v.scatterSlices(.{ .slot = slot, .k = pos_u }, v_new, so);
+            // ring-buffer sliding : écriture circulaire à pos % kmax_sliding. `cfg.ring` est comptime →
+            // en défaut (false) la branche `remainder` n'est PAS analysée ni émise → HLO == decode4.
+            const write_k = if (cfg.ring) pos_u.remainder(zml.Tensor.scalar(@as(u32, @intCast(cfg.kmax_sliding)), .u32)) else pos_u;
+            cache.sl_k = cache.sl_k.scatterSlices(.{ .slot = slot, .k = write_k }, k_new, so);
+            cache.sl_v = cache.sl_v.scatterSlices(.{ .slot = slot, .k = write_k }, v_new, so);
             cache_k = cache.sl_k.choose1d(.slot, slidingSlot(i));
             cache_v = cache.sl_v.choose1d(.slot, slidingSlot(i));
         }
@@ -289,7 +338,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, hidden: zml.Tensor, ple_i: zml.
 /// Le socle : model decode générique paramétré comptime par une brique. `EngineModel(struct{})`
 /// reproduit decode4 (gate E1) ; `EngineModel(MaBrique)` injecte une transformation au(x) point(s)
 /// d'extension sans copier le moteur.
-pub fn EngineModel(comptime Brick: type) type {
+pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
     return struct {
         embed_tokens: zml.Tensor, // {voc,d} lm_head tied
         per_layer_model_projection: zml.Tensor,
@@ -345,13 +394,17 @@ pub fn EngineModel(comptime Brick: type) type {
 
         /// Un pas de génération : sélectionne le step, embed+PLE, 35 couches (cache threadé) -> logits +
         /// cache grandi. Retour : {logits {b,s,voc}, sl_k, sl_v, fl_k, fl_v}.
-        pub fn forward(self: Self, p: Packed, cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forward(self: Self, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
             const step = ctrl.step;
             const embed_slice = pickStep(p.embeds, step);
             const embptl_slice = pickStep(p.embptls, step);
             const cos = pickStep(p.cos_full, step);
             const sin = pickStep(p.sin_full, step);
-            const mask = pickStep(p.masks, step);
+            // Masque(s) extrait(s) UNE fois (hors boucle) → 1 dynamicSlice en défaut, comme decode4.
+            // `cfg.two_masks` comptime : la branche inactive n'est pas analysée (champs absents tolérés).
+            const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
+            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
             const pos_i = pickStep(p.positions, step); // {} i32
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
@@ -362,7 +415,12 @@ pub fn EngineModel(comptime Brick: type) type {
             var cache = cache_in;
             inline for (0..NUM_LAYERS) |i| {
                 const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
-                hidden = runLayerGen(self.layers[i], i, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+                // sélection du masque par type de couche (comptime). En défaut : mask_single (== decode4).
+                const mask = if (cfg.two_masks)
+                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                else
+                    mask_single;
+                hidden = runLayerGen(self.layers[i], i, cfg, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const last_hidden = rmsScaleD(hidden, c(self.final_norm));
             const raw = last_hidden.dot(c(self.embed_tokens), .d);

@@ -16,7 +16,7 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const NUM_STEPS: usize = 4;
 
-const Model = engine.EngineModel(struct {});
+const Model = engine.EngineModel(struct {}, .{}); // config par défaut → neutre (== decode4)
 
 // Séquence attendue (HF), lue côté host.
 const ExpW = struct {
@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
 
     const base = store_ck.view().withPrefix("model").withPrefix("language_model");
     const model: Model = try .init(arena.allocator(), base);
-    const packed_in: engine.Packed = .init(store_fx.view());
+    const packed_in: engine.Packed(false) = .init(store_fx.view());
     const cache0: engine.Cache = .init(store_fx.view());
     const ctrl_sym: engine.Ctrl = .initSymbolic();
 

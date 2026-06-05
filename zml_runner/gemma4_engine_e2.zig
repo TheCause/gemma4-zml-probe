@@ -22,8 +22,8 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const NUM_STEPS: usize = 4;
 
-const Model = engine.EngineModel(TurboQuantVBrick); // model branché (compile)
-const Wmodel = engine.EngineModel(struct {}); // poids seuls (load depuis store_ck)
+const Model = engine.EngineModel(TurboQuantVBrick, .{}); // model branché (compile), config défaut
+const Wmodel = engine.EngineModel(struct {}, .{}); // poids seuls (load depuis store_ck)
 
 const ExpW = struct {
     e: zml.Tensor,
@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     // Brique symbolique — sert à charger les constantes depuis store_fx.
     const brick_sym: TurboQuantVBrick = .init(fixture_view);
 
-    const packed_in: engine.Packed = .init(fixture_view);
+    const packed_in: engine.Packed(false) = .init(fixture_view);
     const cache0: engine.Cache = .init(fixture_view);
     const ctrl_sym: engine.Ctrl = .initSymbolic();
 
