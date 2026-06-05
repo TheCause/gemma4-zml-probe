@@ -1,5 +1,11 @@
 # Socle ZML modulaire — Implementation Plan
 
+> **✅ Statut : Task 1 (E1) + Task 2 (E2) DONE — gates `engine-e1-noregression-pass` + `engine-e2-brick-pass`.**
+
+> **📦 État publication** — Sur `main` (public) : socle `engine.zig` corrigé + gate E1 uniquement. La brique
+> `TurboQuantVBrick` + le gate E2 (`gemma4_engine_e2.zig`, commit `d6146ba`) sont **validés** mais restent
+> sur `turboquant-zml-vonly` : ils dépendent du POC TurboQuant non publié (reproductibilité).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extraire le moteur decode en `engine.zig` paramétré comptime par une brique (`EngineModel(comptime Brick)`), avec un point d'extension `post_v_norm`, de sorte qu'une hypothèse se branche sans copier le moteur.

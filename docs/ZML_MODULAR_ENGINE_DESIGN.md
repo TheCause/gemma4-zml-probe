@@ -1,9 +1,15 @@
 # Socle ZML modulaire — Design : moteur decode + briques greffables (comptime policy)
 
-**Date** : 2026-06-04
-**Statut** : design validé (brainstorming), prêt pour plan d'implémentation
+**Date** : 2026-06-04 (design) · 2026-06-05 (E1+E2 implémentés, PASS)
+**Statut** : design validé **et implémenté** — gates E1 (non-régression) et E2 (brique) **PASS**.
 **Repo** : gemma4-zml-probe
 **Mémoire liée** : `~/dev/Ma_MEMOIRE/memory/zml_modular_engine.md`, `project_gemma4_zml_probe.md`, `turboquant.md`
+
+> **📦 État publication** — Sur `main` (public) : **socle `engine.zig` corrigé + gate E1** uniquement.
+> La brique `TurboQuantVBrick` (`brick_turboquant.zig`) et le **gate E2** (`gemma4_engine_e2.zig`,
+> tag `engine-e2-brick-pass`, commit `d6146ba`) sont **validés (E2 PASS 4/4)** mais restent sur la
+> branche `turboquant-zml-vonly` : ils dépendent du POC TurboQuant non publié (`turboquant.py` + fixture
+> `decode_vq_gen`, reproductibilité). Ce document décrit le design **complet** (E1+E2).
 
 ---
 
@@ -62,10 +68,11 @@ quand une brique réelle les demande (YAGNI).
 
 ### 3.2 Le contexte — `LayerCtx`
 
-Passé à chaque point : `LayerCtx = struct { layer_idx, is_full (comptime), pos: Tensor (runtime) }`.
-`layer_idx`/`is_full` sont **comptime** (issus de l'`inline for`, `is_full = isFull(i)` comme le POC),
-`pos` est un `Tensor` runtime. Route la brique : `cb_512/Pi_512` si `is_full` sinon `cb_256/Pi_256`
-(sélection **comptime**, cf `gen_vq.zig:266`).
+**Implémenté** : `LayerCtx = struct { layer_idx: usize }` (runtime, info/extensibilité). `is_full` n'est
+**pas** dans `LayerCtx` : il est passé en **paramètre comptime séparé** au point — `brick.post_v_norm(v, comptime isFull(i), ctx)` —
+car il route entre des constantes de **shapes différentes** (`cb_256/Pi_256` 256 vs `cb_512/Pi_512` 512) et
+un select runtime exigerait des shapes égales. `isFull(i)` est comptime (boucle `inline for`, cf `gen_vq.zig:266`).
+`pos` non inclus (YAGNI). _(Design initial : `is_full`/`pos` dans `LayerCtx` ; corrigé à l'implémentation E2.)_
 
 ### 3.3 Une brique = un type Zig
 
