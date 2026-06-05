@@ -34,7 +34,7 @@
 **Files:** Create `zml_runner/engine.zig`, `zml_runner/gemma4_engine_e1.zig` ; Modify `BUILD.bazel`.
 **Lire d'abord** : `zml_runner/gemma4_decode4.zig` en entier (le moteur à factoriser : struct `Engine`/model, `forward(self, Packed, Cache, Ctrl) -> 5-tuple`, l'`inline for` des couches, le point v_norm). `zml_runner/gemma4_gen_vq.zig:262-273` (montre le point d'insertion V exact, à transformer en hook).
 
-- [ ] **Step 1 — Écrire `engine.zig`.** Copier la logique de `gemma4_decode4.zig` dans une fonction générique :
+- [x] **Step 1 — Écrire `engine.zig`.** Copier la logique de `gemma4_decode4.zig` dans une fonction générique :
 ```zig
 pub const LayerCtx = struct { layer_idx: usize, is_full: bool, pos: zml.Tensor }; // idx/is_full comptime
 pub fn EngineModel(comptime Brick: type) type {
@@ -59,9 +59,9 @@ Déplacer aussi `quantizeV` (de `gemma4_vquant.zig`) dans `engine.zig` (`pub fn`
 
 **⚠️ Point d'insertion réel (review)** : l'insert V n'est pas dans la boucle `inline for` elle-même mais dans **`runLayerGen`** (la fonction par-couche que la boucle appelle). Donc **threader `self.brick`** dans `runLayerGen` (comme `gemma4_gen_vq.zig:367` thread `p.codebook_256, ...`), et y faire le `if (@hasDecl(@TypeOf(brick), "post_v_norm"))` juste après `v = rmsNorm(v, .hd)` et avant le transpose. `is_full` et `layer_idx` y arrivent en comptime (la boucle est `inline for`). Pour `struct{}`, `@hasDecl`=false → branche comptime-morte → `runLayerGen` identique à decode4.
 
-- [ ] **Step 2 — Écrire `gemma4_engine_e1.zig`.** Copier le `main` de `gemma4_decode4.zig` (load fixture, compile, run, compare à l'oracle), mais instancier `EngineModel(struct{})` au lieu de la struct decode4. **Réutiliser la MÊME fixture que decode4** (déjà sur la 3090 ; identifier son chemin via `ls /data/rqz_workspace/zml/examples/rqz/fixtures/ | grep -i gen` ou la fixture de gen_oracle). Comparer aux mêmes références (tokens + last_hidden), mêmes seuils que decode4.
+- [x] **Step 2 — Écrire `gemma4_engine_e1.zig`.** Copier le `main` de `gemma4_decode4.zig` (load fixture, compile, run, compare à l'oracle), mais instancier `EngineModel(struct{})` au lieu de la struct decode4. **Réutiliser la MÊME fixture que decode4** (déjà sur la 3090 ; identifier son chemin via `ls /data/rqz_workspace/zml/examples/rqz/fixtures/ | grep -i gen` ou la fixture de gen_oracle). Comparer aux mêmes références (tokens + last_hidden), mêmes seuils que decode4.
 
-- [ ] **Step 3 — Build + run.** Ajouter la cible (bloc EXACT, `srcs` obligatoire) :
+- [x] **Step 3 — Build + run.** Ajouter la cible (bloc EXACT, `srcs` obligatoire) :
 ```
 zig_binary(
     name = "gemma4_engine_e1",
@@ -74,7 +74,9 @@ zig_binary(
 (idempotent 3090 + local). Build, run avec **la commande de run de decode4** (`<model.safetensors> /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors`).
   Expected : **mêmes 4 tokens argmax** que decode4 vs `expected` (decode4 compare l'argmax, PAS `last_hidden` — la fixture n'a pas de réf last_hidden). La branche brick étant comptime-morte, le graphe est identique → l'égalité des tokens doit tenir. Si divergence → erreur d'extraction (transcription du corps decode4) ; corriger.
 
-- [ ] **Step 4 — Commit + tag.** `git add zml_runner/engine.zig zml_runner/gemma4_engine_e1.zig zml_runner/BUILD.bazel && git commit -m "feat(engine): E1 — EngineModel(comptime Brick) extrait de decode4, struct{} == decode4 bit-exact" && git tag engine-e1-noregression-pass`. Message terminé par ligne vide puis exactement : `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+- [x] **Step 4 — Commit + tag.** Fait : commit `e0d53ba` + tag `engine-e1-noregression-pass` (message « 4 tokens argmax », pas « bit-exact » — la fixture n'a pas de réf last_hidden).
+
+> **E2 — point d'attention identifié à l'exécution d'E1 (multi-store)** : decode4 charge les **poids** depuis le checkpoint (`store_ck`) et les inputs/caches depuis la **fixture** (`store_fx`) — deux stores distincts. Le §3.4 du design suppose implicitement poids+constantes brick dans le même store. Les constantes `TurboQuantVBrick` (`codebook_*`/`hadamard_*`) vivent dans la fixture (`store_fx`), pas le checkpoint. Or `zml.io.load(Self, …, store)` résout les `Tensor` d'une struct contre **un seul** store. Donc `EngineModel(TurboQuantVBrick).load(store_ck)` ne résoudra pas les `id` de brick (bindés à `store_fx`) → crash `getReaderById null`. **À trancher en Task 2 Step 1** : (a) `init(allocator, base_ck, brick_view_fx)` + chargement séparé poids/brique puis assemblage manuel du `Bufferized(EngineModel)` (pattern decode4 qui assemble `cache_buf` à la main) ; ou (b) store combiné (agréger les 2 registries). E1 n'est pas concerné (brique vide = 0 tenseur).
 
 ---
 
