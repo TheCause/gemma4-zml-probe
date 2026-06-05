@@ -332,3 +332,13 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# E1 — non-régression socle modulaire : EngineModel(struct{}) == decode4 (P5.7.8).
+# srcs OBLIGATOIRE : le runner @import("engine.zig") -> Bazel doit exposer le fichier au sandbox.
+zig_binary(
+    name = "gemma4_engine_e1",
+    main = "gemma4_engine_e1.zig",
+    srcs = ["engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
