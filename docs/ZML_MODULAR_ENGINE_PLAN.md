@@ -85,7 +85,7 @@ zig_binary(
 **Files:** Create `zml_runner/brick_turboquant.zig`, `zml_runner/gemma4_engine_e2.zig` ; Modify `BUILD.bazel`.
 **Lire d'abord** : `zml_runner/gemma4_gen_vq.zig` (l'oracle E2 : insertion V-quant + sa fixture + tokens de référence ; lignes ~182-198 le `Packed.init`/`createTensor` des constantes, ~262-273 l'insert V).
 
-- [ ] **Step 1 — Écrire `brick_turboquant.zig`.** Définir la brique avec le **contrat de chargement** (sinon le load crashe — cf spec §3.4) :
+- [x] **Step 1 — Écrire `brick_turboquant.zig`.** Fait. **Amendement vs esquisse ci-dessous** : `post_v_norm(self, v, comptime is_full: bool, ctx: LayerCtx)` — `is_full` est un **paramètre comptime** (pas `ctx.is_full`), car codebook/Hadamard 256 vs 512 ont des shapes différentes → la sélection doit être comptime (un select runtime exige des shapes égales). `LayerCtx` réduit à `{layer_idx}`. Définir la brique avec le **contrat de chargement** (sinon le load crashe — cf spec §3.4) :
 ```zig
 const TurboQuantVBrick = struct {
     codebook_256: zml.Tensor, hadamard_256: zml.Tensor,
@@ -111,9 +111,9 @@ const TurboQuantVBrick = struct {
 };
 ```
 
-- [ ] **Step 2 — Écrire `gemma4_engine_e2.zig`.** Copier le `main` de `gemma4_gen_vq.zig`, instancier `EngineModel(TurboQuantVBrick)`. **Réutiliser la fixture de gen_vq** (qui contient déjà les caches + `codebook_256/512`+`hadamard_256/512` ; cf `45_gen_vq_oracle.py`). Comparer la séquence de tokens générée aux tokens de référence gen_vq.
+- [x] **Step 2 — Écrire `gemma4_engine_e2.zig`.** Fait. **Multi-store résolu** (cf DESIGN §3.4 correctif) : poids chargés via `EngineModel(struct{}).load(store_ck)`, brique via `zml.io.load(TurboQuantVBrick, …, store_fx)`, puis `Bufferized(EngineModel(TurboQuantVBrick))` **assemblé à la main** (mapping positionnel). Model symbolique via `initBrick(base_ck, fixture_view)`. Réutilise la fixture de gen_vq + compare aux tokens `expected`.
 
-- [ ] **Step 3 — Build + run.** Ajouter la cible (bloc EXACT, `srcs` = engine + brick) :
+- [x] **Step 3 — Build + run.** Fait : build OK, run `4/4 tokens [107,1,106,1] == HF-V-quant`. Ajouter la cible (bloc EXACT, `srcs` = engine + brick) :
 ```
 zig_binary(
     name = "gemma4_engine_e2",
@@ -126,7 +126,7 @@ zig_binary(
 Build, run avec la commande de gen_vq (`<model.safetensors> /data/gemma4-zml-probe/decode_vq_gen.safetensors`).
   Expected : **mêmes tokens générés que `gemma4_gen_vq`** (le POC). Le socle+brique reproduit la copie, sans copie.
 
-- [ ] **Step 4 — Commit + tag.** `git add zml_runner/brick_turboquant.zig zml_runner/gemma4_engine_e2.zig zml_runner/BUILD.bazel && git commit -m "feat(engine): E2 — TurboQuantVBrick branchee sur EngineModel == gen_vq (POC sans copie)" && git tag engine-e2-brick-pass`. Co-author idem.
+- [x] **Step 4 — Commit + tag.** Fait : commit `d6146ba` + tag `engine-e2-brick-pass` (inclut les modifs socle `engine.zig` : hook is_full comptime + `initBrick`). **Gates E1+E2 verts — socle modulaire fonctionnel de bout en bout.**
 
 ---
 

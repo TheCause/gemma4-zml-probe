@@ -94,23 +94,31 @@ Corps exact, repris du POC (`gen_vq.zig:268-270`) : `const v2 = v.reshape(.{B, h
 ### 3.4 Chargement des constantes (le point composé)
 
 Les tenseurs de la brique sont des **champs de `self.brick`**, donc **partie du model** `EngineModel(Brick)`.
-La reflection ZML (`meta.visit`) descend dans le champ `brick` et bufferise ses `Tensor` comme les poids —
-composition native, pas de second chemin. La fixture contient : poids engine **+** tenseurs nommés de la brique
-(`codebook_256`…). Brique vide → aucun tenseur en plus.
+La reflection ZML (`meta.visit`) descend dans le champ `brick` et expose ses `Tensor` comme arguments MLIR du
+forward compilé. Brique vide → aucun tenseur en plus.
 
 **⚠️ Contrat de chargement (load-bearing, validé review)** : le loader résout chaque `Tensor` par son **`id`**,
 pas par nom de champ. Un `id` n'a de clé safetensors que si le `Tensor` a été créé via
 `View.createTensor("codebook_256", …)` (qui appelle `store.bindIdToKey`, `io.zig:162`). **Donc une brique
 DOIT exposer un `init(View) Brick`** qui crée ses tenseurs via la `store View` (exactement le pattern
 `LayerW`/`Packed.init` du POC, `gen_vq.zig:195-198`) — sinon `getReaderById` renvoie null et le load **crashe**.
-Le `load`/`Bufferized` de la sous-struct est géré nativement (`mem.zig`, `io.zig`) une fois les `id` bindés.
+
+**⚠️ Correctif multi-store (découvert à l'implémentation E2, 5 juin)** : le §ci-dessus supposait à tort
+poids **et** constantes brick dans le même store. En réalité les **poids** vivent dans le **checkpoint**
+(`store_ck`) et les **constantes brick** dans la **fixture** (`store_fx`) — deux stores distincts. Or
+`zml.io.load` résout une struct contre **un seul** store (`getReaderById … catch unreachable`, `io.zig:1148`)
+→ `EngineModel(brick).load(store_ck)` planterait sur les tenseurs brick (bindés `store_fx`). **Solution
+implémentée** : charger **séparément** les poids (`EngineModel(struct{}).load(store_ck)`) et la brique
+(`zml.io.load(Brick, …, store_fx)`), puis **assembler le `Bufferized(EngineModel(Brick))` à la main**
+(mapping **positionnel** : mêmes champs/ordre → les buffers tombent aux bons emplacements ; pattern déjà
+utilisé pour `cache_buf` dans decode4). Le model symbolique est construit via `EngineModel(Brick).initBrick(base_ck, fixture_view)`.
 
 ## 4. Validation — deux gates
 
 | Gate | Contenu | Oracle | Critère |
 |---|---|---|---|
 | **E1 — non-régression** | `EngineModel(struct{})` génère N tokens | `gemma4_decode4.zig` (intact) | **tokens identiques** (4 argmax == HF greedy ; la fixture n'a pas de réf `last_hidden`) — ✅ PASS (tag `engine-e1-noregression-pass`) |
-| **E2 — brique == POC** | `EngineModel(TurboQuantVBrick)` | `gemma4_gen_vq.zig` (le POC) | mêmes tokens générés (le socle remplace la copie) |
+| **E2 — brique == POC** | `EngineModel(TurboQuantVBrick)` | `gemma4_gen_vq.zig` (le POC) | mêmes tokens générés `[107,1,106,1]` == HF-V-quant — ✅ **PASS 4/4** (tag `engine-e2-brick-pass`) |
 
 E1 prouve que la factorisation ne casse rien ; E2 prouve que la brique branchée == la copie, **sans copie**.
 Discipline gate/oracle du projet (oracle → runner ZML → compare → commit+tag).
