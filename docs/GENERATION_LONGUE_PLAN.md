@@ -221,6 +221,8 @@ zig_binary(
 
 Instancier `engine.EngineModel(struct{}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX })` (ring=false → linéaire borné). `Packed(true)` (deux masques). `NUM_STEPS` lu depuis la fixture (taille de `expected`). Boucle : pour chaque step, `forward` → argmax → comparer `expected[step]`. Threader le cache grandi (comme E1 lignes 115-120).
 
+> **Garde (issue de la revue Task 0)** : les scalaires comptime `kmax_sliding`/`kmax_full` sont **découplés** des dims `.k` du cache (inférées de la fixture). Ajouter au runner un **assert host** que `kmax_sliding`/`kmax_full` == les dims `.k` des caches chargés (`cache_sl_k`/`cache_fl_k`) **et** des masques (`masks_sliding`/`masks_full`). Un mismatch = bug silencieux d'aliasing ring/masque (la classe d'erreur que le contre-test L1b traque).
+
 - [ ] **Step 3 : Build + run → PASS sur N tokens**
 
 ```bash

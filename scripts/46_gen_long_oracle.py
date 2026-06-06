@@ -42,8 +42,11 @@ OUT_FIXTURE = ROOT / "gen_long.safetensors"
 OUT_MANIFEST = ROOT / "gen_long_manifest.json"
 
 SEQ_LEN = 4
-L_MAX = 2048                  # taille comptime du cache (côté moteur) ; positions 0..L_MAX-1
-N_DECODE = L_MAX - SEQ_LEN    # 2044 ; positions décodées 4..2047
+# L_MAX = taille comptime du cache. Réduit à 1024 (de 2048) : le pic compile XLA-CPU à .k=2048
+# (~34 Go) dépasse les 32 Go de l'hôte Proxmox → swap thrashing. 1024 franchit la fenêtre 512
+# (valide masque bande + ring L1b) avec un pic plus modéré. Remonter quand la RAM VM augmentera.
+L_MAX = 1024
+N_DECODE = L_MAX - SEQ_LEN    # 1020 ; positions décodées 4..1023
 SLIDING_WINDOW = 512
 INPUT_IDS = [2, 105, 2048, 4095]
 PREFIX = "model.language_model."

@@ -388,3 +388,12 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# L1a — replay génération longue : cache sliding LINÉAIRE (.k=L_MAX) + masque bande (two_masks, ring=false).
+zig_binary(
+    name = "gemma4_gen_long",
+    main = "gemma4_gen_long.zig",
+    srcs = ["engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
