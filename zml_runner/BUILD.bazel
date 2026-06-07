@@ -397,3 +397,13 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
+
+# L1a CHUNKÉ (perf) — decode découpé en stages compilés séparément (compileFn), pic mémoire borné.
+# Nom COURT (gchunk) : un nom de cible long déborde le quota comptime pjrt structSize (cf ENGINE_LOG 31 mai).
+zig_binary(
+    name = "gemma4_gchunk",
+    main = "gemma4_gchunk.zig",
+    srcs = ["engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)

@@ -427,5 +427,44 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
+
+        /// Variante CHUNKÉE du forward (perf) : exécute les couches [start,end) d'UN step, cache threadé.
+        /// Découpe le graphe 35-couches en stages compilés séparément (borne le pic mémoire : moins de
+        /// poids f32 coexistant). `first` → hidden = embeds (hidden_in ignoré) ; sinon hidden = hidden_in
+        /// (sortie du stage précédent, threadée device→device). `last` → final norm + lm_head + softcap.
+        /// Le PLE est recalculé ici (pur fonction de embeds, bit-exact). Type de retour UNIFORME (5 Tensors)
+        /// : 1er = hidden_out (non-last) OU logits (last) ; + cache (sl_k,sl_v,fl_k,fl_v). Le calcul est
+        /// identique à `forward` op-pour-op (runLayerGen partagé) → mêmes tokens, autre exécution.
+        pub fn forwardStageGen(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const step = ctrl.step;
+            const embptl_slice = pickStep(p.embptls, step);
+            const cos = pickStep(p.cos_full, step);
+            const sin = pickStep(p.sin_full, step);
+            const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
+            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
+            const pos_i = pickStep(p.positions, step);
+            const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
+            const pos_u = pos_i.convert(.u32);
+
+            const embeds = pickStep(p.embeds, step).convert(.f32).scale(EMBED_SCALE);
+            const ple = self.perLayerInputs(embptl_slice, embeds);
+            var hidden = if (first) embeds else hidden_in;
+            var cache = cache_in;
+            inline for (start..end) |i| {
+                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+                const mask = if (cfg.two_masks)
+                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                else
+                    mask_single;
+                hidden = runLayerGen(self.layers[i], i, cfg, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+            }
+            const out_first = if (last) blk: {
+                const last_hidden = rmsScaleD(hidden, c(self.final_norm));
+                const raw = last_hidden.dot(c(self.embed_tokens), .d);
+                break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+            } else hidden;
+            return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
+        }
     };
 }
