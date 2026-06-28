@@ -91,6 +91,22 @@ python scripts/40_p5_7_7_decode_pilot_oracle.py
 
 Each runner prints `max_abs` / `mean_abs` vs the oracle and a PASS/FAIL verdict.
 
+**Run inference on a custom prompt (end-to-end, GPU)**
+
+```bash
+# 1. HF oracle: chat-template + tokenize your prompt, generate the reference sequence (fixture)
+python scripts/49_gen_custom_oracle.py --prompt "What is the capital of France? Answer in one word." --n-tokens 48
+# 2. ZML reproduces it on GPU — must match HF token-for-token
+./bazel.sh run //examples/rqz:gemma4_gen_long_gpu --@zml//platforms:cuda=true -- \
+  weights/model.safetensors gen_custom.safetensors 48
+# 3. Detokenize + validate the round-trip (text faithful to the generated tokens)
+python scripts/48_detokenize.py gen_custom.safetensors
+```
+
+Worked example — prompt *"capital of France"* → ZML **48/48 == HF** (108 tok/s, fp32 RTX 3090), decoded
+text **"Paris"**, round-trip **48/48 PASS**. HF stays the reference oracle; ZML is the validated engine
+that reproduces it. (Full autonomous runtime with an integrated tokenizer + EOS early-stop is future work.)
+
 ## Limitations / not done (optional extensions)
 
 CPU fp32 only · no batching / sampling / fast-prefill · multimodal (vision/audio) out of scope (text
