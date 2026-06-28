@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     const max_steps: ?usize = if (process_args.len >= 4) std.fmt.parseInt(usize, process_args[3], 10) catch null else null;
 
     const platform: *zml.Platform = blk: {
-        const cuda_opts: zml.Platform.CreateOptions = .{
+        const cuda_opts: zml.platform.CreateOptions = .{
             .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
         };
         if (zml.Platform.init(allocator, io, .cuda, cuda_opts)) |p| break :blk p else |_| {}

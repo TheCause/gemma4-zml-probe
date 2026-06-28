@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
 
     // === Backend : force CUDA (memory_fraction 0.90), fallback auto (CPU) si CUDA indisponible. ===
     const platform: *zml.Platform = blk: {
-        const cuda_opts: zml.Platform.CreateOptions = .{
+        const cuda_opts: zml.platform.CreateOptions = .{
             .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
         };
         if (zml.Platform.init(allocator, io, .cuda, cuda_opts)) |p| break :blk p else |_| {}

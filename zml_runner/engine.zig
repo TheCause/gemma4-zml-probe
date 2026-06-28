@@ -60,9 +60,9 @@ fn fullSlot(i: usize) i64 {
     return slot;
 }
 
-inline fn c(t: zml.Tensor) zml.Tensor {
-    return t.convert(.f32);
-}
+// NB : pas de `c` file-scope. Chaque fonction prec-aware déclare son propre `const c` local
+// (convert vers prec.compute ; défaut .f32 == baseline). Zig INTERDIT le shadowing d'une déclaration
+// de conteneur → un `c` file-scope entrerait en conflit avec ces locaux (correctif audit session 27).
 fn rmsScaleD(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     return zml.nn.rmsNorm(x, .d, RMS_EPS).mul(w.broad(x.shape()));
 }
@@ -247,6 +247,7 @@ pub const EngineCfg = struct {
     two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
     kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
     kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
+    prec: PrecCfg = .{}, // précision comptime (défaut .f32 = baseline bit-exact) ; Zig interdit un param par défaut → champ de cfg
 };
 
 /// Config de précision comptime (GPU). Défaut `.f32` strictement == comportement actuel (fp32 bit-exact
@@ -351,7 +352,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
 /// Le socle : model decode générique paramétré comptime par une brique. `EngineModel(struct{})`
 /// reproduit decode4 (gate E1) ; `EngineModel(MaBrique)` injecte une transformation au(x) point(s)
 /// d'extension sans copier le moteur.
-pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg, comptime prec: PrecCfg = .{}) type {
+pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
     return struct {
         embed_tokens: zml.Tensor, // {voc,d} lm_head tied
         per_layer_model_projection: zml.Tensor,
@@ -361,6 +362,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg, comptime prec:
         brick: Brick,
 
         const Self = @This();
+        const prec: PrecCfg = cfg.prec; // replié depuis cfg (Zig interdit un param par défaut) — comptime, visible des méthodes/closures
 
         /// Crée les poids (symboliques) depuis `base` (checkpoint) et assemble le model avec la brique
         /// fournie. Helper partagé par `init` (brique vide, E1) et `initBrick` (brique chargée, E2).
