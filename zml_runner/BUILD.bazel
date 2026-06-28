@@ -421,6 +421,16 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# Contre-test non-vacuité par LOGITS (rigoureux) : double forward (masque correct vs causal) + max_abs
+# des logits. Tranche ce que l'argmax ne peut pas (greedy trop robuste). PASS = max_abs>0 à p>=512.
+zig_binary(
+    name = "gemma4_vacuity_logits",
+    main = "gemma4_vacuity_logits.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # L1b — replay ring 512 + masque circulaire (chunké). Sur *_naive.safetensors = contre-test non-vacuité.
 zig_binary(
     name = "gemma4_gchunk_ring",
