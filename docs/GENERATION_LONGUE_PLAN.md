@@ -10,25 +10,27 @@
 
 **Spec de référence :** `docs/GENERATION_LONGUE_DESIGN.md`.
 
-> **STATUT (27 juin 2026)** — suivi réel dans `docs/ENGINE_LOG.md` + tags git (le présent plan = intention).
-> - **Task 0** ✅ comptime neutre (E1+E2 PASS, HLO byte-identique — commit `bb4254e`).
-> - **L0** ✅ oracle `46_gen_long_oracle.py` (commit `b0e18c8`). ⚠ `L_MAX` **abaissé 2048→1024** (pic compile), cf DESIGN D3.
-> - **L1a** ✅ replay 1020/1020 == HF (mono `gemma4_gen_long.zig` + chunké `gemma4_gchunk.zig`, commits `e0f3e2f`/`99199da`).
-> - **L1a non-vacuité** ⚠ contre-test LIVRÉ (`gemma4_gchunk_vacuity.zig`) mais **non exécuté** sur 3090 (R2 point 10).
-> - **L1a mémoire** ⚠ fuite swap résiduelle (2.8→4.1 Go) + swapfile temporaire non pérennisé (R1 point 10) ; instrumentation RSS livrée dans `gemma4_gchunk.zig` (`mem_probe.zig`).
-> - **L1b** ⬜ / **L2** ⬜ / **L3** ⬜ (hors-plan).
-> - **Outiling livré (27 juin, prêt-à-valider 3090)** : `mem_probe.zig`, `gemma4_gchunk_vacuity.zig`, `scripts/sweep_perf.sh`, `scripts/regen_fixtures.sh`, `scripts/smoke.sh`. Voir append `ENGINE_LOG.md` « Travaux préparatoires ».
+> **STATUT (28 juin 2026 — VALIDÉ SUR 3090)** — verdicts réels dans `docs/ENGINE_LOG.md` + tags git (ce plan = intention).
+> - **Task 0** ✅ comptime neutre (E1+E2 PASS, HLO byte-identique).
+> - **L0** ✅ oracles `46_gen_long_oracle.py` + `47_gen_long_ring_oracle.py` (ring). ⚠ `L_MAX` **abaissé 2048→1024** (pic compile), cf DESIGN D3.
+> - **L1a** ✅ replay **1020/1020 == HF** (mono `gemma4_gen_long.zig` + chunké `gemma4_gchunk.zig`).
+> - **L1b ring** ✅ **1020/1020 == HF** (`gemma4_gchunk_ring` sur `gen_long_ring.safetensors`, ring 512 + masque circulaire, wrap p≥512 franchi).
+> - **Non-vacuité du fenêtrage** ✅ **PROUVÉE par les LOGITS** (`gemma4_vacuity_logits` : `max_abs`=0 pour p<512, transition nette à p=512, 0→0.77). Les contre-tests argmax (`gchunk_vacuity`, ring `naive`) sont insensibles — greedy trop robuste.
+> - **L2 autonome** ✅ **1020/1020 == HF** (`gemma4_gchunk_auto`, gather→reinject ; embeddings lus en **streaming** depuis le safetensors → OOM résolu).
+> - **Mémoire** ✅ pic post-compile **~19 GiB mesuré** < 23 Go (`mem_probe.zig`) ; fuite swap ~2 GiB bornée.
+> - **GPU** ⬜ (`gemma4_gen_long_gpu` / `gemma4_bench` compilent, run CUDA non fait) / **L3** ⬜ (hors-plan).
+> - **Validation post-audit (28 juin)** : 7 bugs corrigés (5 commits, dont 3 au CŒUR révélés au build 3090 — un audit sans compilation ne les voit pas). Détail : `ENGINE_LOG.md` § « Validation 3090 — 28 juin 2026 ».
 
 ---
 
 ## Conventions communes (lire avant toute tâche)
 
 **Contexte 3090 (toute compilation/exécution s'y fait — JAMAIS en local) :**
-- Hôte : `ssh ia@192.168.1.163`. Workspace ZML : `/data/rqz_workspace/zml`. Dir runner : `/data/rqz_workspace/zml/examples/rqz/`.
+- Hôte : `ssh user@gpu-host`. Workspace ZML : `/data/rqz_workspace/zml`. Dir runner : `/data/rqz_workspace/zml/examples/rqz/`.
 - Checkpoint : `/data/gemma4-zml-probe/weights/model.safetensors`.
 - Déploiement des sources locales → 3090 : depuis `~/dev/gemma4-zml-probe/zml_runner/` :
   ```bash
-  ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz ./deploy_to_3090.sh
+  ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz ./deploy_to_3090.sh
   ```
 - Build + run d'une cible : sur la 3090, **via le wrapper `./bazel.sh`** (bazelisk ; `bazel` n'est PAS dans le PATH) :
   ```bash
@@ -235,7 +237,7 @@ Instancier `engine.EngineModel(struct{}, .{ .two_masks = true, .kmax_sliding = L
 - [ ] **Step 3 : Build + run → PASS sur N tokens**
 
 ```bash
-ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz ./deploy_to_3090.sh
+ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz ./deploy_to_3090.sh
 # sur 3090 :
 bazel run //examples/rqz:gemma4_gen_long -- /data/gemma4-zml-probe/weights/model.safetensors /data/.../gen_long.safetensors
 ```

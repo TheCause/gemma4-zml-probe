@@ -2177,7 +2177,7 @@ zig_binary(
 ## 6. Playbook de validation sur la 3090
 
 > Prérequis : `libpjrt_cuda` linké dans le workspace ZML (`--config=cuda`) ; `nvidia-smi` ;
-> swapfile `/swapfile_xla` (CPU) — inutile sur GPU. Deploy : `ZML_REMOTE=ia@192.168.1.163
+> swapfile `/swapfile_xla` (CPU) — inutile sur GPU. Deploy : `ZML_REMOTE=user@gpu-host
 > ZML_JUMP=macmini ZML_DST=/data/rqz_workspace/zml/examples/rqz zml_runner/deploy_to_3090.sh`.
 
 ### 6.1 Smoke (compile-only, sans weights/run) — confirme que TOUT compile (dont le knob PrecCfg)

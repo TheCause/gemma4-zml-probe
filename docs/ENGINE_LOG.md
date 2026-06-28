@@ -254,7 +254,7 @@ Pour lever le mur mémoire (compile decode 35 couches en 1 graphe → ~33 Go →
 ## Validation 3090 — 28 juin 2026 (VERDICTS RÉELS, post-audit)
 
 Les livrables de la session 27/06 étaient « prêts-à-valider » (jamais compilés ni exécutés). Validation
-réelle sur 3090 (`ssh ia@192.168.1.163`, workspace `/data/rqz_workspace/zml`, deploy `deploy_to_3090.sh`)
+réelle sur 3090 (`ssh user@gpu-host`, workspace `/data/rqz_workspace/zml`, deploy `deploy_to_3090.sh`)
 après audit multi-agents (17 agents, contrat de vérité = source zml locale) + 7 correctifs en 5 commits.
 
 **Bugs corrigés (3 au CŒUR, que l'audit sans compilation n'avait pas vus — faux négatif) :**

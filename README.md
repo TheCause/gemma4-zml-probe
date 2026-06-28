@@ -9,16 +9,18 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 > ~50 atomic gates, each committed and tagged.
 > Visual map of the whole port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
 >
-> **Génération longue (branche `generation-longue`, front actif) :** replay de **1020 tokens** greedy
-> HF (fenêtre glissante 512 franchie) validé bit-identique à HF (`L1a` PASS 1020/1020, mono + chunké).
-> Gates restants : `L1b` (vrai ring 512), `L2` (inférence autonome host), `L3` (in-graph, optionnel).
-> Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md).
+> **Génération longue (branche `generation-longue`) — validée sur GPU (RTX 3090) :** `L1a` replay
+> linéaire **1020/1020 == HF**, `L1b` ring-buffer 512 + masque circulaire **1020/1020 == HF** (wrap
+> franchi), non-vacuité du fenêtrage **prouvée par les logits**, et `L2` génération **autonome 1020/1020
+> == HF** (gather→reinject host, embeddings lus en streaming). Reste : chemin **GPU/CUDA** (compile OK,
+> run à valider) et `L3` (in-graph, optionnel).
+> Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md) et [`docs/ENGINE_LOG.md`](docs/ENGINE_LOG.md).
 
 ```
 prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
   → decode 1 token (last_hidden + logits + argmax == HF)
   → generate 4 tokens (sequence == HF greedy: [1018, 6398, 25967, 53121])
-  → generate 1020 tokens [L1a, gen-longue] (argmax == HF greedy, sliding window 512)
+  → generate 1020 tokens [L1a linéaire / L1b ring 512 / L2 autonome] (== HF greedy, sliding window 512)
 ```
 
 ## Why

@@ -12,10 +12,10 @@
 
 ## Environnement (rappel)
 
-- **Compute** : `ssh ia@192.168.1.163` (accès direct, pas de jumphost). Venv `/data/venvs/gemma4-probe` (torch 2.12, transformers 5.9). Modèle `google/gemma-4-E2B-it` en cache `/data/hf_cache` (utiliser `HF_HOME=/data/hf_cache HF_HUB_OFFLINE=1`). **Écrire uniquement sur `/data`** (`/` à 90 %).
+- **Compute** : `ssh user@gpu-host` (accès direct, pas de jumphost). Venv `/data/venvs/gemma4-probe` (torch 2.12, transformers 5.9). Modèle `google/gemma-4-E2B-it` en cache `/data/hf_cache` (utiliser `HF_HOME=/data/hf_cache HF_HUB_OFFLINE=1`). **Écrire uniquement sur `/data`** (`/` à 90 %).
 - **Workspace ZML** : `/data/rqz_workspace/zml/examples/rqz/`. Build : `cd /data/rqz_workspace/zml && ./bazel.sh build //examples/rqz:<cible>`. Run : `./bazel-bin/examples/rqz/<cible> <fixture.safetensors>`.
 - **turboquant.py** : déployé `/data/gemma4-zml-probe/turboquant.py` (version M1 `~/dev/turboquant/turboquant.py`). `sys.path.insert(0, "/data/gemma4-zml-probe")`.
-- **Déploiement fichiers** : `scp <fichier> ia@192.168.1.163:<dest>` (direct, validé). Sources Zig → workspace ; oracles Python + fixtures → `/data/gemma4-zml-probe/`.
+- **Déploiement fichiers** : `scp <fichier> user@gpu-host:<dest>` (direct, validé). Sources Zig → workspace ; oracles Python + fixtures → `/data/gemma4-zml-probe/`.
 - **Pièges ZML capitalisés** (spike) : `gather(.{.c=idx})` exige `idx.squeeze(.c)` (argMax garde l'axe réduit) ; **le codebook DOIT être tagué `.c`** (pas `.k`, déjà pris par l'axe-position du cache) ; format log Zig `{e:.1}` (pas `{e:.0e}`) ; reshape perd les tags → `.withTags` ; pas de broadcast implicite → `.broad` ; noms runner ≤ 20 c.
 - **Artefacts spike déjà dans le repo** (rapatriés 2026-06-04) : `zml_runner/gemma4_hadq.zig` (+ cible BUILD locale), `scripts/spike_hadq_oracle.py`, `scripts/test_kv_quant_generation.py`, `scripts/measure_k_distribution_gemma4.py`. Le worker les lit/copie en local (pas besoin d'aller sur le 3090 pour le squelette).
 - **Source de vérité du build = workspace 3090.** Pour chaque nouvelle cible, **append idempotent** au BUILD 3090 (`grep -q <cible> $B || cat bloc >> $B`), ne PAS écraser le BUILD 3090 par le BUILD local (ils peuvent diverger). Garder le BUILD local M1 synchronisé en parallèle (pour le commit).
@@ -66,8 +66,8 @@ print("Wrote", OUT, {k: tuple(v.shape) for k, v in state.items()})
 
 - [ ] **Step 2 — Déployer + exécuter.**
 ```bash
-scp scripts/30_export_turboquant_constants.py ia@192.168.1.163:/data/gemma4-zml-probe/
-ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python /data/gemma4-zml-probe/30_export_turboquant_constants.py'
+scp scripts/30_export_turboquant_constants.py user@gpu-host:/data/gemma4-zml-probe/
+ssh user@gpu-host 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python /data/gemma4-zml-probe/30_export_turboquant_constants.py'
 ```
 Expected : `Wrote ... {'codebook_256': (16,), 'hadamard_256': (256,256), 'codebook_512': (16,), 'hadamard_512': (512,512)}`
 
@@ -115,11 +115,11 @@ Ajouter la cible `gemma4_vquant` à `BUILD.bazel` (copier le bloc `gemma4_q_proj
 
 - [ ] **Step 3 — Build.** Déployer le runner + ajouter la cible au BUILD 3090 (idempotent, sans écraser) :
 ```bash
-scp zml_runner/gemma4_vquant.zig ia@192.168.1.163:/data/rqz_workspace/zml/examples/rqz/
+scp zml_runner/gemma4_vquant.zig user@gpu-host:/data/rqz_workspace/zml/examples/rqz/
 # bloc cible dans /tmp/vquant_block.txt (copie de gemma4_q_proj, name+main=gemma4_vquant)
-scp /tmp/vquant_block.txt ia@192.168.1.163:/tmp/
-ssh ia@192.168.1.163 'B=/data/rqz_workspace/zml/examples/rqz/BUILD.bazel; grep -q gemma4_vquant $B || cat /tmp/vquant_block.txt >> $B'
-ssh ia@192.168.1.163 'cd /data/rqz_workspace/zml && ./bazel.sh build //examples/rqz:gemma4_vquant 2>&1 | tail -3'
+scp /tmp/vquant_block.txt user@gpu-host:/tmp/
+ssh user@gpu-host 'B=/data/rqz_workspace/zml/examples/rqz/BUILD.bazel; grep -q gemma4_vquant $B || cat /tmp/vquant_block.txt >> $B'
+ssh user@gpu-host 'cd /data/rqz_workspace/zml && ./bazel.sh build //examples/rqz:gemma4_vquant 2>&1 | tail -3'
 ```
 Expected : `Build completed successfully`. (Mettre aussi à jour `zml_runner/BUILD.bazel` local pour le commit.)
 
