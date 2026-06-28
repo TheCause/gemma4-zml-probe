@@ -10,6 +10,15 @@
 
 **Spec de référence :** `docs/GENERATION_LONGUE_DESIGN.md`.
 
+> **STATUT (27 juin 2026)** — suivi réel dans `docs/ENGINE_LOG.md` + tags git (le présent plan = intention).
+> - **Task 0** ✅ comptime neutre (E1+E2 PASS, HLO byte-identique — commit `bb4254e`).
+> - **L0** ✅ oracle `46_gen_long_oracle.py` (commit `b0e18c8`). ⚠ `L_MAX` **abaissé 2048→1024** (pic compile), cf DESIGN D3.
+> - **L1a** ✅ replay 1020/1020 == HF (mono `gemma4_gen_long.zig` + chunké `gemma4_gchunk.zig`, commits `e0f3e2f`/`99199da`).
+> - **L1a non-vacuité** ⚠ contre-test LIVRÉ (`gemma4_gchunk_vacuity.zig`) mais **non exécuté** sur 3090 (R2 point 10).
+> - **L1a mémoire** ⚠ fuite swap résiduelle (2.8→4.1 Go) + swapfile temporaire non pérennisé (R1 point 10) ; instrumentation RSS livrée dans `gemma4_gchunk.zig` (`mem_probe.zig`).
+> - **L1b** ⬜ / **L2** ⬜ / **L3** ⬜ (hors-plan).
+> - **Outiling livré (27 juin, prêt-à-valider 3090)** : `mem_probe.zig`, `gemma4_gchunk_vacuity.zig`, `scripts/sweep_perf.sh`, `scripts/regen_fixtures.sh`, `scripts/smoke.sh`. Voir append `ENGINE_LOG.md` « Travaux préparatoires ».
+
 ---
 
 ## Conventions communes (lire avant toute tâche)
@@ -341,9 +350,10 @@ git commit -m "feat(gen-long): L2 inférence autonome host-orchestrée — séqu
 
 ## Checklist de complétude (fin de plan)
 
-- [ ] Task 0 : E1/E2 PASS + HLO byte-identique.
-- [ ] L0 : fixture 2048 tokens + 2 masques + caches L_max, sans V-quant.
-- [ ] L1a : PASS argmax==HF (linéaire borné) + contre-test.
+- [x] Task 0 : E1/E2 PASS + HLO byte-identique. *(commit `bb4254e`)*
+- [x] L0 : fixture généré (⚠ **1024** tokens, non 2048, cf D3) + 2 masques + caches L_max, sans V-quant. *(commit `b0e18c8`)*
+- [x] L1a : PASS argmax==HF 1020/1020 (linéaire borné, mono + chunké). *(commits `e0f3e2f`, `99199da`)*
+- [ ] L1a non-vacuité : contre-test LIVRÉ (`gemma4_gchunk_vacuity.zig`) — **à exécuter sur 3090** (R2).
 - [ ] L1b : PASS argmax==HF après wrap (ring 512) + contre-test wrap.
 - [ ] L2 : PASS séquence générée == HF (autonome host) + contre-test.
 - [ ] E1/E2 verts à chaque commit ; `ENGINE_LOG.md` à jour ; mémoire `zml_modular_engine.md` mise à jour en clôture.

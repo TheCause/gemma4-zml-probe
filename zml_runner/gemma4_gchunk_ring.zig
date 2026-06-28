@@ -1,24 +1,21 @@
-// L1a CHUNKÉ (perf) — decode découpé en stages compilés séparément pour borner le pic mémoire.
+// L1b — Replay génération longue : VRAI ring-buffer 512 + masque CIRCULAIRE (replay, chunké).
 //
-// Adapte le mode `chain` du prefill au decode (cf docs/GENERATION_LONGUE_CHUNKING_DESIGN.md) :
-// les 35 couches sont découpées en stages de CHUNK couches, chacun compilé via `compileFn` (fn-factory
-// comptime). À chaque step on exécute les stages en séquence, threadant hidden + cache device→device,
-// avec sync (toSliceAlloc) après chaque pour libérer le working set. Calcul == forward mono (runLayerGen
-// partagé) → mêmes tokens, mais pic mémoire borné (moins de poids f32 coexistant).
+// Configuration : EngineModel(struct{}, .{ .ring=true, .two_masks=true, .kmax_sliding=512,
+//                                        .kmax_full=L_MAX }). Différences vs L1a (gemma4_gchunk) :
+//   - ring=true  → scatter sliding CIRCULAIRE à `pos % 512` (au lieu de `pos` linéaire).
+//   - kmax_sliding=512 → cache sliding `.k=512` (anneau), masque `masks_sliding` CIRCULAIRE (.k=512).
+//   - kmax_full=L_MAX   → cache full reste LINÉAIRE `.k=L_MAX` (les couches full ne sont JAMAIS fenêtrées).
 //
-// GATE 0 (cette version) : compile N stages, mesure le pic POST-COMPILE (les N exe résidents = go/no-go),
-// puis exécute NUM_STEPS_GATE0 steps pour vérifier l'équivalence (tokens == expected). Gestion mémoire
-// best-effort (petite fuite tolérée sur peu de steps ; le pic post-compile est mesuré AVANT les steps).
+// La séquence greedy HF est IDENTIQUE à L1a (le ring 512 encode le même attention des 512 dernières
+// positions) → PASS = argmax == expected sur les N tokens, y compris APRÈS le wrap (pos ≥ 512).
 //
-// CHANGEMENTS vs v1 (cf analyse point 10, R1/R4) :
-//   - Instrumentation RSS/swap réelle (mem_probe.zig) : pic post-compile (le go/no-go annoncé, enfin
-//     MESURÉ au lieu d'être seulement logué) + RSS par fenêtre de steps (caractérise la fuite résiduelle
-//     swap 2.8→4.1 Go observée). No-op hors-Linux.
-//   - Knob comptime SYNC_EVERY : fréquence de sync entre stages. Défaut 1 = sync après chaque stage =
-//     comportement L1a exact (non-régression préservée). >1 = moins de round-trips host mais working
-//     sets qui s'accumulent (trade-off perf/mémoire à caractériser via scripts/sweep_perf.sh).
+// Contre-test de non-vacuité (PLAN L1b step 277) : lancer ce runner sur `gen_long_ring_naive.safetensors`
+// (masque non-remappé) → doit DIVERGER à partir de p≈512 (la bande déborde le ring, slots masqués à tort).
 //
-// CLI : gemma4_gen_long_chunked <model.safetensors> <gen_long.safetensors>
+// Chemin d'exécution chunké (== gchunk) pour éviter le thrash mémoire du mono-graphe à `.k≥512`.
+// Inclut l'instrumentation RSS (R1, mem_probe.zig).
+//
+// CLI : gemma4_gchunk_ring <model.safetensors> <gen_long_ring.safetensors|gen_long_ring_naive.safetensors>
 
 const std = @import("std");
 const log = std.log;
@@ -30,15 +27,15 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024;
 const NUM_LAYERS: usize = 35;
-const CHUNK: usize = 5; // couches/stage (divise 15 → pas de stage mixte producer/reader)
-const SYNC_EVERY: usize = 1; // sync après chaque (SYNC_EVERY)-ième stage. Défaut 1 = L1a exact.
-const NUM_STEPS_GATE0: usize = 4; // gate 0 : équivalence sur quelques steps (fuite cache tolérée)
-const RSS_EVERY: usize = 64; // log RSS/swap tous les RSS_EVERY steps (caractérisation fuite)
+const CHUNK: usize = 5;
+const SYNC_EVERY: usize = 1;
+const RSS_EVERY: usize = 64;
 const B: i64 = 1;
 const S: i64 = 1;
 const D: i64 = 1536;
 
-const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
+// L1b : ring 512 + masque circulaire. kmax_full reste L_MAX (full jamais fenêtré).
+const Model = engine.EngineModel(struct {}, .{ .ring = true, .two_masks = true, .kmax_sliding = 512, .kmax_full = L_MAX });
 const PackedLong = engine.Packed(true);
 const StageOut = struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor };
 
@@ -82,19 +79,20 @@ fn argmaxOf(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !
 }
 
 pub fn main(init: std.process.Init) !void {
-    @setEvalBranchQuota(200000); // inline for sur N_STAGES × compileFn générique déborde le quota par défaut
+    @setEvalBranchQuota(200000);
     const arena = init.arena;
     const allocator = init.gpa;
     const io = init.io;
 
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     if (process_args.len < 3) {
-        log.err("Usage: gemma4_gen_long_chunked <model.safetensors> <gen_long.safetensors>", .{});
+        log.err("Usage: gemma4_gchunk_ring <model.safetensors> <gen_long_ring.safetensors|..._naive.safetensors>", .{});
         return error.MissingArgument;
     }
     const ckpt = process_args[1];
     const fixture = process_args[2];
-    log.info("L1a CHUNKÉ — {d} couches en {d} stages de {d} (L_MAX={d}, SYNC_EVERY={d})", .{ NUM_LAYERS, N_STAGES, CHUNK, L_MAX, SYNC_EVERY });
+    const is_naive = std.mem.indexOf(u8, fixture, "naive") != null;
+    log.info("L1b — ring 512 + masque circulaire (chunké) ; fixture={s}{s}", .{ fixture, if (is_naive) " [NAIVE → attend divergence ~p=512]" else "" });
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt);
     var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
@@ -114,7 +112,6 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator);
     const sharding = try zml.sharding.replicatedSharding(platform);
 
-    log.info("Materializing weights + packed + cache0...", .{});
     const eng_buf = try model.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
     const pk_buf = try packed_in.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     var cache_buf = try cache0.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
@@ -122,22 +119,20 @@ pub fn main(init: std.process.Init) !void {
     var exp_buf = try exp_sym.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     store_ck.deinit();
     reg_ck.deinit();
-    mem_probe.logMem("post-load (poids+packed+cache)");
+    mem_probe.logMem("post-load");
 
     var exp_slice = try exp_buf.e.toSliceAlloc(allocator, io);
     defer exp_slice.free(allocator);
     const expected_tokens = exp_slice.items(i32);
-    const num_steps = expected_tokens.len; // run complet (équivalence sur toute la séquence)
+    const num_steps = expected_tokens.len;
 
-    // dummy hidden {b,s,d} (entrée ignorée du first stage).
     const hidden_shape = zml.Shape.init(.{ B, S, D }, .f32).withTags(.{ .b, .s, .d });
     const zeros = try arena.allocator().alloc(u8, @intCast(B * S * D * 4));
     @memset(zeros, 0);
     var dummy_hidden = try zml.Buffer.fromBytes(io, platform, hidden_shape, sharding, zeros);
     defer dummy_hidden.deinit();
 
-    // ===== Compile les N stages (fn-factory comptime) =====
-    log.info("Compiling {d} stages...", .{N_STAGES});
+    log.info("Compiling {d} stages (ring=true, kmax_sliding=512)...", .{N_STAGES});
     var exes: [N_STAGES]zml.Exe = undefined;
     inline for (STAGES, 0..) |stage, si| {
         const F = struct {
@@ -146,22 +141,20 @@ pub fn main(init: std.process.Init) !void {
             }
         }.f;
         exes[si] = try platform.compileFn(allocator, io, F, .{ model, packed_in, cache0, hidden_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
-        log.info("  stage {d} [{d},{d}) first={} last={} compilé", .{ si, stage.start, stage.end, stage.first, stage.last });
     }
     defer for (&exes) |*e| e.deinit();
-    log.info("=== POST-COMPILE : {d} stages résidents ===", .{N_STAGES});
-    mem_probe.logMem("post-compile (go/no-go : pic des N exe résidents)"); // ← la mesure annoncée, enfin capturée
+    mem_probe.logMem("post-compile (go/no-go)");
 
-    // ===== Boucle steps (run complet : équivalence sur num_steps) =====
     var all_pass = true;
     var n_match: usize = 0;
+    var first_fail: i64 = -1;
     var step_idx: usize = 0;
     const rss0 = mem_probe.rssKb();
     while (step_idx < num_steps) : (step_idx += 1) {
         var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step_idx)), .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
 
-        var hidden_buf = dummy_hidden; // first stage : ignoré
+        var hidden_buf = dummy_hidden;
         var tok: i64 = -1;
         inline for (STAGES, 0..) |stage, si| {
             var args = try exes[si].args(allocator);
@@ -172,18 +165,12 @@ pub fn main(init: std.process.Init) !void {
                 zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
             });
 
-            // sync out0 (matérialise → libère le working set du stage). SYNC_EVERY borne la fréquence :
-            // défaut 1 = sync après chaque stage (== L1a, mémoire bornée). >1 = moins de round-trips host
-            // mais working sets accumulés (trade-off perf/mémoire, cf sweep_perf.sh). Le dernier stage est
-            // toujours matérialisé par l'argmax qui suit (toSliceAlloc) → son working set est libéré de toute façon.
             const do_sync = (si % SYNC_EVERY == SYNC_EVERY - 1);
             if (do_sync) {
                 var s = try out0.toSliceAlloc(allocator, io);
                 s.free(allocator);
             }
 
-            // thread cache : deinit l'ancien (pattern e1 — les buffers d'entrée ne sont pas « donnés » par
-            // call, donc deinitables après ; les reader-stages retournent une copie du cache, pas un alias).
             var old_cache = cache_buf;
             cache_buf = zml.Bufferized(engine.Cache){ .sl_k = nsl, .sl_v = nsv, .fl_k = nfl, .fl_v = nfv };
             old_cache.sl_k.deinit();
@@ -191,7 +178,6 @@ pub fn main(init: std.process.Init) !void {
             old_cache.fl_k.deinit();
             old_cache.fl_v.deinit();
 
-            // thread hidden
             if (si != 0) hidden_buf.deinit();
             if (stage.last) {
                 tok = try argmaxOf(allocator, io, &out0);
@@ -205,12 +191,14 @@ pub fn main(init: std.process.Init) !void {
 
         const exp = @as(i64, @intCast(expected_tokens[step_idx]));
         const ok = tok == exp;
-        if (ok) n_match += 1 else all_pass = false;
-        if (!ok) log.err("  FAIL step {d} (pos {d}) : argmax ZML={d} HF={d}", .{ step_idx, 4 + step_idx, tok, exp });
-        if ((step_idx + 1) % 256 == 0) {
-            log.info("  ... {d}/{d} steps, {d} match", .{ step_idx + 1, num_steps, n_match });
+        if (ok) n_match += 1 else {
+            all_pass = false;
+            if (first_fail < 0) first_fail = @intCast(step_idx);
+            if (first_fail >= 0 and (step_idx - @as(usize, @intCast(first_fail)) < 8)) {
+                log.info("  DIVERGENCE step {d} (pos {d}) : ZML={d} HF={d}", .{ step_idx, 4 + step_idx, tok, exp });
+            }
         }
-        // caractérisation fuite : RSS/swap tous les RSS_EVERY steps (delta vs post-compile).
+        if ((step_idx + 1) % 256 == 0) log.info("  ... {d}/{d} steps, {d} match", .{ step_idx + 1, num_steps, n_match });
         if ((step_idx % RSS_EVERY == RSS_EVERY - 1) and (rss0 != null)) {
             var tag_buf: [32]u8 = undefined;
             const tag = std.fmt.bufPrint(&tag_buf, "step {d}", .{step_idx}) catch "step";
@@ -218,13 +206,29 @@ pub fn main(init: std.process.Init) !void {
         }
         step_buf.deinit();
     }
-    mem_probe.logMem("post-run (final)");
+    cache_buf.sl_k.deinit();
+    cache_buf.sl_v.deinit();
+    cache_buf.fl_k.deinit();
+    cache_buf.fl_v.deinit();
+    mem_probe.logMem("post-run");
 
-    log.info("L1a CHUNKÉ : {d}/{d} tokens match", .{ n_match, num_steps });
-    if (all_pass) {
-        log.info("L1a CHUNKÉ PASS — moteur chunké == HF greedy sur {d} tokens (== mono, exécution borné mémoire)", .{num_steps});
+    log.info("L1b RING : {d}/{d} tokens match (first_fail step {d})", .{ n_match, num_steps, first_fail });
+    if (is_naive) {
+        // Contre-test : le masque non-remappé doit DIVERGER à partir de p≈512 (pos 512 = step ~508).
+        const ff_pos: i64 = if (first_fail >= 0) 4 + first_fail else -1;
+        if (n_match < num_steps) {
+            log.info("L1b NON-VACUITÉ RING OK — divergence (1re au pos {d}) prouve le wrap circulaire consommé", .{ff_pos});
+            if (ff_pos >= 0 and ff_pos < 508) log.warn("  1re divergence précoce (pos {d}<508) : investiguer", .{ff_pos});
+        } else {
+            log.err("L1b NON-VACUITÉ RING FAIL : aucune divergence malgré masque non-remappé (wrap non consommé !)", .{});
+            return error.Vacuity;
+        }
     } else {
-        log.err("L1a CHUNKÉ : divergence vs expected", .{});
-        return error.GenMismatch;
+        if (all_pass) {
+            log.info("L1b RING PASS — {d} tokens == HF greedy (ring 512 + masque circulaire, wrap franchi)", .{num_steps});
+        } else {
+            log.err("L1b RING : divergence vs expected (1re au step {d}) — ring/masque circulaire à investiguer", .{first_fail});
+            return error.GenMismatch;
+        }
     }
 }

@@ -249,11 +249,24 @@ pub const EngineCfg = struct {
     kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
 };
 
+/// Config de précision comptime (GPU). Défaut `.f32` strictement == comportement actuel (fp32 bit-exact
+/// baseline) : `c()` upcast en `prec.compute` (défaut .f32 = today) → graphe HLO byte-identique (E1/E2/L1a
+/// inchangés, preuve `diff -rq` préservée). G2 activera `.bf16` pour les GEMM (refactor à part : insérer des
+/// `.convert(prec.gemm)` aux bornes des dot, garder norm/softmax/rope/softcap en `prec.compute`).
+/// Champs `weight`/`kv` réservés (le load-dtype via createTensor n'expose pas de arg dtype ; G2 utilisera
+/// une conversion post-load). NEUTRALITÉ : tout champ non default doit rester inerte en config défaut.
+pub const PrecCfg = struct {
+    compute: zml.DataType = .f32, // cible d'upcast de c() (norm/softmax/rope/softcap et entrées GEMM actuelles)
+    weight: ?zml.DataType = null, // réservé G2 (dtype de load des poids) ; null = infer (today)
+    kv: ?zml.DataType = null, // réservé G2 (dtype du cache KV) ; null = infer (today)
+};
+
 /// Forward decode d'UNE couche i en mode génération (cache threadé). Producer scatter K/V du token à
 /// (.slot, .k=pos) dans le cache empaqueté ; reader lit le slot du writer 13/14. `brick` est threadé
 /// pour le point d'extension post_v_norm (comptime-mort si la brique ne l'implémente pas). `cfg` est
 /// comptime : ses branches inactives ne sont pas émises (neutralité HLO en config défaut).
-fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
+fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, comptime prec: PrecCfg, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
+    const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call; // shadow file-scope c (prec-aware)
     const full = isFull(i);
     const reader = isReader(i);
     const hd: i64 = if (full) HD_FULL else HD_SLIDING;
@@ -338,7 +351,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, hidden
 /// Le socle : model decode générique paramétré comptime par une brique. `EngineModel(struct{})`
 /// reproduit decode4 (gate E1) ; `EngineModel(MaBrique)` injecte une transformation au(x) point(s)
 /// d'extension sans copier le moteur.
-pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
+pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg, comptime prec: PrecCfg = .{}) type {
     return struct {
         embed_tokens: zml.Tensor, // {voc,d} lm_head tied
         per_layer_model_projection: zml.Tensor,
@@ -382,6 +395,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         }
 
         fn perLayerInputs(self: Self, embptl_slice: zml.Tensor, embeds: zml.Tensor) zml.Tensor {
+            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
                 .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
@@ -395,6 +409,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// Un pas de génération : sélectionne le step, embed+PLE, 35 couches (cache threadé) -> logits +
         /// cache grandi. Retour : {logits {b,s,voc}, sl_k, sl_v, fl_k, fl_v}.
         pub fn forward(self: Self, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
             const step = ctrl.step;
             const embed_slice = pickStep(p.embeds, step);
             const embptl_slice = pickStep(p.embptls, step);
@@ -420,7 +435,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                     (if (comptime isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
-                hidden = runLayerGen(self.layers[i], i, cfg, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+                hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const last_hidden = rmsScaleD(hidden, c(self.final_norm));
             const raw = last_hidden.dot(c(self.embed_tokens), .d);
@@ -436,6 +451,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// : 1er = hidden_out (non-last) OU logits (last) ; + cache (sl_k,sl_v,fl_k,fl_v). Le calcul est
         /// identique à `forward` op-pour-op (runLayerGen partagé) → mêmes tokens, autre exécution.
         pub fn forwardStageGen(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
             const step = ctrl.step;
             const embptl_slice = pickStep(p.embptls, step);
             const cos = pickStep(p.cos_full, step);
@@ -457,7 +473,88 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                     (if (comptime isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
-                hidden = runLayerGen(self.layers[i], i, cfg, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+                hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+            }
+
+            const out_first = if (last) blk: {
+                const last_hidden = rmsScaleD(hidden, c(self.final_norm));
+                const raw = last_hidden.dot(c(self.embed_tokens), .d);
+                break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+            } else hidden;
+            return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
+        }
+
+        /// L2 — forward 1-step AUTONOME (host-orchestré) : les embeds/embptls viennent d'un gather HOST
+        /// du token produit (token-dépendant), tandis que cos/sin/masques/positions viennent de `p` (la
+        /// fixture L1a : position-only, INDÉPENDANTS du token → valides pour la génération autonome tant
+        /// que les positions coïncident, i.e. même prompt+compte). `forward` mono (E1/E2) et `forwardStageGen`
+        /// (chunké) sont INTACTS → preuve HLO et L1a inchangés ; cette méthode est une NOUVELLE entrée.
+        ///
+        /// `embeds_step` : {b,s,d} bf16 — embed_tokens[fed_tok] host-gathered (AVANT scale √1536, brut).
+        /// `embptls_step` : {b,s,lf} bf16 — embed_tokens_per_layer[fed_tok] host-gathered.
+        /// Retourne {logits, sl_k, sl_v, fl_k, fl_v} (== `forward` mono, op-pour-op identique hormis la
+        /// source des embeds/embptls). Permet la boucle autonome : argmax → gather host → reinject.
+        pub fn forwardStep(self: Self, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const step = ctrl.step;
+            const cos = pickStep(p.cos_full, step);
+            const sin = pickStep(p.sin_full, step);
+            const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
+            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
+            const pos_i = pickStep(p.positions, step);
+            const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
+            const pos_u = pos_i.convert(.u32);
+
+            const embeds = embeds_step.convert(.f32).scale(EMBED_SCALE);
+            const ple = self.perLayerInputs(embptls_step, embeds);
+            var hidden = embeds;
+            var cache = cache_in;
+            inline for (0..NUM_LAYERS) |i| {
+                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+                const mask = if (cfg.two_masks)
+                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                else
+                    mask_single;
+                hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
+            }
+
+            const last_hidden = rmsScaleD(hidden, c(self.final_norm));
+            const raw = last_hidden.dot(c(self.embed_tokens), .d);
+            const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+            return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
+        }
+
+        /// L2 CHUNKÉ — variante stage de `forwardStep` (autonome host-orchestré, chunké pour la mémoire).
+        /// Comme `forwardStageGen` MAIS embeds/embptls viennent d'un gather HOST per-step (token-dépendant)
+        /// au lieu de `pickStep(p.embeds/embptls)`. cos/sin/masques/positions restent de `p` (position-only).
+        /// `first` → hidden = embeds_step ; `last` → final norm + lm_head + softcap. Même `runLayerGen`.
+        /// Nécessaire car le mono `forwardStep` compile le graphe 35-couches (~33 Go, thrash) : le chunké
+        /// borne le pic (cf GENERATION_LONGUE_CHUNKING_DESIGN). `forward`/`forwardStageGen`/`forwardStep`
+        /// (E1/E2/L1a) sont INTACTS.
+        pub fn forwardStageStep(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const step = ctrl.step;
+            const cos = pickStep(p.cos_full, step);
+            const sin = pickStep(p.sin_full, step);
+            const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
+            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
+            const pos_i = pickStep(p.positions, step);
+            const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
+            const pos_u = pos_i.convert(.u32);
+
+            const embeds = embeds_step.convert(.f32).scale(EMBED_SCALE);
+            const ple = self.perLayerInputs(embptls_step, embeds);
+            var hidden = if (first) embeds else hidden_in;
+            var cache = cache_in;
+            inline for (start..end) |i| {
+                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+                const mask = if (cfg.two_masks)
+                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                else
+                    mask_single;
+                hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const out_first = if (last) blk: {
                 const last_hidden = rmsScaleD(hidden, c(self.final_norm));

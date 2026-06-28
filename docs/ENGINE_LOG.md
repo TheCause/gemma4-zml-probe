@@ -108,3 +108,145 @@ Pour lever le mur mémoire (compile decode 35 couches en 1 graphe → ~33 Go →
 - **Mémoire** : pic ~23,6 Go RAM + **4,1 Go swap** (vs 33 Go + 11 Go thrash du mono). **Plus de thrash mortel → le run FINIT** (~55 min). **Multi-thread Eigen rebranché** (plus besoin de `--xla_cpu_multi_thread_eigen=false`).
 - **Pièges capitalisés** : (1) `results.get` veut le type des **Buffer** (pas le `StageOut` de Tensor) ; (2) `platform.compile` exige une méthode **nommée** → utiliser `compileFn(func: anytype, ArgsTuple)` pour des stages génériques ; (3) **nom de cible court** sinon quota comptime 1000 branches (cf 31 mai) ; (4) deinit cache = `var old` (pas `const`).
 - **Limites / tuning futur** : pic encore limite (23,6 Go) + légère croissance swap (2,8→4,1 = fuite résiduelle à traquer) ; vitesse 55 min (pas « minutes ») dominée par les **7 syncs host/step** → leviers : CHUNK plus grand (moins de syncs, pic ↑), syncs plus rares, gestion mémoire affinée. Mais **L1b/L2 sont désormais FAISABLES** (tournent sans thrash).
+
+---
+
+## 27 juin — Travaux préparatoires (risques R1/R2/R4/R5/R6, LIVRÉS, à valider sur 3090)
+
+> Suite à l'analyse des points d'attention/risques du projet (point 10). Aucun build/run exécuté par
+> l'auteur (pas d'accès SSH 3090 depuis l'environnement de rédaction : sandbox bloque le réseau ; pas de
+> `weights/` local). Tout est livré **prêt-à-valider** sur la 3090 par Régis. Méthode conservée :
+> motifs mirrorés du runner L1a prouvé (`gemma4_gchunk.zig`), braces/parens équilibrés, neutralité E1/E2
+> préservée (défauts comptime inchangés).
+
+### R2 — Contre-test de non-vacuité L1a (la condition de gate non satisfaite)
+- `zml_runner/gemma4_gchunk_vacuity.zig` (+ cible `gemma4_gchunk_vacuity`) : rebind `masks_sliding` ←
+  `masks_full` (fenêtre 512 OFF, causal [0,p]). Critère **inversé** : PASS = divergence observée à
+  partir de ~p=512 (step ~508, 1re troncature de la bande) → prouve que le masque bande est consommé.
+  Si 1020/1020 match malgré la corruption → vacuité (bug) → `error.Vacuity`. `max_steps` (3e arg) pour
+  run court (ex 600) capturant la divergence sans les 1020 steps complets.
+- **À exécuter** : `bazel run //examples/rqz:gemma4_gchunk_vacuity -- <model.safetensors> <gen_long.safetensors> 600`.
+  Attendu : `VACUITY-OK` (divergence ~step 508). CLOTURE le gate L1a (cf `Reste` du 6 juin).
+
+### R1 — Instrumentation mémoire (le go/no-go enfin mesuré) + caractérisation fuite
+- `zml_runner/mem_probe.zig` : lecture RSS/VmSwap dans `/proc/self/status` (Linux), no-op ailleurs
+  (branches comptime-mortes → pas de bruit sur build Mac).
+- `gemma4_gchunk.zig` instrumenté : `logMem("post-compile")` (le pic des N exe résidents = le
+  go/no-go que le design §6 annonçait mais ne capturait pas — il est désormais **mesuré**), `logMem` par
+  fenêtre de 64 steps (caractérise la fuite swap 2.8→4.1 Go), `logMem("post-run")`. + knob comptime
+  `SYNC_EVERY` (défaut 1 = L1a exact → non-régression préservée).
+- **À valider** : re-run `gemma4_gchunk` → vérifier le log `[mem] post-compile` (doit <23 Go) et la
+  pente RSS/swap par fenêtre (quantifie la fuite R1).
+
+### R4 — Harness de sweep perf (trade-off CHUNK × SYNC_EVERY)
+- `scripts/sweep_perf.sh` : patche les 2 consts comptime, build+run par config, capture RSS post-compile
+  / swap final / match / temps. Grille : (CHUNK ∈ {3,5,7,15}) × (SYNC_EVERY ∈ {1,2,7}). Caractérise la
+  non-monotonie prédite (design §5.2) et le levier « syncs rares ». Restore le runner après chaque config.
+
+### R5 — Repro hors-infra
+- `scripts/regen_fixtures.sh` : orchestre les oracles dans l'ordre des dépendances (PLE → YOCO → P5.2 →
+  P5.4-5.6 → P5.7 → decode → TQ → genlong), par phase (`bash regen_fixtures.sh p52 p57`). Report PASS/FAIL.
+- `scripts/smoke.sh` : build-only (sans weights/run) de E1/E2/gchunk/vacuity — vérification minimale
+  toolchain+sources après un changement.
+
+### R6 — Réconciliation docs (spec ↔ vérité)
+- README : statut clarifié (decode court 4 tokens vs gen-longue 1020) + Limites (L_MAX 1024, swapfile,
+  perf 55 min, non-vacuité pending).
+- DESIGN : D3 (2048 cible / 1024 implémenté) + §7 mémoire corrigé (le pic vient des poids f32, pas du
+  cache — la note initiale « 30 MB négligeable » était inexacte).
+- PLAN : bandeau STATUT + checklist mise à jour (Task 0/L0/L1a cochés par commit ; non-vacuité L1a
+  laissée ouverte — c'est R2 ci-dessus).
+
+### Non-régression (à vérifier avant merge)
+- E1/E2 : `forward` mono inchangé (aucune modif `engine.zig`). `gemma4_gchunk` : seul delta = `mem_probe`
+  import + `SYNC_EVERY=1` (== comportement L1a) + logs RSS (no-op hors-Linux). Re-run E1/E2 attendu PASS.
+- Preuve HLO : non touchée (engine.zig intact). Si suspicion, `diff -rq` des dumps `--xla_dump_to`.
+
+---
+
+## 27 juin (bis) — L1b (ring 512) + L2 (autonome host) rédigés (LIVRÉS, à valider sur 3090)
+
+> Suite directe du front génération longue (cf GENERATION_LONGUE_PLAN Task L1b/L2). Mêmes garde-fous qu
+> supra : pas de build/run ici (sandbox réseau/.git read-only), motifs mirrorés du L1a prouvé, braces/
+> parens équilibrés. `forward`/`forwardStageGen` (E1/E2/L1a) INTACTS ; 2 NOUVELLES entrées ajoutées à
+> `EngineModel` (`forwardStep` mono + `forwardStageStep` chunké) → preuve HLO inchangée (E1/E2 ne les
+> appellent pas).
+
+### L1b — vrai ring 512 + masque circulaire (replay)
+- **Oracle** `scripts/47_gen_long_ring_oracle.py` : réutilise la fixture L0 (cos/sin/masks_full/embeds/
+  embptls/positions/cache_fl/expected/fed inchangés — position-only) et RECONSTRUIT `masks_sliding`
+  (CIRCULAIRE, `.k=512`, slot s visible ssa la position qu'il contient est dans la bande) + `cache_sl_k/v`
+  re-packed `.k=512`. Émet AUSSI `gen_long_ring_naive.safetensors` (masque non-remappé) pour le contre-test.
+  N'a PAS besoin de GPU/HF (lit `gen_long.safetensors`) → rapide à valider.
+- **Runner** `zml_runner/gemma4_gchunk_ring.zig` (+ cible) : `EngineModel(struct{}, .{ .ring=true,
+  .two_masks=true, .kmax_sliding=512, .kmax_full=L_MAX })`, chemin chunké (== gchunk). Sur la fixture
+  correcte → attend PASS argmax==HF (wrap franchi ~pos 512). Sur `..._naive.safetensors` (détecté par
+  le nom) → attend DIVERGENCE ~pos 512 (non-vacuité ring, `error.Vacuity` si 0 divergence).
+- **À valider** : `python3 scripts/47_gen_long_ring_oracle.py` puis `bazel run //examples/rqz:gemma4_gchunk_ring
+  -- <ckpt> gen_long_ring.safetensors` (PASS) et `... gen_long_ring_naive.safetensors` (VACUITY-OK).
+  La séquence HF est identique à L1a (le ring encode le même attention) → les `expected` sont partagés.
+
+### L2 — inférence autonome host-orchestrée
+- **engine.zig** : `forwardStep` (mono) + `forwardStageStep` (chunké) — le forward 1-step où `embeds`/
+  `embptls` viennent d'un gather HOST du token produit (token-dépendant) au lieu de `pickStep(p.embeds/
+  embptls)`. cos/sin/masques/positions restent de la fixture (position-only, valides pour la gen autonome
+  tant que le compte de positions coïncide — ce qui est le cas depuis le prefill `cache0`).
+- **Runner** `zml_runner/gemma4_gchunk_auto.zig` (+ cible) : boucle `gather host (embed_tokens[tok] +
+  embed_tokens_per_layer[tok]) → fromBytes(device) → forwardStageStep (chunké) → argmax → reinject tok`.
+  Les tables d'embeddings sont lues en HOST (~0,8 + ~4,7 Go) ; la copie device de `embed_tokens_per_layer`
+  est libérée après lecture (pas un poids du forward). Critère L2 : séquence GÉNÉRÉE == HF greedy (`expected`).
+- **Insight clé** : cos/sin/masques/positions sont INDÉPENDANTS du token (fonctions de position + layout) →
+  réutilisables de la fixture L1a pour la gen autonome. L'autonomie porte UNIQUEMENT sur embeds/embptls.
+  → on évite de réimplémenter le RoPE "proportional" host-side (le piège oracle-independence).
+- **À valider** : `bazel run //examples/rqz:gemma4_gchunk_auto -- <ckpt> gen_long.safetensors 64` (run court
+  64 steps pour valider l'autonomie sans la pleine durée). Attendu `L2 PASS` (généré == HF greedy).
+  Coût host ~5,5 Go + swapfile probable ; le `embptl` device-load transitoire (+4,7 Go) à surveiller.
+
+### Non-régression (à vérifier avant merge)
+- `forward`/`forwardStageGen` inchangés → E1/E2 + L1a (gchunk/gemma4_gen_long) identiques. Re-run E1/E2 PASS.
+- 2 nouvelles méthodes `EngineModel` : elles ne sont appelées par AUCUN runner existant → graphe E1/E2/L1a
+  byte-identique. Si suspicion : preuve HLO `diff -rq` des dumps `--xla_dump_to`.
+
+---
+
+## 27 juin (ter) — P-GPU-1 démarré : knob PrecCfg (neutre) + runners GPU G1/bench (LIVRÉS, à valider 3090)
+
+> Suite du plan GPU (`docs/GPU_PORT_PLAN.md`). Méme garde-fous qu'avant : pas de build/run ici (.git/ssh
+> read-only), défaut comptime NEUTRE (byte-identique), compile-risk only (caught au build 3090).
+
+### engine.zig — knob précision `PrecCfg` (neutre, préparation G2)
+- `pub const PrecCfg = struct { compute: zml.DataType = .f32, weight: ?zml.DataType = null, kv: ?zml.DataType = null };`
+- `EngineModel(comptime Brick, comptime cfg: EngineCfg, comptime prec: PrecCfg = .{})` — 3e param comptime
+  À DÉFAUT (les instantiations 2-arg existantes E1/E2/L1a reçoivent `.{}` → inchangées).
+- `c()` (upcast f32) devient prec-aware via `const c = struct { fn call(t) t.convert(prec.compute); }.call;`
+  local à chaque fonction qui l'utilise (runLayerGen + perLayerInputs + forward/forwardStageGen/
+  forwardStep/forwardStageStep — 6 sites) ; `runLayerGen` gagne `comptime prec` (4 call sites MAJ).
+- **Neutralité** : défaut `compute=.f32` → `t.convert(.f32)` == `c(t)` d'aujourd'hui → graphe HLO
+  byte-identique (E1/E2/L1a inchangés, preuve `diff -rq` préservée). Le file-scope `c` (legacy f32) reste
+  en filet de sécurité. **À valider sur 3090** : re-run E1/E2 PASS + preuve HLO `diff -rq` (la seule
+  vérification non-faisable hors 3090).
+- `weight`/`kv` champs RÉSERVÉS (non câblés) : createTensor n'expose pas d'arg dtype (le dtype vient du
+  store) → le load-dtype forcé (bf16) nécessite une conversion post-load (tâche G2). Le vrai gain perf
+  GPU (bf16 GEMM) = G2 : insérer `.convert(prec.gemm)` aux bornes des `dot`, garder norm/softmax/rope/
+  softcap en `prec.compute`. Documenté `GPU_PORT_PLAN.md` §5.3/§14 P-GPU-2.
+
+### Runners GPU (G0/G1 + bench)
+- `zml_runner/gemma4_gen_long_gpu.zig` (+ cible) — **G1 baseline fp32 GPU** : force `Platform.init(.cuda,
+  memory_fraction=0.90)` avec fallback `Platform.auto` ; timer tok/s (API `std.Io.Timestamp.now(io,.awake)`
+  + `untilNow(io,.awake).toNanoseconds()`, cf examples/benchmark) ; logging platform/RSS. Calcul == L1a
+  mono (`PrecCfg` défaut fp32). Critère G1 : argmax==HF + drift fp32-CUDA caractérisé + tok/s mesuré.
+- `zml_runner/gemma4_bench.zig` (+ cible) — **G8 bench decode** : warmup 1 step + mesure tok/s + sanity
+  argmax==HF. Rapport compile/warmup/throughput/platform/VRAM(via nvidia-smi).
+- `scripts/smoke.sh` étendu : build aussi `gemma4_gen_long_gpu` + `gemma4_bench` (compile-check, pas de run).
+
+### À valider sur 3090 (P-GPU-1)
+1. `bash scripts/smoke.sh` → BUILD OK=8 (dont les 2 GPU) — confirme que le knob PrecCfg + les runners compilent.
+2. **Non-régression** (le seul vrai risque du knob) : `bazel run //examples/rqz:gemma4_engine_e1 -- ...` +
+   `.../gemma4_engine_e2` → PASS ; preuve HLO `diff -rq` des dumps config défaut == baseline (PrecCfg{} byte-identique).
+3. **G1 GPU** : avec `libpjrt_cuda` linké → `bazel run //examples/rqz:gemma4_gen_long_gpu -- <ckpt> gen_long.safetensors 64`
+   → attendu G1 PASS + tok/s (vs ~55 min CPU). VRAM via `nvidia-smi`.
+4. **Bench** : `bazel run //examples/rqz:gemma4_bench -- <ckpt> gen_long.safetensors 256` → tok/s GPU.
+
+> Si CUDA indispo (G0 fail), repli `Platform.auto` (= CPU) : le runner tourne quand même (utile pour valider
+> la compilation + la logique de timing, mais pas le gain GPU). Le vrai G0 = s'assurer que `libpjrt_cuda`
+> est buildé dans le workspace ZML (`--config=cuda`).

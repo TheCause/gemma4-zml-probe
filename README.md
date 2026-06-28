@@ -4,14 +4,21 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 **[ZML](https://github.com/zml/zml)** — the Zig + MLIR + OpenXLA inference compiler — built and
 **proven against HuggingFace Transformers one operation at a time**.
 
-> **Status — port complete.** Prefill, logits, single-token decode, and multi-token generation all
-> produce output **identical to HuggingFace**. ~50 atomic gates, each committed and tagged.
+> **Status — port complete (forward / logits / decode court).** Prefill, logits, single-token decode,
+> and **short** multi-token generation (4 tokens) all produce output **identical to HuggingFace**.
+> ~50 atomic gates, each committed and tagged.
 > Visual map of the whole port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
+>
+> **Génération longue (branche `generation-longue`, front actif) :** replay de **1020 tokens** greedy
+> HF (fenêtre glissante 512 franchie) validé bit-identique à HF (`L1a` PASS 1020/1020, mono + chunké).
+> Gates restants : `L1b` (vrai ring 512), `L2` (inférence autonome host), `L3` (in-graph, optionnel).
+> Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md).
 
 ```
 prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
   → decode 1 token (last_hidden + logits + argmax == HF)
-  → generate N tokens (sequence == HF greedy: [1018, 6398, 25967, 53121])
+  → generate 4 tokens (sequence == HF greedy: [1018, 6398, 25967, 53121])
+  → generate 1020 tokens [L1a, gen-longue] (argmax == HF greedy, sliding window 512)
 ```
 
 ## Why
@@ -84,8 +91,19 @@ Each runner prints `max_abs` / `mean_abs` vs the oracle and a PASS/FAIL verdict.
 
 ## Limitations / not done (optional extensions)
 
-CPU fp32 only · no batching / sampling / fast-prefill · sliding window > 512 (ring buffer) not handled ·
-multimodal (vision/audio) out of scope (text path only) · no independent perf benchmarks.
+CPU fp32 only · no batching / sampling / fast-prefill · multimodal (vision/audio) out of scope (text
+path only) · no independent perf benchmarks.
+
+**Génération longue (branche `generation-longue`) — état fin June 2026 :**
+- `L_MAX` capped at **1024** (not the planned 2048): the XLA-CPU compile of the 35-layer fp32 forward at
+  `.k=2048` peaks ~34 Go, above the 32 Go host — the window 512 is still crossed (~2×) at 1024.
+- Memory: the chunked decode runner peaks ~23.6 Go RAM + ~4 Go swap (residual leak under investigation,
+  cf `docs/ENGINE_LOG.md` 7 juin); a temporary 16 Go swapfile (`/swapfile_xla`) is currently required to
+  avoid the OOM-killer — not yet permanent.
+- Perf: ~55 min for 1020 steps (dominated by 7 host syncs/step); tuning (`CHUNK` sweep, less frequent
+  syncs) is staged via `scripts/sweep_perf.sh` but not yet characterised.
+- Open methodological item: the **non-vacuity counter-test for `L1a`** (corrupt the band mask → must
+  diverge) is delivered as `gemma4_gchunk_vacuity.zig` but not yet executed on the 3090.
 
 ## License & attribution
 

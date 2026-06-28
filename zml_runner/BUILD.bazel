@@ -400,10 +400,59 @@ zig_binary(
 
 # L1a CHUNKÉ (perf) — decode découpé en stages compilés séparément (compileFn), pic mémoire borné.
 # Nom COURT (gchunk) : un nom de cible long déborde le quota comptime pjrt structSize (cf ENGINE_LOG 31 mai).
+# R1 (instrumentation mémoire) : pic post-compile MESURÉ (mem_probe.zig) + RSS/swap par-step
+# (caractérisation fuite) + knob comptime SYNC_EVERY (fréquence sync, défaut 1 = L1a exact).
 zig_binary(
     name = "gemma4_gchunk",
     main = "gemma4_gchunk.zig",
-    srcs = ["engine.zig"],
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1a — CONTRE-TEST DE NON-VACUITÉ (R2) : rebind masks_sliding <- masks_full (fenêtre OFF) → attend
+# divergence ~p=512 (prouve que le masque bande est consommé). PASS = divergence (critère inversé).
+# Nom court (gchunk_vac) : quota comptime pjrt structSize (cf 31 mai / ENGINE_LOG).
+zig_binary(
+    name = "gemma4_gchunk_vacuity",
+    main = "gemma4_gchunk_vacuity.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1b — replay ring 512 + masque circulaire (chunké). Sur *_naive.safetensors = contre-test non-vacuité.
+zig_binary(
+    name = "gemma4_gchunk_ring",
+    main = "gemma4_gchunk_ring.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L2 — génération AUTONOME host-orchestrée (gather host → forwardStageStep → argmax → reinject).
+zig_binary(
+    name = "gemma4_gchunk_auto",
+    main = "gemma4_gchunk_auto.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
+zig_binary(
+    name = "gemma4_gen_long_gpu",
+    main = "gemma4_gen_long_gpu.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# G8 — benchmark decode GPU (warmup + tok/s + sanity argmax==HF). VRAM via nvidia-smi.
+zig_binary(
+    name = "gemma4_bench",
+    main = "gemma4_bench.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )

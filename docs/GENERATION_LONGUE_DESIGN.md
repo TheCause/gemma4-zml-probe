@@ -23,7 +23,7 @@ La table `embed_tokens_per_layer.weight` (`[vocab, 8960]`, 8960 = 35×256) exist
 |---|----------|-------|
 | D1 | Objectif | **Les deux, en séquence** : preuve de fidélité longue distance (oracle HF) PUIS inférence autonome. |
 | D2 | Architecture boucle autonome | **Hybride** : host-orchestrée d'abord, internalisation in-graph en gate ultérieur optionnel. |
-| D3 | Longueur cible `L_max` | **Paramétrable comptime**, défaut **2048**. |
+| D3 | Longueur cible `L_max` | **Paramétrable comptime**, défaut **2048** (cible). **Implémenté à 1024** : le compile XLA-CPU à `.k=2048` pic ~34 Go > 32 Go hôte → abaissement à 1024 (la fenêtre 512 reste franchie ~2×). Remonter quand RAM VM augmentera. |
 | D4 | Découpage | **Gate-par-gate maximal** : palier linéaire borné avant le vrai ring. |
 | D5 | Prefill en L2 | **Conservé via fixture `cache0`** ; seule la phase decode devient autonome. |
 
@@ -107,7 +107,12 @@ Le prefill du prompt reste fourni par `cache0` (fixture), comme aujourd'hui.
 
 - **Oracle L0 / EOS** : greedy peut atteindre EOS avant N tokens → forcer `min_new_tokens` ou ignorer EOS pour produire une séquence de longueur fixe testable.
 - **Ring circulaire (L1b)** : neutralisé par test de perturbation + contrôle de non-vacuité (corrompre l'oracle doit faire FAIL le scan global).
-- **Mémoire** : `L_max = 2048` → cache full ≈ 30 MB ; négligeable sur la 3090 (24 GB).
+- **Mémoire** *(corrigé après exécution, cf ENGINE_LOG 5-7 juin)* : le pic **NE VIENT PAS du cache**
+  (sliding/full ≈ dizaines de Mo) mais des **conversions f32 des poids** (`c(layer.*)` ×35 couches
+  matérialisées dans un seul graphe). À `.k≥512` le forward 35-couches mono-graphe monte à ~33 Go (RAM
+  23 Go VM + swap) → swap thrash. **Contourné par le chunking du decode** (mode `chain`, pic ~23,6 Go +
+  ~4 Go swap résiduel à traquer) + swapfile temporaire 16 Go. La note initiale « cache 30 MB négligeable »
+  est **inexacte** : elle oubliait les poids f32, dominateur réel (cf `GENERATION_LONGUE_CHUNKING_DESIGN.md` §1).
 - **Non-régression** : à chaque commit, re-run E1 (preuve HLO `diff -rq`) + E2. Tout commit qui les casse est rejeté. E1/E2 tournent en **config par défaut** (`ring=false`, `KMAX_SLIDING=KMAX_FULL=8`, masque unique) : la fixture KMAX=8 et la brique TurboQuant chargent inchangées, et le graphe émis est byte-identique à decode4/gen_vq.
 - **Compute** : exécution sur la 3090 (`ssh ia@192.168.1.163`, workspace `/data/rqz_workspace/zml/examples/rqz/`, checkpoint `/data/gemma4-zml-probe/weights/model.safetensors`), via `deploy_to_3090.sh`. Fixtures volumineuses laissées sur la 3090 (gitignorées). Aucune commande à coller pour Régis.
 
