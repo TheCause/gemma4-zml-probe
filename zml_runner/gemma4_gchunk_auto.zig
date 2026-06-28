@@ -126,33 +126,41 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator);
     const sharding = try zml.sharding.replicatedSharding(platform);
 
-    // Poids moteur (eng_buf.embed_tokens = lm_head = table d'embeddings, déjà sur device).
+    // Poids moteur (eng_buf.embed_tokens = lm_head = table d'embeddings, déjà sur device, gardé pour le forward).
     const eng_buf = try model.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
-    // Table embed_tokens_per_layer : chargée device puis lue host (puis libérée device — pas un poids du forward).
-    const embptl_sym: EmbPtl = .init(base);
-    var embptl_buf = try embptl_sym.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
     // cos/sin/masques/positions + cache0 + expected/fed depuis la fixture.
     const pk_buf = try packed_in.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     var cache_buf = try cache0.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     const seq_sym: SeqW = .init(store_fx.view());
     var seq_buf = try seq_sym.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
 
-    // === Lecture HOST des deux tables d'embeddings (pour le gather) ===
-    // embed_tokens : reuse eng_buf.embed_tokens (device, lm_head) → host copy.
-    var emb_dev = eng_buf.embed_tokens;
-    var emb_host = try emb_dev.toSliceAlloc(allocator, io);
-    const emb_dtype = emb_host.dtype();
+    // === STREAMING des tables d'embeddings (correctif mémoire) ===
+    // Au lieu de matérialiser embed_tokens (~1,6 Go host) ET embed_tokens_per_layer (~4,7 Go device +
+    // ~4,7 Go host) — ce qui débordait la RAM (19 GiB compile + 4,7 host > 23 Go → OOM kill) — on lit UNE
+    // ligne par step DIRECTEMENT dans le fichier safetensors (read positionnel à l'offset du tensor +
+    // fed_tok*row_bytes). Pic ramené aux poids seuls (~19 GiB). embed_tokens reste sur device (lm_head).
+    const EMB_KEY = "model.language_model.embed_tokens.weight";
+    const EPTL_KEY = "model.language_model.embed_tokens_per_layer.weight";
+    const emb_t = reg_ck.tensors.get(EMB_KEY) orelse {
+        log.err("tensor introuvable dans le checkpoint: {s}", .{EMB_KEY});
+        return error.MissingTensor;
+    };
+    const eptl_t = reg_ck.tensors.get(EPTL_KEY) orelse {
+        log.err("tensor introuvable dans le checkpoint: {s}", .{EPTL_KEY});
+        return error.MissingTensor;
+    };
+    const emb_dtype = emb_t.shape.dtype();
+    const eptl_dtype = eptl_t.shape.dtype();
     const emb_esz = dtypeSize(emb_dtype);
-    const emb_bytes = emb_host.constData(); // {voc, d} row-major
-    // embed_tokens_per_layer : host copy puis libère le device (économise ~4,7 Go device).
-    var eptl_dev = embptl_buf.w;
-    var eptl_host = try eptl_dev.toSliceAlloc(allocator, io);
-    const eptl_esz = dtypeSize(eptl_host.dtype());
-    const eptl_bytes = eptl_host.constData(); // {voc, lf}
-    eptl_dev.deinit(); // table libérée du device (host copy conservée) ; embptl_buf.w désormais invalide (non réutilisé)
+    const eptl_esz = dtypeSize(eptl_dtype);
+    const emb_base_off: u64 = emb_t.offset; // offset absolu (octets) du début de la table dans le fichier
+    const eptl_base_off: u64 = eptl_t.offset;
+    // checkpoint ouvert en lecture pour les reads positionnels (1 ligne par step).
+    var ck_file = try std.Io.Dir.cwd().openFile(io, ckpt, .{ .mode = .read_only });
+    defer ck_file.close(io);
     store_ck.deinit();
     reg_ck.deinit();
-    mem_probe.logMem(io, "post-load (tables d'embeddings en host)");
+    mem_probe.logMem(io, "post-load (streaming embeddings ; aucune table en host)");
 
     // expected + fed0 (seed) en host.
     var exp_slice = try seq_buf.e.toSliceAlloc(allocator, io);
@@ -166,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Symboles per-step pour forwardStageStep (dtype = native du checkpoint, agronomique pour le forward).
     const embeds_sym = zml.Tensor.init(.{ B, S, D }, emb_dtype).withTags(.{ .b, .s, .d });
-    const embptls_sym = zml.Tensor.init(.{ B, S, LF }, eptl_host.dtype()).withTags(.{ .b, .s, .lf });
+    const embptls_sym = zml.Tensor.init(.{ B, S, LF }, eptl_dtype).withTags(.{ .b, .s, .lf });
 
     const hidden_shape = zml.Shape.init(.{ B, S, D }, .f32).withTags(.{ .b, .s, .d });
     const zeros = try arena.allocator().alloc(u8, @intCast(B * S * D * 4));
@@ -182,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
     const eptl_scratch = try allocator.alloc(u8, eptl_row_bytes);
     defer allocator.free(eptl_scratch);
     const emb_step_shape = zml.Shape.init(.{ B, S, D }, emb_dtype).withTags(.{ .b, .s, .d });
-    const eptl_step_shape = zml.Shape.init(.{ B, S, LF }, eptl_host.dtype()).withTags(.{ .b, .s, .lf });
+    const eptl_step_shape = zml.Shape.init(.{ B, S, LF }, eptl_dtype).withTags(.{ .b, .s, .lf });
 
     // ===== Compile les N stages (forwardStageStep) =====
     log.info("Compiling {d} stages (forwardStageStep, autonome)...", .{N_STAGES});
@@ -207,11 +215,12 @@ pub fn main(init: std.process.Init) !void {
 
     var step_idx: usize = 0;
     while (step_idx < num_steps) : (step_idx += 1) {
-        // 1) gather HOST des embeddings du token à feed (fed_tok).
-        const emb_off: usize = @intCast(fed_tok * @as(i64, @intCast(emb_row_bytes)));
-        const eptl_off: usize = @intCast(fed_tok * @as(i64, @intCast(eptl_row_bytes)));
-        @memcpy(emb_scratch, emb_bytes[emb_off .. emb_off + emb_row_bytes]);
-        @memcpy(eptl_scratch, eptl_bytes[eptl_off .. eptl_off + eptl_row_bytes]);
+        // 1) gather HOST de la ligne `fed_tok` : read positionnel direct dans le fichier (streaming, pas de
+        //    table en mémoire). offset absolu = base du tensor + fed_tok * row_bytes (layout row-major).
+        const emb_off: u64 = emb_base_off + @as(u64, @intCast(fed_tok)) * @as(u64, @intCast(emb_row_bytes));
+        const eptl_off: u64 = eptl_base_off + @as(u64, @intCast(fed_tok)) * @as(u64, @intCast(eptl_row_bytes));
+        _ = try ck_file.readPositionalAll(io, emb_scratch, emb_off);
+        _ = try ck_file.readPositionalAll(io, eptl_scratch, eptl_off);
 
         // 2) host → device (fromBytes) pour les entrées per-step.
         var embeds_step_buf = try zml.Buffer.fromBytes(io, platform, emb_step_shape, sharding, emb_scratch);
@@ -275,8 +284,6 @@ pub fn main(init: std.process.Init) !void {
     cache_buf.sl_v.deinit();
     cache_buf.fl_k.deinit();
     cache_buf.fl_v.deinit();
-    emb_host.free(allocator);
-    eptl_host.free(allocator);
     mem_probe.logMem(io, "post-run");
 
     log.info("L2 AUTONOME : {d}/{d} tokens match (généré vs HF greedy, first_fail step {d})", .{ n_match, num_steps, first_fail });
