@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
     eptl_dev.deinit(); // table libérée du device (host copy conservée) ; embptl_buf.w désormais invalide (non réutilisé)
     store_ck.deinit();
     reg_ck.deinit();
-    mem_probe.logMem("post-load (tables d'embeddings en host)");
+    mem_probe.logMem(io, "post-load (tables d'embeddings en host)");
 
     // expected + fed0 (seed) en host.
     var exp_slice = try seq_buf.e.toSliceAlloc(allocator, io);
@@ -196,7 +196,7 @@ pub fn main(init: std.process.Init) !void {
         exes[si] = try platform.compileFn(allocator, io, F, .{ model, embeds_sym, embptls_sym, packed_in, cache0, hidden_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
     }
     defer for (&exes) |*e| e.deinit();
-    mem_probe.logMem("post-compile (go/no-go)");
+    mem_probe.logMem(io, "post-compile (go/no-go)");
 
     // ===== Boucle autonome : gather(host) → fromBytes(device) → forwardStageStep → argmax → reinject =====
     var all_pass = true;
@@ -277,7 +277,7 @@ pub fn main(init: std.process.Init) !void {
     cache_buf.fl_v.deinit();
     emb_host.free(allocator);
     eptl_host.free(allocator);
-    mem_probe.logMem("post-run");
+    mem_probe.logMem(io, "post-run");
 
     log.info("L2 AUTONOME : {d}/{d} tokens match (généré vs HF greedy, first_fail step {d})", .{ n_match, num_steps, first_fail });
     if (all_pass) {

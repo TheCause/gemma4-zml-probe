@@ -93,6 +93,7 @@ phase_tq() {
 }
 phase_genlong() {
   run "GEN-LONG L0 oracle (GPU)"  46_gen_long_oracle.py
+  run "GEN-LONG L1b ring oracle"  47_gen_long_ring_oracle.py
 }
 
 ALL="ple yoco p52 p54-p56 p57 decode tq genlong"

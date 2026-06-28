@@ -76,14 +76,14 @@ for cfg in "${CONFIGS[@]}"; do
 
   LOG=$(mktemp)
   t0=$(date +%s)
-  ( cd "$ZML_WS" && $BAZEL-bin/examples/rqz/gemma4_gchunk $run_args ) >"$LOG" 2>&1 || true
+  ( cd "$ZML_WS" && bazel-bin/examples/rqz/gemma4_gchunk $run_args ) >"$LOG" 2>&1 || true
   t1=$(date +%s)
   dt=$((t1 - t0))
 
   # parse la sortie instrumentée (mem_probe logs : "[mem] tag: RSS=... KiB (... GiB) swap=... KiB (... GiB)")
-  postcomp=$(grep -m1 '\[mem\] post-compile' "$LOG" | grep -oE 'RSS=[0-9]+ KiB \([0-9.]+ GiB\)' | grep -oE '\([0-9.]+ GiB' | tr -d '( ' || echo "?")
-  final=$(grep -m1 '\[mem\] post-run' "$LOG" | grep -oE 'RSS=[0-9]+ KiB \([0-9.]+ GiB\)' | grep -oE '\([0-9.]+ GiB' | tr -d '( ' || echo "?")
-  swapf=$(grep -m1 '\[mem\] post-run' "$LOG" | grep -oE 'swap=[0-9]+ KiB \([0-9.]+ GiB\)' | grep -oE '\([0-9.]+ GiB' | tr -d '( ' || echo "?")
+  postcomp=$(grep -m1 '\[mem\] post-compile' "$LOG" | grep -oE 'RSS=[0-9]+ KiB \(~?[0-9.]+ GiB\)' | grep -oE '\(~?[0-9.]+ GiB' | tr -d '(~ ' || echo "?")
+  final=$(grep -m1 '\[mem\] post-run' "$LOG" | grep -oE 'RSS=[0-9]+ KiB \(~?[0-9.]+ GiB\)' | grep -oE '\(~?[0-9.]+ GiB' | tr -d '(~ ' || echo "?")
+  swapf=$(grep -m1 '\[mem\] post-run' "$LOG" | grep -oE 'swap=[0-9]+ KiB \(~?[0-9.]+ GiB\)' | grep -oE '\(~?[0-9.]+ GiB' | tr -d '(~ ' || echo "?")
   match=$(grep -oE 'L1a CHUNKÉ : [0-9]+/[0-9]+ tokens match' "$LOG" | grep -oE '[0-9]+/[0-9]+' || echo "?")
   verdict=$(grep -m1 'L1a CHUNKÉ PASS\|divergence vs expected' "$LOG" | head -c 60 || echo "?")
 

@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
         exes[si] = try platform.compileFn(allocator, io, F, .{ model, packed_in, cache0, hidden_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
     }
     defer for (&exes) |*e| e.deinit();
-    mem_probe.logMem("post-compile");
+    mem_probe.logMem(io, "post-compile");
 
     // ===== Boucle : on attend DIVERGENCE (critère inversé) =====
     var n_match: usize = 0;

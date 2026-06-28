@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
     var exp_buf = try exp_sym.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     store_ck.deinit();
     reg_ck.deinit();
-    mem_probe.logMem("post-load (host RSS ; VRAM via nvidia-smi)");
+    mem_probe.logMem(io, "post-load (host RSS ; VRAM via nvidia-smi)");
 
     var exp_slice = try exp_buf.e.toSliceAlloc(allocator, io);
     defer exp_slice.free(allocator);
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
     var exe = try platform.compile(allocator, io, model, .forward, .{ packed_in, cache0, ctrl_sym }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
     log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
-    mem_probe.logMem("post-compile (host RSS ; go/no-go GPU = nvidia-smi)");
+    mem_probe.logMem(io, "post-compile (host RSS ; go/no-go GPU = nvidia-smi)");
 
     var all_pass = true;
     var n_match: usize = 0;
@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
     const tok_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(num_steps)) / elapsed_s else 0;
     const ms_per_tok = if (num_steps > 0) @as(f64, @floatFromInt(elapsed_ns)) / 1e6 / @as(f64, @floatFromInt(num_steps)) else 0;
     log.info("G1 PERF : {d} tokens en {d:.2}s → {d:.1} tok/s ({d:.1} ms/tok) [backend={s}, fp32, batch-1, mono-graphe]", .{ num_steps, elapsed_s, tok_per_s, ms_per_tok, @tagName(platform.target) });
-    mem_probe.logMem("post-run (host RSS ; VRAM GPU via nvidia-smi)");
+    mem_probe.logMem(io, "post-run (host RSS ; VRAM GPU via nvidia-smi)");
 
     log.info("G1 : {d}/{d} tokens argmax-match (vs HF)", .{ n_match, num_steps });
     if (all_pass) {

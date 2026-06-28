@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     var exp_buf = try exp_sym.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     store_ck.deinit();
     reg_ck.deinit();
-    mem_probe.logMem("post-load (poids+packed+cache)");
+    mem_probe.logMem(io, "post-load (poids+packed+cache)");
 
     var exp_slice = try exp_buf.e.toSliceAlloc(allocator, io);
     defer exp_slice.free(allocator);
@@ -150,13 +150,13 @@ pub fn main(init: std.process.Init) !void {
     }
     defer for (&exes) |*e| e.deinit();
     log.info("=== POST-COMPILE : {d} stages résidents ===", .{N_STAGES});
-    mem_probe.logMem("post-compile (go/no-go : pic des N exe résidents)"); // ← la mesure annoncée, enfin capturée
+    mem_probe.logMem(io, "post-compile (go/no-go : pic des N exe résidents)"); // ← la mesure annoncée, enfin capturée
 
     // ===== Boucle steps (run complet : équivalence sur num_steps) =====
     var all_pass = true;
     var n_match: usize = 0;
     var step_idx: usize = 0;
-    const rss0 = mem_probe.rssKb();
+    const rss0 = mem_probe.rssKb(io);
     while (step_idx < num_steps) : (step_idx += 1) {
         var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step_idx)), .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
@@ -214,11 +214,11 @@ pub fn main(init: std.process.Init) !void {
         if ((step_idx % RSS_EVERY == RSS_EVERY - 1) and (rss0 != null)) {
             var tag_buf: [32]u8 = undefined;
             const tag = std.fmt.bufPrint(&tag_buf, "step {d}", .{step_idx}) catch "step";
-            mem_probe.logMem(tag);
+            mem_probe.logMem(io, tag);
         }
         step_buf.deinit();
     }
-    mem_probe.logMem("post-run (final)");
+    mem_probe.logMem(io, "post-run (final)");
 
     log.info("L1a CHUNKÉ : {d}/{d} tokens match", .{ n_match, num_steps });
     if (all_pass) {

@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     var exe = try platform.compile(allocator, io, model, .forward, .{ packed_in, cache0, ctrl_sym }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
     log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
-    mem_probe.logMem("post-compile");
+    mem_probe.logMem(io, "post-compile");
 
     // run 1 step (idx 0) en warmup : cold-start cuBLAS/autotune écarté ; son cache est jeté (on recommence).
     var all_pass = true;
@@ -142,6 +142,10 @@ pub fn main(init: std.process.Init) !void {
         results.deinit(allocator);
         if (step_idx == 0) {
             // warmup done ; reset du timer pour la mesure (le cache accumule normalement).
+            // IMPORTANT : avancer step_idx AVANT le break (le `: (step_idx += 1)` de la while n'est pas
+            // exécuté sur break). Sinon la boucle de mesure ré-exécute l'étape 0 sur un cache déjà avancé
+            // → étape 0 double-comptée (tok/s sous-estimé, n_match/num_steps > 100%).
+            step_idx += 1;
             break;
         }
     }
@@ -179,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
     const tok_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(measure_steps)) / elapsed_s else 0;
     const ms_per_tok = if (measure_steps > 0) @as(f64, @floatFromInt(elapsed_ns)) / 1e6 / @as(f64, @floatFromInt(measure_steps)) else 0;
-    mem_probe.logMem("post-run (host RSS ; VRAM GPU via nvidia-smi)");
+    mem_probe.logMem(io, "post-run (host RSS ; VRAM GPU via nvidia-smi)");
 
     log.info("========== gemma4_bench ==========", .{});
     log.info("  backend      : {s}", .{@tagName(platform.target)});
