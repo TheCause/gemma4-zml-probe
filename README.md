@@ -12,8 +12,8 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 > **Génération longue (branche `generation-longue`) — validée sur GPU (RTX 3090) :** `L1a` replay
 > linéaire **1020/1020 == HF**, `L1b` ring-buffer 512 + masque circulaire **1020/1020 == HF** (wrap
 > franchi), non-vacuité du fenêtrage **prouvée par les logits**, et `L2` génération **autonome 1020/1020
-> == HF** (gather→reinject host, embeddings lus en streaming). Reste : chemin **GPU/CUDA** (compile OK,
-> run à valider) et `L3` (in-graph, optionnel).
+> == HF** (gather→reinject host, embeddings lus en streaming). **GPU/CUDA validé** : 1020/1020 == HF à
+> **109 tok/s** (mono-graphe, sans chunking — le mur mémoire CPU disparaît). Reste : `L3` (in-graph) + bf16.
 > Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md) et [`docs/ENGINE_LOG.md`](docs/ENGINE_LOG.md).
 
 ```
@@ -107,8 +107,9 @@ path only) · no independent perf benchmarks.
   (`gemma4_vacuity_logits.zig`): corrupting the mask leaves logits identical for p<512 and changes them
   from p=512 onward (the argmax counter-tests stay flat — greedy is too robust to reveal it). The `L2`
   OOM was resolved by streaming the embedding gather row-by-row from the safetensors.
-- Still open: the **GPU/CUDA path** (`gemma4_gen_long_gpu`, `gemma4_bench` compile; CUDA run pending) and
-  `L3` (in-graph).
+- GPU/CUDA: **validated** — `gemma4_gen_long_gpu` reproduces HF **1020/1020** at **109 tok/s** (fp32, RTX
+  3090), built with `--@zml//platforms:cuda=true`. The mono-graph fits in ~22 Go VRAM, so chunking is not
+  needed on GPU. Still open: **bf16 precision** (G2, would halve VRAM) and `L3` (in-graph).
 
 ## License & attribution
 

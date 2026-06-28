@@ -17,7 +17,7 @@
 > - **Non-vacuité du fenêtrage** ✅ **PROUVÉE par les LOGITS** (`gemma4_vacuity_logits` : `max_abs`=0 pour p<512, transition nette à p=512, 0→0.77). Les contre-tests argmax (`gchunk_vacuity`, ring `naive`) sont insensibles — greedy trop robuste.
 > - **L2 autonome** ✅ **1020/1020 == HF** (`gemma4_gchunk_auto`, gather→reinject ; embeddings lus en **streaming** depuis le safetensors → OOM résolu).
 > - **Mémoire** ✅ pic post-compile **~19 GiB mesuré** < 23 Go (`mem_probe.zig`) ; fuite swap ~2 GiB bornée.
-> - **GPU** ⬜ (`gemma4_gen_long_gpu` / `gemma4_bench` compilent, run CUDA non fait) / **L3** ⬜ (hors-plan).
+> - **GPU** ✅ baseline fp32-CUDA **1020/1020 == HF, 109 tok/s** (`gemma4_gen_long_gpu` via `--@zml//platforms:cuda=true` ; mono-graphe, sans chunking, ~22 Go VRAM). G2 bf16 à venir / **L3** ⬜ (hors-plan).
 > - **Validation post-audit (28 juin)** : 7 bugs corrigés (5 commits, dont 3 au CŒUR révélés au build 3090 — un audit sans compilation ne les voit pas). Détail : `ENGINE_LOG.md` § « Validation 3090 — 28 juin 2026 ».
 
 ---

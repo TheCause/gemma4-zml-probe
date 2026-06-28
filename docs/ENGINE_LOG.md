@@ -281,3 +281,34 @@ après audit multi-agents (17 agents, contrat de vérité = source zml locale) +
 **Reste** : GPU (`gen_long_gpu`/`bench` compilent, run CUDA non fait) ; L3.
 
 **Méta-leçons** : (1) un audit multi-agents minutieux rate les erreurs de syntaxe/API du langage → compiler sur la cible reste irremplaçable ; (2) pour un gate de non-vacuité, l'argmax greedy est trop robuste → comparer les logits.
+
+## Validation GPU (CUDA) — 28 juin 2026 (G0 + G1 PASS)
+
+Le chemin GPU était le dernier front « compile OK, run non fait ». **Débloqué et validé** — ce n'était PAS
+le chantier d'1-2 jours craint par GPU_PORT_PLAN : l'infra CUDA est présente (runtime `/usr/local/cuda`,
+plugin `libpjrt_cuda` déjà déclaré dans `MODULE.bazel`). Il manquait UNIQUEMENT le flag de build.
+
+**G0 — backend CUDA disponible** : le 1er run tombait en fallback CPU (`Platform.init(.cuda)` échoue →
+`libpjrt_cuda` absent des runfiles) car buildé sans flag. Solution (README ZML) :
+```bash
+cd /data/rqz_workspace/zml
+./bazel.sh run //examples/rqz:gemma4_gen_long_gpu --@zml//platforms:cuda=true -- \
+  /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/gen_long.safetensors [max_steps]
+```
+Le flag `--@zml//platforms:cuda=true` télécharge `libpjrt_cuda` (bzlmod) et le met dans les runfiles.
+NB : NE PAS mettre `/usr/local/cuda/lib64` dans `LD_LIBRARY_PATH` (ZML avertit « undefined behaviors » et
+gère CUDA via ses runfiles ; libcudart est déjà dans le ld cache). Le run sans LD_LIBRARY_PATH charge
+`libpjrt_cuda.so` proprement.
+
+**G1 — baseline fp32-GPU reproduit HF** :
+| Run | Backend | Résultat | Débit |
+|---|---|---|---|
+| 16 tokens | cuda | 16/16 == HF | 102.6 tok/s |
+| **1020 tokens** | cuda | **1020/1020 == HF** | **109.0 tok/s** (9.36 s) |
+
+- VRAM : ~22,2 Go / 24 Go (poids fp32 + caches, `memory_fraction 0.90`) → **le mono-graphe `.forward`
+  tient en VRAM, le chunking devient inutile sur GPU** (le mur mémoire CPU disparaît, cf GPU_PORT_PLAN §6).
+- Débit : **109 tok/s** (GPU fp32) vs ~0,3 tok/s (CPU, 55 min/1020) → **~350×**, au-dessus de la cible
+  plan (30-80 tok/s). G2 (bf16) reste une optimisation future (réduirait la VRAM ~20→~10 Go).
+
+**Reste** : G2 précision bf16/fp16, perf (batching, flash-attn), et L3 (in-graph). Le baseline GPU est établi.
