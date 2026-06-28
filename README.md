@@ -4,14 +4,23 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 **[ZML](https://github.com/zml/zml)** — the Zig + MLIR + OpenXLA inference compiler — built and
 **proven against HuggingFace Transformers one operation at a time**.
 
-> **Status — port complete.** Prefill, logits, single-token decode, and multi-token generation all
-> produce output **identical to HuggingFace**. ~50 atomic gates, each committed and tagged.
+> **Status — port complete (forward / logits / decode court).** Prefill, logits, single-token decode,
+> and **short** multi-token generation (4 tokens) all produce output **identical to HuggingFace**.
+> ~50 atomic gates, each committed and tagged.
 > Visual map of the whole port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
+>
+> **Génération longue (branche `generation-longue`) — validée sur GPU (RTX 3090) :** `L1a` replay
+> linéaire **1020/1020 == HF**, `L1b` ring-buffer 512 + masque circulaire **1020/1020 == HF** (wrap
+> franchi), non-vacuité du fenêtrage **prouvée par les logits**, et `L2` génération **autonome 1020/1020
+> == HF** (gather→reinject host, embeddings lus en streaming). **GPU/CUDA validé** : 1020/1020 == HF à
+> **109 tok/s** (mono-graphe, sans chunking — le mur mémoire CPU disparaît). Reste : `L3` (in-graph) + bf16.
+> Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md) et [`docs/ENGINE_LOG.md`](docs/ENGINE_LOG.md).
 
 ```
 prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
   → decode 1 token (last_hidden + logits + argmax == HF)
-  → generate N tokens (sequence == HF greedy: [1018, 6398, 25967, 53121])
+  → generate 4 tokens (sequence == HF greedy: [1018, 6398, 25967, 53121])
+  → generate 1020 tokens [L1a linéaire / L1b ring 512 / L2 autonome] (== HF greedy, sliding window 512)
 ```
 
 ## Why
@@ -82,10 +91,41 @@ python scripts/40_p5_7_7_decode_pilot_oracle.py
 
 Each runner prints `max_abs` / `mean_abs` vs the oracle and a PASS/FAIL verdict.
 
+**Run inference on a custom prompt (end-to-end, GPU)**
+
+```bash
+# 1. HF oracle: chat-template + tokenize your prompt, generate the reference sequence (fixture)
+python scripts/49_gen_custom_oracle.py --prompt "What is the capital of France? Answer in one word." --n-tokens 48
+# 2. ZML reproduces it on GPU — must match HF token-for-token
+./bazel.sh run //examples/rqz:gemma4_gen_long_gpu --@zml//platforms:cuda=true -- \
+  weights/model.safetensors gen_custom.safetensors 48
+# 3. Detokenize + validate the round-trip (text faithful to the generated tokens)
+python scripts/48_detokenize.py gen_custom.safetensors
+```
+
+Worked example — prompt *"capital of France"* → ZML **48/48 == HF** (108 tok/s, fp32 RTX 3090), decoded
+text **"Paris"**, round-trip **48/48 PASS**. HF stays the reference oracle; ZML is the validated engine
+that reproduces it. (Full autonomous runtime with an integrated tokenizer + EOS early-stop is future work.)
+
 ## Limitations / not done (optional extensions)
 
-CPU fp32 only · no batching / sampling / fast-prefill · sliding window > 512 (ring buffer) not handled ·
-multimodal (vision/audio) out of scope (text path only) · no independent perf benchmarks.
+CPU fp32 only · no batching / sampling / fast-prefill · multimodal (vision/audio) out of scope (text
+path only) · no independent perf benchmarks.
+
+**Génération longue (branche `generation-longue`) — validated on GPU host (RTX 3090) :**
+- `L_MAX` capped at **1024** (not the planned 2048): the XLA-CPU compile of the 35-layer fp32 forward at
+  `.k=2048` peaks above the ~23 Go host — the window 512 is still crossed (~2×) at 1024.
+- Memory: measured post-compile peak **~19 GiB** (instrumented via `mem_probe.zig`), under the 23 Go host —
+  the chunked decode bounds the peak; residual swap ~2 GiB, bounded.
+- Perf: ~55 min for 1020 steps (dominated by 7 host syncs/step); tuning (`CHUNK` sweep, less frequent
+  syncs) is staged via `scripts/sweep_perf.sh` but not yet characterised.
+- Non-vacuity: the sliding/window mask is **proven consumed** by a logits counter-test
+  (`gemma4_vacuity_logits.zig`): corrupting the mask leaves logits identical for p<512 and changes them
+  from p=512 onward (the argmax counter-tests stay flat — greedy is too robust to reveal it). The `L2`
+  OOM was resolved by streaming the embedding gather row-by-row from the safetensors.
+- GPU/CUDA: **validated** — `gemma4_gen_long_gpu` reproduces HF **1020/1020** at **109 tok/s** (fp32, RTX
+  3090), built with `--@zml//platforms:cuda=true`. The mono-graph fits in ~22 Go VRAM, so chunking is not
+  needed on GPU. Still open: **bf16 precision** (G2, would halve VRAM) and `L3` (in-graph).
 
 ## License & attribution
 

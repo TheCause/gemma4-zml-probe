@@ -1,11 +1,16 @@
-// Gate E1 — non-régression du socle modulaire.
+// L1a — replay de GÉNÉRATION LONGUE : cache sliding LINÉAIRE borné (.k = L_MAX) + masque BANDE.
 //
-// EngineModel(struct{}) (brique vide → point post_v_norm comptime-mort) doit reproduire decode4 (P5.7.8) :
-// même boucle de génération, même cache threadé, MÊME fixture (p5_7_8_gen.safetensors), MÊME oracle
-// (les 4 tokens `expected` de HF greedy). La branche brick étant comptime-morte, le graphe MLIR est
-// identique à decode4 → l'égalité des tokens doit tenir. Une divergence = erreur d'extraction.
+// Rejoue la fixture L0 (gen_long.safetensors) : à chaque step le moteur ZML embed le token `fed[step]`
+// (déjà empaqueté), SCATTER son KV à .k=position, et lit le cache via le masque par type de couche
+// (masks_sliding = bande [p-511,p] / masks_full = causal). On compare l'argmax à `expected[step]`.
 //
-// CLI : gemma4_engine_e1 <model.safetensors> <p5_7_8_gen.safetensors>
+// Config moteur : EngineModel(struct{}, .{ .two_masks=true, .kmax_sliding=L_MAX, .kmax_full=L_MAX }).
+//   - ring=false → cache sliding LINÉAIRE (.k = L_MAX), scatter à `pos` (pas de modulo). C'est L1a ;
+//     L1b passera en ring=true / kmax_sliding=512.
+//   - two_masks=true → Packed(true) (masks_sliding + masks_full), sélection par comptime isFull(i).
+//
+// PASS = argmax ZML[k] == expected[k] pour tout k (séquence == HF greedy sliding window 512).
+// CLI : gemma4_gen_long <model.safetensors> <gen_long.safetensors>
 
 const std = @import("std");
 const log = std.log;
@@ -14,11 +19,11 @@ const engine = @import("engine.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-const NUM_STEPS: usize = 4;
+const L_MAX: i64 = 1024; // réduit de 2048 : pic compile .k=2048 (~34Go) > hôte 32Go → swap thrash. 1024 franchit 512.
+const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
+const PackedLong = engine.Packed(true);
 
-const Model = engine.EngineModel(struct {}, .{}); // config par défaut → neutre (== decode4)
-
-// Séquence attendue (HF), lue côté host.
+// Séquence attendue (HF), lue côté host ; `len` = NUM_STEPS (dynamique).
 const ExpW = struct {
     e: zml.Tensor,
     pub fn init(v: zml.io.TensorStore.View) ExpW {
@@ -51,12 +56,12 @@ pub fn main(init: std.process.Init) !void {
 
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     if (process_args.len < 3) {
-        log.err("Usage: gemma4_engine_e1 <model.safetensors> <p5_7_8_gen.safetensors>", .{});
+        log.err("Usage: gemma4_gen_long <model.safetensors> <gen_long.safetensors>", .{});
         return error.MissingArgument;
     }
     const ckpt = process_args[1];
     const fixture = process_args[2];
-    log.info("E1 — non-régression EngineModel(struct{{}}) == decode4 ({d} tokens)", .{NUM_STEPS});
+    log.info("L1a — replay génération longue (cache linéaire .k={d} + masque bande)", .{L_MAX});
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt);
     var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
@@ -67,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
 
     const base = store_ck.view().withPrefix("model").withPrefix("language_model");
     const model: Model = try .init(arena.allocator(), base);
-    const packed_in: engine.Packed(false) = .init(store_fx.view());
+    const packed_in: PackedLong = .init(store_fx.view());
     const cache0: engine.Cache = .init(store_fx.view());
     const ctrl_sym: engine.Ctrl = .initSymbolic();
 
@@ -75,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator);
     const sharding = try zml.sharding.replicatedSharding(platform);
 
-    log.info("Materializing weights + packed inputs + caches...", .{});
+    log.info("Materializing weights + packed inputs + caches (L_MAX={d}) ...", .{L_MAX});
     const eng_buf = try model.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
     const pk_buf = try packed_in.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
     var cache_buf = try cache0.load(arena.allocator(), io, platform, &store_fx, &.{sharding});
@@ -87,14 +92,18 @@ pub fn main(init: std.process.Init) !void {
     var exp_slice = try exp_buf.e.toSliceAlloc(allocator, io);
     defer exp_slice.free(allocator);
     const expected_tokens = exp_slice.items(i32);
+    const num_steps = expected_tokens.len;
+    log.info("NUM_STEPS (= len expected) = {d}", .{num_steps});
 
-    log.info("Compiling gen step (EngineModel(struct{{}}))...", .{});
+    log.info("Compiling gen step (EngineModel two_masks, ring=false) ...", .{});
     var exe = try platform.compile(allocator, io, model, .forward, .{ packed_in, cache0, ctrl_sym }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
 
     var all_pass = true;
+    var n_match: usize = 0;
+    var first_fail: i64 = -1;
     var step_idx: usize = 0;
-    while (step_idx < NUM_STEPS) : (step_idx += 1) {
+    while (step_idx < num_steps) : (step_idx += 1) {
         var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step_idx)), .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
 
@@ -109,8 +118,18 @@ pub fn main(init: std.process.Init) !void {
         const tok = try argmaxOf(allocator, io, &r_logits);
         const exp = @as(i64, @intCast(expected_tokens[step_idx]));
         const ok = tok == exp;
-        if (!ok) all_pass = false;
-        log.info("  step {d} (pos {d}) : argmax ZML={d} HF={d} -> {s}", .{ step_idx, 4 + step_idx, tok, exp, if (ok) "PASS" else "FAIL" });
+        if (ok) {
+            n_match += 1;
+        } else {
+            all_pass = false;
+            if (first_fail < 0) first_fail = @intCast(step_idx);
+            if (step_idx - @as(usize, @intCast(@max(first_fail, 0))) < 8) {
+                log.err("  FAIL step {d} (pos {d}) : argmax ZML={d} HF={d}", .{ step_idx, 4 + step_idx, tok, exp });
+            }
+        }
+        if ((step_idx + 1) % 256 == 0) {
+            log.info("  ... {d}/{d} steps, {d} match", .{ step_idx + 1, num_steps, n_match });
+        }
 
         // thread le cache grandi vers le step suivant
         cache_buf.sl_k.deinit();
@@ -128,10 +147,11 @@ pub fn main(init: std.process.Init) !void {
     cache_buf.fl_k.deinit();
     cache_buf.fl_v.deinit();
 
+    log.info("L1a : {d}/{d} tokens argmax-match", .{ n_match, num_steps });
     if (all_pass) {
-        log.info("E1 PASS — EngineModel(struct{{}}) génère {d} tokens, séquence == decode4 (== HF greedy)", .{NUM_STEPS});
+        log.info("L1a PASS — replay {d} tokens, séquence == HF greedy (sliding window 512, cache linéaire)", .{num_steps});
     } else {
-        log.err("E1 : divergence de séquence vs decode4 — erreur d'extraction engine.zig", .{});
+        log.err("L1a : divergence (1er fail au step {d} / {d} match) — masque bande ou scatter à revoir", .{ first_fail, n_match });
         return error.GenMismatch;
     }
 }

@@ -333,12 +333,136 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+zig_binary(
+    name = "gemma4_hadq",
+    main = "gemma4_hadq.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+# Q3 — ZML MSE V-only quantizer chain (norm + Hadamard + nearest-centroid + inverse) vs oracle.
+zig_binary(
+    name = "gemma4_vquant",
+    main = "gemma4_vquant.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+# Q4 — ZML MOTEUR decode 1-step AVEC V-quant (MSE V-only) inséré au point cache ; decode == HF-V-quant.
+zig_binary(
+    name = "gemma4_decode_vq",
+    main = "gemma4_decode_vq.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# Q5 — ZML BOUCLE génération decode AVEC V-quant (MSE V-only) ; séquence == HF-V-quant greedy.
+zig_binary(
+    name = "gemma4_gen_vq",
+    main = "gemma4_gen_vq.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # E1 — non-régression socle modulaire : EngineModel(struct{}) == decode4 (P5.7.8).
 # srcs OBLIGATOIRE : le runner @import("engine.zig") -> Bazel doit exposer le fichier au sandbox.
 zig_binary(
     name = "gemma4_engine_e1",
     main = "gemma4_engine_e1.zig",
     srcs = ["engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# E2 — brique TurboQuant branchée sur le socle : EngineModel(TurboQuantVBrick) == gen_vq (POC sans copie).
+zig_binary(
+    name = "gemma4_engine_e2",
+    main = "gemma4_engine_e2.zig",
+    srcs = ["engine.zig", "brick_turboquant.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1a — replay génération longue : cache sliding LINÉAIRE (.k=L_MAX) + masque bande (two_masks, ring=false).
+zig_binary(
+    name = "gemma4_gen_long",
+    main = "gemma4_gen_long.zig",
+    srcs = ["engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1a CHUNKÉ (perf) — decode découpé en stages compilés séparément (compileFn), pic mémoire borné.
+# Nom COURT (gchunk) : un nom de cible long déborde le quota comptime pjrt structSize (cf ENGINE_LOG 31 mai).
+# R1 (instrumentation mémoire) : pic post-compile MESURÉ (mem_probe.zig) + RSS/swap par-step
+# (caractérisation fuite) + knob comptime SYNC_EVERY (fréquence sync, défaut 1 = L1a exact).
+zig_binary(
+    name = "gemma4_gchunk",
+    main = "gemma4_gchunk.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1a — CONTRE-TEST DE NON-VACUITÉ (R2) : rebind masks_sliding <- masks_full (fenêtre OFF) → attend
+# divergence ~p=512 (prouve que le masque bande est consommé). PASS = divergence (critère inversé).
+# Nom court (gchunk_vac) : quota comptime pjrt structSize (cf 31 mai / ENGINE_LOG).
+zig_binary(
+    name = "gemma4_gchunk_vacuity",
+    main = "gemma4_gchunk_vacuity.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# Contre-test non-vacuité par LOGITS (rigoureux) : double forward (masque correct vs causal) + max_abs
+# des logits. Tranche ce que l'argmax ne peut pas (greedy trop robuste). PASS = max_abs>0 à p>=512.
+zig_binary(
+    name = "gemma4_vacuity_logits",
+    main = "gemma4_vacuity_logits.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L1b — replay ring 512 + masque circulaire (chunké). Sur *_naive.safetensors = contre-test non-vacuité.
+zig_binary(
+    name = "gemma4_gchunk_ring",
+    main = "gemma4_gchunk_ring.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# L2 — génération AUTONOME host-orchestrée (gather host → forwardStageStep → argmax → reinject).
+zig_binary(
+    name = "gemma4_gchunk_auto",
+    main = "gemma4_gchunk_auto.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
+zig_binary(
+    name = "gemma4_gen_long_gpu",
+    main = "gemma4_gen_long_gpu.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
+# G8 — benchmark decode GPU (warmup + tok/s + sanity argmax==HF). VRAM via nvidia-smi.
+zig_binary(
+    name = "gemma4_bench",
+    main = "gemma4_bench.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )

@@ -110,4 +110,3 @@ Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne
 
 ## Mémoire associée
 
-`~/dev/Ma_MEMOIRE/memory/project_gemma4_zml_probe.md` (config invariants, piège ScaledWordEmbedding, pipeline de référence, résultats P3, fixture P4-prep).
