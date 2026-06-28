@@ -250,3 +250,35 @@ Pour lever le mur mémoire (compile decode 35 couches en 1 graphe → ~33 Go →
 > Si CUDA indispo (G0 fail), repli `Platform.auto` (= CPU) : le runner tourne quand même (utile pour valider
 > la compilation + la logique de timing, mais pas le gain GPU). Le vrai G0 = s'assurer que `libpjrt_cuda`
 > est buildé dans le workspace ZML (`--config=cuda`).
+
+## Validation 3090 — 28 juin 2026 (VERDICTS RÉELS, post-audit)
+
+Les livrables de la session 27/06 étaient « prêts-à-valider » (jamais compilés ni exécutés). Validation
+réelle sur 3090 (`ssh ia@192.168.1.163`, workspace `/data/rqz_workspace/zml`, deploy `deploy_to_3090.sh`)
+après audit multi-agents (17 agents, contrat de vérité = source zml locale) + 7 correctifs en 5 commits.
+
+**Bugs corrigés (3 au CŒUR, que l'audit sans compilation n'avait pas vus — faux négatif) :**
+- `engine.zig:354` param défaut Zig INTERDIT (`comptime prec: PrecCfg = .{}`) → `prec` replié comme champ de `EngineCfg` (10 call-sites intacts). [`5855882`]
+- `engine.zig` `const c` locaux prec-aware shadowaient un `inline fn c` file-scope (shadowing INTERDIT) → c file-scope (devenu mort) supprimé. [`5855882`]
+- `gen_long_gpu.zig`/`bench.zig` : `zml.Platform.CreateOptions` inexistant → `zml.platform.CreateOptions`. [`5855882`]
+- `mem_probe.zig` : API fichier legacy (`std.fs.openFileAbsolute`+`file.read` sync) NON compilable en Zig 0.16-dev → API Io threadée attestée (`std.Io.Dir.cwd().openFile(io,..)`+`file.reader(io,&buf)`+`readSliceShort`, modèle `bin/zml-smi/utils/sysfs.zig`) + 19 sites threadés `io`. [`97dabc4`]
+- `sweep_perf.sh` (`$BAZEL-bin` inexistant + regex sans tilde → 0 donnée), warmup `bench`, `regen`→script 47. [`97dabc4`]
+
+**Verdicts numériques — TOUS PASS (pic mémoire mesuré ~19 GiB < 23 Go RAM) :**
+
+| Gate | Runner | Résultat |
+|---|---|---|
+| Smoke compile | 9 cibles | 9/9 compilent (Zig 0.16-dev Linux réel) |
+| L1a | `gemma4_gchunk` | **1020/1020 == HF greedy** |
+| L1b ring | `gemma4_gchunk_ring` (`gen_long_ring.safetensors`) | **1020/1020 == HF**, wrap p≥512 franchi |
+| Non-vacuité masque | `gemma4_vacuity_logits` | **PROUVÉE** : p<512 max_abs=0 EXACT, transition nette p=512, max_abs 0→0.77 [`35375b8`] |
+| L2 autonome (court) | `gemma4_gchunk_auto` (streaming) | 24/24 == HF |
+| **L2 autonome COMPLET** | `gemma4_gchunk_auto` (streaming) | **1020/1020 == HF**, first_fail -1 (aucune dérive cumulative) |
+
+**Contre-test logits (pourquoi)** : les contre-tests argmax (`gchunk_vacuity`, ring `naive`) restaient à 0 divergence — l'argmax greedy est trop robuste (corrompre le masque change les logits mais pas le top-1). Le test logits tranche : `max_abs(correct vs causal)` = 0 pour p<512 (sanity), > 0 dès p=512 → masque sliding réellement consommé.
+
+**L2 OOM résolu** : la table `embed_tokens_per_layer` (~4,7 Go host) débordait la RAM 23 Go (pic 19 GiB compile + 4,7 → SIGKILL EXIT 137) → refactor en lecture positionnelle ligne-par-ligne du safetensors (`reg.tensors.get(name).offset` + `fed_tok*row_bytes`, `readPositionalAll`). [`2e0eda1`]
+
+**Reste** : GPU (`gen_long_gpu`/`bench` compilent, run CUDA non fait) ; L3.
+
+**Méta-leçons** : (1) un audit multi-agents minutieux rate les erreurs de syntaxe/API du langage → compiler sur la cible reste irremplaçable ; (2) pour un gate de non-vacuité, l'argmax greedy est trop robuste → comparer les logits.
