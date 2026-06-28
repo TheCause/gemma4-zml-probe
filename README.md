@@ -96,16 +96,19 @@ Each runner prints `max_abs` / `mean_abs` vs the oracle and a PASS/FAIL verdict.
 CPU fp32 only · no batching / sampling / fast-prefill · multimodal (vision/audio) out of scope (text
 path only) · no independent perf benchmarks.
 
-**Génération longue (branche `generation-longue`) — état fin June 2026 :**
+**Génération longue (branche `generation-longue`) — validated on GPU host (RTX 3090) :**
 - `L_MAX` capped at **1024** (not the planned 2048): the XLA-CPU compile of the 35-layer fp32 forward at
-  `.k=2048` peaks ~34 Go, above the 32 Go host — the window 512 is still crossed (~2×) at 1024.
-- Memory: the chunked decode runner peaks ~23.6 Go RAM + ~4 Go swap (residual leak under investigation,
-  cf `docs/ENGINE_LOG.md` 7 juin); a temporary 16 Go swapfile (`/swapfile_xla`) is currently required to
-  avoid the OOM-killer — not yet permanent.
+  `.k=2048` peaks above the ~23 Go host — the window 512 is still crossed (~2×) at 1024.
+- Memory: measured post-compile peak **~19 GiB** (instrumented via `mem_probe.zig`), under the 23 Go host —
+  the chunked decode bounds the peak; residual swap ~2 GiB, bounded.
 - Perf: ~55 min for 1020 steps (dominated by 7 host syncs/step); tuning (`CHUNK` sweep, less frequent
   syncs) is staged via `scripts/sweep_perf.sh` but not yet characterised.
-- Open methodological item: the **non-vacuity counter-test for `L1a`** (corrupt the band mask → must
-  diverge) is delivered as `gemma4_gchunk_vacuity.zig` but not yet executed on the 3090.
+- Non-vacuity: the sliding/window mask is **proven consumed** by a logits counter-test
+  (`gemma4_vacuity_logits.zig`): corrupting the mask leaves logits identical for p<512 and changes them
+  from p=512 onward (the argmax counter-tests stay flat — greedy is too robust to reveal it). The `L2`
+  OOM was resolved by streaming the embedding gather row-by-row from the safetensors.
+- Still open: the **GPU/CUDA path** (`gemma4_gen_long_gpu`, `gemma4_bench` compile; CUDA run pending) and
+  `L3` (in-graph).
 
 ## License & attribution
 

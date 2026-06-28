@@ -3,7 +3,6 @@
 **Date** : 2026-06-04 (design) · 2026-06-05 (E1+E2 implémentés, PASS)
 **Statut** : design validé **et implémenté** — gates E1 (non-régression) et E2 (brique) **PASS**.
 **Repo** : gemma4-zml-probe
-**Mémoire liée** : `~/dev/Ma_MEMOIRE/memory/zml_modular_engine.md`, `project_gemma4_zml_probe.md`, `turboquant.md`
 
 > **📦 État publication** — Sur `main` (public) : **socle `engine.zig` corrigé + gate E1** uniquement.
 > La brique `TurboQuantVBrick` (`brick_turboquant.zig`) et le **gate E2** (`gemma4_engine_e2.zig`,

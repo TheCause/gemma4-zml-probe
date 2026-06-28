@@ -3,7 +3,6 @@
 **Date** : 2026-06-04
 **Statut** : design validé (brainstorming + creusage A/B/C), prêt pour plan d'implémentation
 **Repo** : gemma4-zml-probe (moteur decode ZML de Gemma-4-E2B-it)
-**Mémoire liée** : `~/dev/Ma_MEMOIRE/memory/turboquant.md`, `project_gemma4_zml_probe.md`
 
 ---
 

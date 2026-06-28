@@ -1,6 +1,6 @@
 # Génération longue — Chunking du decode (perf) — Design
 
-> Statut : **design validé par délégation** (Régis « tu t'en occupes », 7 juin 2026).
+> Statut : **design validé** (7 juin 2026).
 > Branche : `generation-longue`. Spec sœur : `GENERATION_LONGUE_DESIGN.md`, `ENGINE_LOG.md`.
 
 ## 1. Problème

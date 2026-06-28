@@ -1,6 +1,5 @@
 # Génération longue — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Faire du decode ZML un moteur de génération longue (fenêtre glissante 512, cache borné, jusqu'à `L_max=2048` tokens), d'abord validé contre oracle HF (L1), puis en inférence autonome host-orchestrée (L2).
 
@@ -39,7 +38,6 @@
   Le PATH n'est pas chargé en SSH non-interactif → préfixer par `bash -lc "..."`.
 - Serveur Bazel actif = `pgrep -x java`. Fixtures volumineuses (>100 MB) restent sur la 3090 (gitignorées).
 - **⚠️ PRÉREQUIS MÉMOIRE (OOM)** : le compile XLA-CPU d'un graphe 35 couches monte à **~22,7 Go RSS**, au ras des 23 Go de la VM → OOM-killer (`tf_XLAEigen invoked oom-killer`, mort silencieuse exit 255 pile à `Compiling gen step`). Débloqué le 5 juin par un **swapfile temporaire 16 Go** (`/swapfile_xla`, swap total → 22 Go). Vérifier `swapon --show` avant tout build, sinon TOUS les runners OOM. Solution durable à arbitrer (RAM VM ou swap permanent).
-- **Régis ne colle aucune commande** : l'agent exécute via SSH lui-même (compute local non payant).
 
 **Oracle = source de vérité.** Avant d'écrire un runner/oracle, lire la vérité terrain dans `modeling_gemma4.py` (présent sur la 3090) plutôt que de présumer.
 

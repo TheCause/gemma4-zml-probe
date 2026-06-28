@@ -1,7 +1,6 @@
 # ENGINE_LOG — P5.7.5 → P5.7.8 (run autonome)
 
 > Journal du run autonome de portage du forward complet Gemma-4-E2B-it en ZML (démarré 2 juin 2026).
-> Mandat Régis : ne pas attendre, /iterate, sub-agents à volonté ; inspection cross-LLM en aval.
 > Contrat de précision : `docs/P5_7_5_precision_contract.md`. Discipline : oracle = source de vérité,
 > gate atomique, commit + tag, comparaison par couche pour localiser (contrat §6).
 

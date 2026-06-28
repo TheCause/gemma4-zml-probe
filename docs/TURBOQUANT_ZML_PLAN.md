@@ -1,6 +1,5 @@
 # TurboQuant × ZML V-only — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Porter le quantizer KV TurboQuant **MSE V-only** dans le moteur decode ZML de Gemma-4-E2B-it et mesurer le coût/gain sur la génération, garde-fou = fidélité vs HuggingFace.
 

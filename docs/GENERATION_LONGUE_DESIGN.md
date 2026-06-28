@@ -114,7 +114,7 @@ Le prefill du prompt reste fourni par `cache0` (fixture), comme aujourd'hui.
   ~4 Go swap résiduel à traquer) + swapfile temporaire 16 Go. La note initiale « cache 30 MB négligeable »
   est **inexacte** : elle oubliait les poids f32, dominateur réel (cf `GENERATION_LONGUE_CHUNKING_DESIGN.md` §1).
 - **Non-régression** : à chaque commit, re-run E1 (preuve HLO `diff -rq`) + E2. Tout commit qui les casse est rejeté. E1/E2 tournent en **config par défaut** (`ring=false`, `KMAX_SLIDING=KMAX_FULL=8`, masque unique) : la fixture KMAX=8 et la brique TurboQuant chargent inchangées, et le graphe émis est byte-identique à decode4/gen_vq.
-- **Compute** : exécution sur la 3090 (`ssh user@gpu-host`, workspace `/data/rqz_workspace/zml/examples/rqz/`, checkpoint `/data/gemma4-zml-probe/weights/model.safetensors`), via `deploy_to_3090.sh`. Fixtures volumineuses laissées sur la 3090 (gitignorées). Aucune commande à coller pour Régis.
+- **Compute** : exécution sur la 3090 (`ssh user@gpu-host`, workspace `/data/rqz_workspace/zml/examples/rqz/`, checkpoint `/data/gemma4-zml-probe/weights/model.safetensors`), via `deploy_to_3090.sh`. Fixtures volumineuses laissées sur l'hôte GPU (gitignorées).
 
 ## 8. Hors-scope (YAGNI)
 
