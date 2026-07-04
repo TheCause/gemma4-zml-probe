@@ -1,0 +1,36 @@
+{
+  "source": "G2.0 oracle enveloppe bf16 (docs/G2_BF16_FIDELITY.md \u00a73)",
+  "trajectory": "teacher-forced sur fed de gen_long.safetensors (46)",
+  "n_decode": 1020,
+  "vocab": 262144,
+  "prompt": [
+    2,
+    105,
+    2048,
+    4095
+  ],
+  "pass_a_sanity": "1020/1020 argmax == expected",
+  "determinism_b1_b2": {
+    "pass": true,
+    "steps_nondet": 0,
+    "elems_nondet": 0,
+    "note": "m\u00eame process/mod\u00e8le ; ne couvre pas rebuild ni autre GPU"
+  },
+  "prefill_match": true,
+  "argmax_match": 1016,
+  "p0_first_bifurcation_step": 21,
+  "p0_margin_a": 0.1366558074951172,
+  "max_abs": {
+    "p50": 0.4245004653930664,
+    "p95": 0.6612257957458496,
+    "p99": 0.7719116806983948,
+    "max": 1.5457782745361328
+  },
+  "kl_a_b": {
+    "p50": 0.00010426019434817135,
+    "p95": 0.00174305634573102,
+    "p99": 0.00382648641243577,
+    "max": 0.01324932649731636
+  },
+  "criterion_g2_2": "div(ZML-bf16, A) <= 2 x cette enveloppe (p50/p95/max) ; bifurcation pas avant ~p0/2"
+}
