@@ -258,9 +258,20 @@ pub const EngineCfg = struct {
 /// une conversion post-load). NEUTRALITÉ : tout champ non default doit rester inerte en config défaut.
 pub const PrecCfg = struct {
     compute: zml.DataType = .f32, // cible d'upcast de c() (norm/softmax/rope/softcap et entrées GEMM actuelles)
-    weight: ?zml.DataType = null, // réservé G2 (dtype de load des poids) ; null = infer (today)
-    kv: ?zml.DataType = null, // réservé G2 (dtype du cache KV) ; null = infer (today)
+    gemm: ?zml.DataType = null, // G2.2 : dtype des GEMM (les 2 opérandes de chaque dot convertis, résultat re-upcasté en compute) ; null = neutre (HLO identique, convert same-dtype = no-op cf tensor.zig convert)
+    weight: ?zml.DataType = null, // réservé (dtype de load des poids) ; null = infer = dtype checkpoint (bf16, cf io.zig maybeCreateTensor : dtype du header safetensors, jamais upcasté au load)
+    kv: ?zml.DataType = null, // réservé (dtype du cache KV) ; null = infer (today : fp32 depuis la fixture)
 };
+
+/// GEMM prec-aware (G2.2) : si `prec.gemm` est fixé, les DEUX opérandes sont convertis (poids bf16 :
+/// no-op ; activations f32→bf16 : arrondi = le régime de prod) et le résultat re-upcasté en
+/// `prec.compute` pour que tout l'inter-GEMM (normes, softmax, rope, softcap, résiduels) reste f32.
+/// En `gemm=null` : émission STRICTEMENT identique à `a.dot(convert(b))` d'aujourd'hui (neutralité HLO —
+/// `convert` vers le même dtype retourne `self` sans émettre d'op).
+fn dotPrec(comptime prec: PrecCfg, a: zml.Tensor, b: zml.Tensor, comptime axis: @TypeOf(.enum_literal)) zml.Tensor {
+    if (prec.gemm) |g| return a.convert(g).dot(b.convert(g), axis).convert(prec.compute);
+    return a.dot(b.convert(prec.compute), axis);
+}
 
 /// Forward decode d'UNE couche i en mode génération (cache threadé). Producer scatter K/V du token à
 /// (.slot, .k=pos) dans le cache empaqueté ; reader lit le slot du writer 13/14. `brick` est threadé
@@ -275,7 +286,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
 
     const h0 = rmsScaleD(hidden, c(layer.input_layernorm));
 
-    var q = h0.dot(c(layer.q_proj), .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
+    var q = dotPrec(prec, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
     q = zml.nn.rmsNorm(q, .hd, RMS_EPS).mul(c(layer.q_norm).broad(q.shape()));
     q = if (full) manualRope(q, cos, sin, half) else slidingRope(q, pos_s);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
@@ -292,12 +303,12 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
             cache_v = cache.sl_v.choose1d(.slot, SLIDING_WRITER_SLOT);
         }
     } else {
-        var k = h0.dot(c(layer.k_proj), .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var k = dotPrec(prec, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         k = zml.nn.rmsNorm(k, .hd, RMS_EPS).mul(c(layer.k_norm).broad(k.shape()));
         k = if (full) manualRope(k, cos, sin, half) else slidingRope(k, pos_s);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
-        var v = h0.dot(c(layer.v_proj), .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var v = dotPrec(prec, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         v = zml.nn.rmsNorm(v, .hd, RMS_EPS);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
         // comptime-mort pour une brique sans cette méthode (ex: struct{}) → V inchangé → bit-exact decode4.
@@ -327,23 +338,23 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
     }
 
     const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
-    var scores = qs.dot(cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
+    var scores = dotPrec(prec, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
     scores = scores.add(mask.broad(scores.shape()));
     const probs = scores.softmax(.k);
 
     const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
-    const ctx_attn = ps.dot(cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
+    const ctx_attn = dotPrec(prec, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
     const attn_m = ctx_attn.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
-    const attn_out = attn_m.dot(c(layer.o_proj), .m).rename(.{ .q = .s });
+    const attn_out = dotPrec(prec, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
 
     const h1 = hidden.add(rmsScaleD(attn_out, c(layer.post_attention_layernorm)));
     const xff = rmsScaleD(h1, c(layer.pre_feedforward_layernorm));
-    const mlp_out = xff.dot(c(layer.gate_proj), .d).gelu().mul(xff.dot(c(layer.up_proj), .d)).dot(c(layer.down_proj), .f);
+    const mlp_out = dotPrec(prec, dotPrec(prec, xff, layer.gate_proj, .d).gelu().mul(dotPrec(prec, xff, layer.up_proj, .d)), layer.down_proj, .f);
     const h2 = h1.add(rmsScaleD(mlp_out, c(layer.post_feedforward_layernorm)));
 
-    var g = h2.dot(c(layer.per_layer_input_gate), .d).gelu();
+    var g = dotPrec(prec, h2, layer.per_layer_input_gate, .d).gelu();
     g = g.mul(ple_i);
-    g = g.dot(c(layer.per_layer_projection), .p);
+    g = dotPrec(prec, g, layer.per_layer_projection, .p);
     const h3 = h2.add(rmsScaleD(g, c(layer.post_per_layer_input_norm)));
 
     return h3.mul(c(layer.layer_scalar).asScalar());
@@ -401,7 +412,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
                 .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
-            const context = embeds.dot(c(self.per_layer_model_projection), .d)
+            const context = dotPrec(prec, embeds, self.per_layer_model_projection, .d)
                 .scale(INV_SQRT_HID)
                 .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
             const context_norm = rmsScaleP(context, c(self.per_layer_projection_norm));
@@ -440,7 +451,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-            const raw = last_hidden.dot(c(self.embed_tokens), .d);
+            const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
             const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -480,7 +491,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
 
             const out_first = if (last) blk: {
                 const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-                const raw = last_hidden.dot(c(self.embed_tokens), .d);
+                const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
                 break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
@@ -522,7 +533,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             }
 
             const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-            const raw = last_hidden.dot(c(self.embed_tokens), .d);
+            const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
             const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -560,7 +571,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             }
             const out_first = if (last) blk: {
                 const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-                const raw = last_hidden.dot(c(self.embed_tokens), .d);
+                const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
                 break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };

@@ -1,22 +1,18 @@
-// G1 — Baseline fp32 sur GPU (P-GPU-1, cf docs/GPU_PORT_PLAN.md §10).
+// G2.2 — Bras D : GEMM bf16 sur GPU (cf docs/G2_BF16_FIDELITY.md §2-3).
 //
-// Le moteur `engine.zig` est device-agnostic : le MÊME graphe XLA tourne sur CPU ou GPU. Ce runner force
-// le backend CUDA (avec fallback auto) et AJOUTE un timer tok/s + logging platform/RSS. Le calcul est
-// STRICTEMENT identique à `gemma4_gen_long.zig` (L1a mono) : `EngineModel(struct{}, .{...})` SANS prec
-// (PrecCfg par défaut = fp32 = today). → G1 = "le moteur L1a, mais sur GPU", pour mesurer le gain brut du
-// backend natif et valider que l'argmax == HF tient en fp32-CUDA (drift Eigen→CUDA caractérisé au G1).
+// MÊME moteur que gemma4_gen_long_gpu (G1), MÊME fixture teacher-forcée (46), une seule différence :
+// `PrecCfg.gemm = .bf16` — chaque dot convertit ses 2 opérandes en bf16 (poids : no-op, déjà bf16 sur
+// device ; activations : arrondi = régime de prod) et re-upcaste le résultat en f32. Normes, softmax,
+// RoPE, softcap et résiduels restent f32 (design D1, GPU_PORT_PLAN §5.2). Le cache KV reste f32
+// (stockage) — arrondi bf16 à la lecture par les dots QK/PV (≠ HF natif qui stocke bf16 ; assumé D1).
 //
-// Critère G1 : argmax == HF sur les N tokens (séquence == L1a CPU == HF greedy) ; drift logits vs
-// baseline CPU-L1a à reporter. Perf : tok/s (decode batch-1). Le chunking n'est PAS utilisé (le mur
-// mémoire CPU ~33 Go disparaît sur GPU, cf GPU_PORT_PLAN §6) → mono-graphe direct.
+// SORTIE : les LOGITS f32 de chaque step sont dumpés en binaire brut [N_steps × VOC] (leçon
+// non-vacuité : le verdict G2.2 se prend sur les logits vs l'enveloppe B, PAS sur l'argmax). L'analyse
+// (max_abs/KL vs pass A, comparaison à 2× l'enveloppe) = scripts/51_g2_2_analyze.py. L'argmax n'est
+// reporté ici qu'à titre indicatif (bifurcations ATTENDUES en bf16, cf G2.0 : HF lui-même fait 1016/1020)
+// → pas d'error.GenMismatch, le runner sort toujours 0 si l'exécution aboutit.
 //
-// CLI : gemma4_gen_long_gpu <model.safetensors> <gen_long.safetensors> [max_steps] [--no-prealloc]
-// Prérequis : libpjrt_cuda linké (cf GPU_PORT_PLAN §12) ; `nvidia-smi` pour la VRAM.
-//
-// --no-prealloc (G2.1) : coupe la préallocation BFC (preallocate=false) pour que nvidia-smi mesure la
-// VRAM RÉELLEMENT utilisée. Avec preallocate=true (défaut, perf), BFC réserve memory_fraction×24 Go
-// d'emblée → le ~22 Go observé au G1 était la RÉSERVE, pas l'usage (les poids sont chargés au dtype du
-// checkpoint = bf16, cf createTensor/io.zig : dtype du header safetensors, jamais upcasté au load).
+// CLI : gemma4_gen_long_gpu_bf16 <model.safetensors> <gen_long.safetensors> <logits_out.bin> [max_steps]
 
 const std = @import("std");
 const log = std.log;
@@ -27,11 +23,13 @@ const mem_probe = @import("mem_probe.zig");
 pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024;
-const B: i64 = 1;
-const S: i64 = 1;
-const D: i64 = 1536;
-// G1 : fp32 (PrecCfg défaut) — on n'active PAS le bf16 (c'est G2).
-const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
+// G2.2 : gemm bf16 — SEULE différence de config vs G1 (prec.compute reste .f32).
+const Model = engine.EngineModel(struct {}, .{
+    .two_masks = true,
+    .kmax_sliding = L_MAX,
+    .kmax_full = L_MAX,
+    .prec = .{ .gemm = .bf16 },
+});
 const PackedLong = engine.Packed(true);
 
 const ExpW = struct {
@@ -44,51 +42,31 @@ const ExpW = struct {
     }
 };
 
-fn argmaxOf(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !i64 {
-    var s = try logits_buf.toSliceAlloc(allocator, io);
-    defer s.free(allocator);
-    const v = s.items(f32);
-    var best: usize = 0;
-    var best_val: f32 = v[0];
-    for (v, 0..) |x, idx| {
-        if (x > best_val) {
-            best_val = x;
-            best = idx;
-        }
-    }
-    return @intCast(best);
-}
-
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena;
     const allocator = init.gpa;
     const io = init.io;
 
     const process_args = try init.minimal.args.toSlice(arena.allocator());
-    if (process_args.len < 3) {
-        log.err("Usage: gemma4_gen_long_gpu <model.safetensors> <gen_long.safetensors> [max_steps]", .{});
+    if (process_args.len < 4) {
+        log.err("Usage: gemma4_gen_long_gpu_bf16 <model.safetensors> <gen_long.safetensors> <logits_out.bin> [max_steps]", .{});
         return error.MissingArgument;
     }
     const ckpt = process_args[1];
     const fixture = process_args[2];
-    const max_steps: ?usize = if (process_args.len >= 4) std.fmt.parseInt(usize, process_args[3], 10) catch null else null;
-    var no_prealloc = false;
-    for (process_args[3..]) |a| {
-        if (std.mem.eql(u8, a, "--no-prealloc")) no_prealloc = true;
-    }
+    const logits_out = process_args[3];
+    const max_steps: ?usize = if (process_args.len >= 5) std.fmt.parseInt(usize, process_args[4], 10) catch null else null;
 
-    // === Backend : force CUDA (memory_fraction 0.90), fallback auto (CPU) si CUDA indisponible. ===
     const platform: *zml.Platform = blk: {
         const cuda_opts: zml.platform.CreateOptions = .{
-            .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = !no_prealloc, .memory_fraction = 0.90 } } },
+            .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
         };
         if (zml.Platform.init(allocator, io, .cuda, cuda_opts)) |p| break :blk p else |_| {}
-        log.warn("CUDA indisponible (libpjrt_cuda absent ?) — repli sur Platform.auto (probablement CPU).", .{});
+        log.warn("CUDA indisponible — repli sur Platform.auto (probablement CPU).", .{});
         break :blk try zml.Platform.auto(allocator, io, .{});
     };
     defer platform.deinit(allocator);
-    log.info("G1 — backend = {s} (cible : cuda). Prérequis : libpjrt_cuda linké ; VRAM via nvidia-smi.", .{@tagName(platform.target)});
-    if (no_prealloc) log.info("G2.1 — preallocate=false : nvidia-smi mesure l'usage VRAM réel (pas la réserve BFC).", .{});
+    log.info("G2.2 — backend = {s} ; PrecCfg.gemm = bf16 (dots bf16, inter-GEMM f32).", .{@tagName(platform.target)});
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt);
@@ -121,16 +99,18 @@ pub fn main(init: std.process.Init) !void {
     const num_steps = if (max_steps) |m| @min(m, total) else total;
     log.info("NUM_STEPS = {d} (max_steps={?d})", .{ num_steps, max_steps });
 
-    log.info("Compiling gen step (mono-graphe 35 couches, fp32) ...", .{});
+    log.info("Compiling gen step (mono-graphe 35 couches, gemm=bf16) ...", .{});
     const t_compile: std.Io.Timestamp = .now(io, .awake);
     var exe = try platform.compile(allocator, io, model, .forward, .{ packed_in, cache0, ctrl_sym }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
     log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
-    mem_probe.logMem(io, "post-compile (host RSS ; go/no-go GPU = nvidia-smi)");
 
-    var all_pass = true;
+    const out_file = try std.Io.Dir.createFile(.cwd(), io, logits_out, .{});
+    defer out_file.close(io);
+    var write_offset: u64 = 0;
+
     var n_match: usize = 0;
-    var first_fail: i64 = -1;
+    var first_div: i64 = -1;
     var step_idx: usize = 0;
     const t0: std.Io.Timestamp = .now(io, .awake);
     while (step_idx < num_steps) : (step_idx += 1) {
@@ -145,16 +125,24 @@ pub fn main(init: std.process.Init) !void {
             zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
         });
 
-        const tok = try argmaxOf(allocator, io, &r_logits);
-        const exp = @as(i64, @intCast(expected_tokens[step_idx]));
-        const ok = tok == exp;
-        if (ok) n_match += 1 else {
-            all_pass = false;
-            if (first_fail < 0) first_fail = @intCast(step_idx);
-            if (step_idx - @as(usize, @intCast(@max(first_fail, 0))) < 8) {
-                log.err("  FAIL step {d} (pos {d}) : argmax ZML={d} HF={d}", .{ step_idx, 4 + step_idx, tok, exp });
+        // dump logits f32 (le VRAI critère G2.2) + argmax indicatif
+        var s = try r_logits.toSliceAlloc(allocator, io);
+        const v = s.items(f32);
+        const bytes = std.mem.sliceAsBytes(v);
+        try out_file.writePositionalAll(io, bytes, write_offset);
+        write_offset += bytes.len;
+        var best: usize = 0;
+        var best_val: f32 = v[0];
+        for (v, 0..) |x, idx| {
+            if (x > best_val) {
+                best_val = x;
+                best = idx;
             }
         }
+        s.free(allocator);
+
+        const exp = @as(i64, @intCast(expected_tokens[step_idx]));
+        if (@as(i64, @intCast(best)) == exp) n_match += 1 else if (first_div < 0) first_div = @intCast(step_idx);
         if ((step_idx + 1) % 256 == 0) log.info("  ... {d}/{d} steps, {d} match", .{ step_idx + 1, num_steps, n_match });
 
         cache_buf.sl_k.deinit();
@@ -176,15 +164,9 @@ pub fn main(init: std.process.Init) !void {
     const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
     const tok_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(num_steps)) / elapsed_s else 0;
-    const ms_per_tok = if (num_steps > 0) @as(f64, @floatFromInt(elapsed_ns)) / 1e6 / @as(f64, @floatFromInt(num_steps)) else 0;
-    log.info("G1 PERF : {d} tokens en {d:.2}s → {d:.1} tok/s ({d:.1} ms/tok) [backend={s}, fp32, batch-1, mono-graphe]", .{ num_steps, elapsed_s, tok_per_s, ms_per_tok, @tagName(platform.target) });
-    mem_probe.logMem(io, "post-run (host RSS ; VRAM GPU via nvidia-smi)");
+    log.info("G2.2 PERF : {d} tokens en {d:.2}s → {d:.1} tok/s [backend={s}, gemm=bf16, batch-1] (NB : inclut le dump logits 1 Mo/step)", .{ num_steps, elapsed_s, tok_per_s, @tagName(platform.target) });
+    mem_probe.logMem(io, "post-run (host RSS ; VRAM via nvidia-smi)");
 
-    log.info("G1 : {d}/{d} tokens argmax-match (vs HF)", .{ n_match, num_steps });
-    if (all_pass) {
-        log.info("G1 PASS — fp32-{s} reproduit HF greedy ({d} tokens) ; baseline GPU établi.", .{ @tagName(platform.target), num_steps });
-    } else {
-        log.err("G1 : divergence (1er fail step {d}, {d} match) — drift fp32-CUDA > tol ? (cf GPU_PORT_PLAN §10.1)", .{ first_fail, n_match });
-        return error.GenMismatch;
-    }
+    log.info("G2.2 argmax (INDICATIF) : {d}/{d} match vs HF-fp32 ; 1re divergence = {d} (rappel enveloppe B : 1016/1020, p0=21)", .{ n_match, num_steps, first_div });
+    log.info("Logits dumpés : {s} ({d} steps × VOC f32). Verdict → scripts/51_g2_2_analyze.py", .{ logits_out, num_steps });
 }

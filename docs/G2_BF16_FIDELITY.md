@@ -35,7 +35,7 @@ interprétable.
 |---|---|---|---|---|
 | **A** | fp32 (upcast) | fp32 | HF hybride (script 46) | vérité de référence — **déjà fait** (G1) |
 | **B** | bf16 | bf16 natif | HF sans upcast (script 50) | **enveloppe de bruit** de l'oracle lui-même |
-| **C** | bf16 | f32 (`PrecCfg` défaut) | ZML `engine.zig` | le « G2 VRAM » (conversion bf16→f32 exacte) |
+| **C** | bf16 | f32 (`PrecCfg` défaut) | ZML `engine.zig` | ≡ état courant de G1 (découvert au G2.1, cf §3) |
 | **D** | bf16 | bf16 (`PrecCfg.compute=.bf16`) | ZML `engine.zig` | le vrai régime de production |
 
 Tous les bras sont **teacher-forcés sur la trajectoire de A** (tenseur `fed` de
@@ -60,13 +60,23 @@ argmax, marge top1−top2 de A (contexte du risque de bifurcation).
 
 ### G2.1 — ZML poids bf16, compute f32 (bras C)
 
-bf16→f32 est une conversion **exacte** (élargissement IEEE-754) : les GEMM voient les mêmes
-valeurs qu'en G1.
+**Découverte en ouvrant le chantier (4 juil)** : le bras C est **déjà l'état courant de G1**.
+`createTensor(name, tags, null)` (zml `io.zig`, `maybeCreateTensor`) crée le tenseur au dtype du
+**header safetensors** — le 3ᵉ argument est le *partitioning*, pas le dtype, et aucun upcast
+n'a lieu au load. Le checkpoint étant bf16, les poids sont bf16 sur device depuis toujours ;
+le `c()` de `engine.zig` fait l'upcast f32 **dans le graphe** (élargissement exact). Le critère
+« 1020/1020 == expected » du bras C est donc **déjà prouvé par G1**.
 
-- **PASS** : 1020/1020 == `expected`, logits comparables à G1 (bande de drift P5.7.5 §5),
-  VRAM ~÷2.
-- **FAIL si un seul token diffère** ⇒ **bug de plomberie** (conversion, layout, gather), pas de la
-  physique numérique. Première marche volontairement sûre.
+Corollaire : la claim « VRAM 20→10 Go » du backlog était un artefact de mesure — les ~22 Go
+observés au G1 = **réserve BFC** (`preallocate=true, memory_fraction 0.90` ⇒ 21,6 Go réservés
+d'emblée), pas l'usage.
+
+- **Reste du gate** : mesure empirique de la VRAM réelle (`--no-prealloc` ajouté au runner) +
+  re-vérification argmax sur le run de mesure.
+- **PASS** : usage réel cohérent avec poids bf16 (~10-14 Go, poids 10,2 + caches + workspace
+  transitoire des converts f32) ; argmax == expected sur les steps du run.
+- **FAIL si** usage ≥ ~19 Go (les poids seraient f32 → la lecture de code ci-dessus est fausse,
+  à réinvestiguer) ou mismatch argmax.
 
 ### G2.2 — ZML compute bf16 (bras D) — *l'expérience*
 
@@ -134,9 +144,9 @@ l'hypothèse à confirmer/infirmer.
 | Gate | Date | Verdict | Mesures clés |
 |---|---|---|---|
 | G2.0 | 2026-07-04 | **PASS** (déterminisme + sanity) — enveloppe mesurée | cf §7.1 |
-| G2.1 | — | — | — |
-| G2.2 | — | — | — |
-| G2.3 | — | — | — |
+| G2.1 | 2026-07-04 | **PASS** (bras C ≡ G1, prouvé io.zig + run 64/64) | cf §7.2 |
+| G2.2 | 2026-07-04 | **PASS** — ZML-bf16 2 à 5× PLUS fidèle que l'enveloppe HF | cf §7.3 |
+| G2.3 | — | non déclenché (G2.2 PASS) — reste dispo en bonus TurboQuant/alambic | — |
 
 ### 7.1 G2.0 — enveloppe HF-bf16 mesurée (3090, run 205s+151s+42s)
 
@@ -166,3 +176,46 @@ l'hypothèse à confirmer/infirmer.
 
 Artefacts : `fixtures/g2_envelope_manifest.json` (versionné), `g2_envelope_metrics.npz` +
 `logs/50_bf16_envelope.log` (rapatriés M1), memmaps logits sur 3090 (régénérables).
+
+### 7.2 G2.1 — bras C ≡ G1 (poids déjà bf16 sur device)
+
+Cf §3 (découverte). Preuves : (a) structurelle — `io.zig maybeCreateTensor` crée le tenseur au
+dtype du header safetensors (bf16), le 3ᵉ arg de `createTensor` est le partitioning, aucun upcast
+au load ; (b) runtime — G1 refait post-édits `engine.zig` : 64/64 == HF, 109,3 tok/s. La VRAM
+réelle (mesure isolée `--no-prealloc`, pic borné au PID du run, GPU vierge) : **8 494 MiB
+(~8,5 Go)**, run 64/64 PASS. NB : une 1re mesure (22 234 MiB) était contaminée par des runs
+`preallocate=true` concurrents pendant la fenêtre du traqueur — invalidée.
+
+Leçon : « VRAM ~22 Go » (ENGINE_LOG G1) était la **réserve BFC** (`memory_fraction 0.90`), pas
+l'usage. Usage réel ~8,5 Go (poids résidents bf16 — `embed_tokens_per_layer` n'est pas résident
+sur ce chemin, les embptls per-step viennent de la fixture — + caches f32 + transitoires f32 des
+converts + workspace XLA). Corollaires : le gain VRAM attendu de « G2 bf16 » n'existe pas (poids
+déjà bf16) ; et **le banc gen-long GPU tiendrait sur une carte 12 Go**.
+
+### 7.3 G2.2 — ZML gemm=bf16 : PASS, 2 à 5× SOUS l'enveloppe HF
+
+Design D1 : `PrecCfg.gemm=.bf16` — les 2 opérandes de chaque dot convertis bf16, résultat
+re-upcasté f32 ; normes/softmax/RoPE/softcap/résiduels f32 ; cache KV f32 (stockage), arrondi
+bf16 à la lecture par QK/PV. Neutralité HLO : `gemm=null` n'émet rien (convert same-dtype =
+`return self`, vérifié `tensor.zig`) ; G1 64/64 inchangé post-édits.
+
+| Métrique | D (ZML gemm-bf16 vs A) | B (enveloppe HF-bf16) | ratio (seuil PASS ≤ 2×) |
+|---|---|---|---|
+| max_abs p50 / p95 / max | 0.185 / 0.330 / 0.623 | 0.425 / 0.661 / 1.546 | **0.44 / 0.50 / 0.40×** |
+| KL p50 / p95 / max | 2.9e-5 / 4.6e-4 / 2.6e-3 | 1.0e-4 / 1.7e-3 / 1.3e-2 | **0.28 / 0.27 / 0.19×** |
+| argmax match | 1016/1020 | 1016/1020 | égal |
+| 1re bifurcation | step 96 | step 21 | 4.6× plus tard |
+| débit | 103,8 tok/s (dump logits inclus) | — | ≈ G1 fp32 (109) |
+
+**Lecture** : arrondir uniquement aux bornes des GEMM (D1) produit ~2× moins de bruit logits et
+~4× moins de divergence distributionnelle que le chemin bf16 natif de HF (flux entier bf16).
+**La claim de fidélité du projet n'est pas un artefact fp32** : en régime GEMM-bf16, ZML reste
+plus proche de la vérité fp32 que l'implémentation de référence ne l'est d'elle-même.
+
+Incident build documenté : la cfg comptime `.prec` allonge le `@typeName` du modèle → dépassement
+du quota comptime (1000) dans `pjrt.zig structSize` (`indexOf` sur `@typeName`). Patch workspace
+(1 ligne, `@setEvalBranchQuota(100_000)`, commenté `local patch rqz`) — **prérequis à
+re-appliquer si le workspace ZML est resynchronisé upstream**.
+
+Artefacts : `fixtures/g2_2_manifest.json` (versionné), `g2_2_metrics.npz`, `logs/g2_2_run.log`,
+dump `g2_logits_d_f32.bin` (3090, régénérable).
