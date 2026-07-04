@@ -312,3 +312,32 @@ gère CUDA via ses runfiles ; libcudart est déjà dans le ld cache). Le run san
   plan (30-80 tok/s). G2 (bf16) reste une optimisation future (réduirait la VRAM ~20→~10 Go).
 
 **Reste** : G2 précision bf16/fp16, perf (batching, flash-attn), et L3 (in-graph). Le baseline GPU est établi.
+
+## G2 — Fidélité bf16 (4 juillet 2026) — G2.0/G2.1/G2.2 PASS
+
+Protocole et résultats détaillés : `docs/G2_BF16_FIDELITY.md`. Recadrage : G2 n'était pas une optim
+VRAM mais LE test qui décide si « 1020/1020 == HF » est robuste ou un artefact fp32. Verdict : robuste.
+
+- **G2.0 enveloppe** (script 50) : HF-bf16 ne se reproduit pas lui-même vs HF-fp32 — 1016/1020,
+  1re bifurcation step 21, max_abs(logits) p50=0.425, KL p50=1.0e-4. Déterminisme bitwise PASS.
+  → le critère « == bit-à-bit » n'existe pas en bf16 ; tout verdict doit être RELATIF à cette enveloppe.
+- **G2.1 correction** : les poids étaient DÉJÀ bf16 sur device (`createTensor(..., null)` = dtype du
+  header safetensors, cf `io.zig maybeCreateTensor` — le 3e arg est le partitioning, pas le dtype).
+  Le « ~22 Go VRAM » du G1 était la réserve BFC (`preallocate=true, memory_fraction 0.90`), pas l'usage :
+  **mesure isolée `--no-prealloc` (flag ajouté au runner) = pic 8 494 MiB (~8,5 Go)**, 64/64 PASS.
+  Le banc gen-long GPU tiendrait sur une carte 12 Go. Le « gain VRAM bf16 » du backlog n'existait pas.
+- **G2.2 gemm bf16** (`PrecCfg.gemm=.bf16` + `dotPrec` dans engine.zig, runner `gemma4_gen_long_gpu_bf16`,
+  analyse `scripts/51`) : design D1 — dots bf16 (2 opérandes convertis, résultat re-upcasté f32),
+  normes/softmax/RoPE/softcap/résiduels f32, cache KV f32. **PASS 2 à 5× SOUS l'enveloppe** :
+  max_abs p50 0.185 (0.44×B), KL p50 2.9e-5 (0.28×B), argmax 1016/1020 (==B), 1re bifurcation step 96
+  (B : 21), 103,8 tok/s dump logits inclus. Arrondir seulement aux GEMM bruite MOINS que le flux
+  tout-bf16 natif HF.
+- **Neutralité (3 niveaux)** : `gemm=null` n'émet aucune op nouvelle (`convert` same-dtype =
+  `return self`, `tensor.zig`) ; G1 refait post-édits : 64/64, 109,3 tok/s inchangé ; **E1 rerun
+  PASS 4/4** (== decode4 == HF). NB infra : E1 OOM-killait (exit 255) au compile XLA-CPU tant que
+  `/swapfile_xla` manquait sur la VM (disparu depuis le 28/06, probable reboot) — recréé 24 Go par
+  Régis ; à pérenniser via fstab sinon il redisparaîtra au prochain reboot.
+- **Piège toolchain (nouveau)** : une cfg comptime non-défaut allonge `@typeName(EngineModel(...))` →
+  dépassement du quota comptime 1000 dans `pjrt/pjrt.zig structSize` (`indexOf` sur `@typeName`).
+  Patch workspace 1 ligne (`@setEvalBranchQuota(100_000)`, commenté `local patch rqz`) — À RÉAPPLIQUER
+  si le workspace ZML est resynchronisé upstream.

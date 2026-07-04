@@ -14,6 +14,7 @@ weights/
 # Regenerable fixtures (produced by the oracle scripts)
 fixtures/*.safetensors
 fixtures/*.npy
+fixtures/*.npz
 fixtures/*.pt
 
 # Run logs

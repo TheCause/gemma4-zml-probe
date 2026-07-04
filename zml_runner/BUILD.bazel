@@ -458,6 +458,15 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# G2.2 — bras D : gemm bf16 (PrecCfg.gemm=.bf16), dump logits par step (verdict via scripts/51).
+zig_binary(
+    name = "gemma4_gen_long_gpu_bf16",
+    main = "gemma4_gen_long_gpu_bf16.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G8 — benchmark decode GPU (warmup + tok/s + sanity argmax==HF). VRAM via nvidia-smi.
 zig_binary(
     name = "gemma4_bench",
