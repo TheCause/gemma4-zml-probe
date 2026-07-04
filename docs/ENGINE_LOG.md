@@ -332,8 +332,11 @@ VRAM mais LE test qui décide si « 1020/1020 == HF » est robuste ou un artefac
   max_abs p50 0.185 (0.44×B), KL p50 2.9e-5 (0.28×B), argmax 1016/1020 (==B), 1re bifurcation step 96
   (B : 21), 103,8 tok/s dump logits inclus. Arrondir seulement aux GEMM bruite MOINS que le flux
   tout-bf16 natif HF.
-- **Neutralité** : `gemm=null` n'émet aucune op nouvelle (`convert` same-dtype = `return self`,
-  `tensor.zig`) ; G1 refait post-édits : 64/64, 109,3 tok/s inchangé ; E1 rerun (non-régression socle).
+- **Neutralité (3 niveaux)** : `gemm=null` n'émet aucune op nouvelle (`convert` same-dtype =
+  `return self`, `tensor.zig`) ; G1 refait post-édits : 64/64, 109,3 tok/s inchangé ; **E1 rerun
+  PASS 4/4** (== decode4 == HF). NB infra : E1 OOM-killait (exit 255) au compile XLA-CPU tant que
+  `/swapfile_xla` manquait sur la VM (disparu depuis le 28/06, probable reboot) — recréé 24 Go par
+  Régis ; à pérenniser via fstab sinon il redisparaîtra au prochain reboot.
 - **Piège toolchain (nouveau)** : une cfg comptime non-défaut allonge `@typeName(EngineModel(...))` →
   dépassement du quota comptime 1000 dans `pjrt/pjrt.zig structSize` (`indexOf` sur `@typeName`).
   Patch workspace 1 ligne (`@setEvalBranchQuota(100_000)`, commenté `local patch rqz`) — À RÉAPPLIQUER
