@@ -8,6 +8,7 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 > and **short** multi-token generation (4 tokens) all produce output **identical to HuggingFace**.
 > ~50 atomic gates, each committed and tagged.
 > Visual map of the whole port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
+> Full documentation (capabilities, usage, method, pitfalls — in French): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
 >
 > **Génération longue (branche `generation-longue`) — validée sur GPU (RTX 3090) :** `L1a` replay
 > linéaire **1020/1020 == HF**, `L1b` ring-buffer 512 + masque circulaire **1020/1020 == HF** (wrap

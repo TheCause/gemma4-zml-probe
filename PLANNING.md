@@ -2,6 +2,51 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
+## État 9 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
+
+**Le portage est complet et la claim de fidélité est solide aux deux régimes de précision.**
+
+- **Génération longue validée (28/06, 3090)** sur les DEUX backends : CPU chunké L1a/L1b(ring)/L2
+  autonome **1020/1020 == HF** ; GPU CUDA fp32 mono **1020/1020 == HF à 109 tok/s** (~350× vs CPU).
+  Non-vacuité du masque prouvée par contre-test LOGITS. Tags `gen-long-validated-3090` +
+  `gpu-baseline-validated-3090`.
+- **Pipeline end-to-end texte→texte démontré** : `scripts/49_gen_custom_oracle.py` (oracle HF,
+  prompt custom via chat template) → `gemma4_gen_long_gpu` (ZML == HF) → `scripts/48_detokenize.py`
+  (détok + round-trip gate). Démo « capital of France » → « Paris », 48/48 == HF.
+- **G2 fidélité bf16 PASS (4 juil, tags `gate/G2.*`)** — la claim « == HF » n'est PAS un artefact
+  fp32. Méthode de l'enveloppe : G2.0 mesure combien HF-bf16 diverge de HF-fp32 (il ne se reproduit
+  pas lui-même : 1016/1020, bifurcation step 21) ; G2.2 exige de ZML ≤ 2× cette enveloppe → ZML
+  gemm-bf16 est **2 à 5× PLUS fidèle** au fp32 que HF-bf16 (max_abs p50 0.185 vs 0.425, KL 0.28×).
+  Doc : `docs/G2_BF16_FIDELITY.md`.
+- **Découverte G2.1** : poids DÉJÀ bf16 sur device (dtype du header safetensors), VRAM réelle
+  **8,5 Go** (les ~22 Go = réserve BFC `memory_fraction 0.90`). Le « gain VRAM bf16 » du backlog
+  n'existait pas ; le banc GPU tiendrait sur une carte 12 Go.
+- **E1 rerun PASS 4/4** (`f74b8df`) : neutralité des édits G2 confirmée aux 3 niveaux (source/G1/E1).
+- **Cette session (9 juil)** : PR `generation-longue` → `main` + rafraîchissement de ce PLANNING.
+
+### Planning courant
+
+- [H] **PR `generation-longue` → `main`** — tout est PASS et poussé ; solde le chantier. *(en cours)*
+- [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
+- [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
+- [M] **Runtime 100 % autonome** — tokenizer intégré + early-stop EOS (aujourd'hui le banc est
+  validé CONTRE l'oracle HF ; limite assumée).
+- [B] **G2.3 bonus** — cartographie de sensibilité par-op (quelles ops tolèrent bf16) → alimente
+  TurboQuant / alambic.
+
+### Garde-fous courants
+
+- **Piège workspace ZML** : patch local 1 ligne `@setEvalBranchQuota(100_000)` dans `pjrt.zig`
+  (`structSize`, commenté `local patch rqz`) — **à réappliquer si le workspace ZML de la 3090 est
+  resynchronisé upstream**, sinon le build des runners à cfg comptime `.prec` casse.
+- Critère « 1020/1020 » exigible en fp32 seulement — en bf16, HF lui-même ne le tient pas (G2.0) ;
+  le critère bf16 est l'enveloppe chiffrée de `docs/G2_BF16_FIDELITY.md` §7.1.
+- Leçons méthodo toujours actives : argmax greedy trop robuste (comparer les LOGITS) ; un audit
+  multi-agents ne remplace pas le compilateur ; oracle = source de vérité (voir garde-fous
+  historiques en bas de fichier).
+
+---
+
 ## État 2 juin 2026 (P5.7.5-prep — contrat de précision verrouillé, gate docs-only avant moteur 35 couches)
 
 **Gate courant `P5.7.5-prep` ✅** — décision Régis : **oracle HYBRIDE** (fp32 sauf `embed_tokens_per_layer`
@@ -73,11 +118,11 @@ Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne
 6. **Principe méthodo — l'oracle doit être indépendant du code testé** : le bug v_norm a survécu à un PASS « end-to-end » parce que l'oracle PyTorch ET l'implémentation ZML partageaient la même hypothèse fausse → ils s'accordaient à ~5e-6 (fausse confiance). Un oracle ne révèle un bug que s'il dérive de la **source de vérité** (`modeling_gemma4.py`), jamais d'une hypothèse ré-encodée à la main.
 7. **Faits attention Gemma4 (pour P5.2.E)** : `Gemma4TextAttention.scaling = 1.0` (PAS √head_dim — la norm passe par q_norm), **pas de softcap d'attention** (seulement `final_logit_softcapping` en P7), GQA via `repeat_kv` (`num_key_value_groups = 8`), masque **additif**, softmax fp32.
 
-## Planning gemma4-zml-probe
+## Planning historique (état 31 mai — tout est clos depuis, voir « Planning courant » en tête)
 
 ### Haute priorité
 
-- [H] **P4.4.2 — Mini-runner ZML PLE-only**
+- [x] **P4.4.2 — Mini-runner ZML PLE-only**
   - Charger `fixtures/ple_fixture.safetensors` via `zml.safetensors.TensorRegistry`.
   - Reproduire le pipeline PLE :
     `lookup × √1536`, `lookup × √256`, projection `× 1/√1536`, reshape, RMSNorm Gemma 4 pure `* weight` ε=1e-6, fusion `/√2`.
@@ -87,16 +132,16 @@ Le matmul Gate E est la seule source de divergence ; tout le reste de la chaîne
 
 ### Medium
 
-- [M] **P5 — Shared KV / YOCO** (`num_kv_shared_layers=20`) : inspecter forward Transformers, tracer shapes et cache lifecycle.
-- [M] **P6 — Attention hybride** : pattern `layer_types` 4×sliding + 1×full × 7 (full aux couches 4, 9, 14, 19, 24, 29, 34), p-RoPE.
+- [x] **P5 — Shared KV / YOCO** (`num_kv_shared_layers=20`) : inspecter forward Transformers, tracer shapes et cache lifecycle.
+- [x] **P6 — Attention hybride** : pattern `layer_types` 4×sliding + 1×full × 7 (full aux couches 4, 9, 14, 19, 24, 29, 34), p-RoPE.
 
 ### Backlog
 
-- [B] **P7 — Logits** : `final_logit_softcapping = 30.0`, top-k overlap, flip-rate temp=0.
+- [x] **P7 — Logits** : `final_logit_softcapping = 30.0`, top-k overlap, flip-rate temp=0.
 - [B] Intégrer `05` et `06` dans `04_run_all.sh`.
-- [B] Tester d'autres `input_ids` que `'ZML test prompt'` pour vérifier la généralisation du sous-graphe.
+- [x] Tester d'autres `input_ids` que `'ZML test prompt'` (fait : gén longue 1020 tokens + prompts custom script 49).
 
-## Garde-fous
+## Garde-fous (historiques — pièges ZML/Gemma4 toujours valides)
 
 - Ne PAS écrire `gemma4.zig` complet avant que P4.4.2 mini-runner PLE-only passe.
 - Ne PAS ouvrir P5 (YOCO) tant que P4.4.2 n'est pas fermé.
