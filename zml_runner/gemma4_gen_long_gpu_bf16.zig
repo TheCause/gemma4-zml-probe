@@ -1,10 +1,17 @@
 // G2.2 — Bras D : GEMM bf16 sur GPU (cf docs/G2_BF16_FIDELITY.md §2-3).
 //
 // MÊME moteur que gemma4_gen_long_gpu (G1), MÊME fixture teacher-forcée (46), une seule différence :
-// `PrecCfg.gemm = .bf16` — chaque dot convertit ses 2 opérandes en bf16 (poids : no-op, déjà bf16 sur
-// device ; activations : arrondi = régime de prod) et re-upcaste le résultat en f32. Normes, softmax,
-// RoPE, softcap et résiduels restent f32 (design D1, GPU_PORT_PLAN §5.2). Le cache KV reste f32
-// (stockage) — arrondi bf16 à la lecture par les dots QK/PV (≠ HF natif qui stocke bf16 ; assumé D1).
+// les 7 familles GEMM de PrecRt (qkv_proj, qk_scores, pv_ctx, o_proj, mlp, ple, head) à .bf16 —
+// réexpression exacte de l'ex-`gemm=.bf16` global : chaque dot convertit ses 2 opérandes en bf16
+// (poids : no-op, déjà bf16 sur device ; activations : arrondi = régime de prod) et re-upcaste le
+// résultat en f32. Normes, softmax, RoPE, softcap et résiduels restent f32 (familles non-GEMM à null,
+// design D1, GPU_PORT_PLAN §5.2). Le cache KV reste f32 (kv_store=null) — arrondi bf16 à la lecture
+// par les dots QK/PV (≠ HF natif qui stocke bf16 ; assumé D1).
+//
+// RÔLE G2.3 : ce runner est l'ALIAS DE VÉRIFICATION de la non-régression G2.2 (gate G2.3.0) — il doit
+// reproduire les ratios G2.2 historiques après le passage à PrecRt runtime. Destiné à être SUPPRIMÉ
+// après ce PASS (le sweep gemma4_g23_sweep couvre la même config via "qkv_proj,qk_scores,pv_ctx,
+// o_proj,mlp,ple,head").
 //
 // SORTIE : les LOGITS f32 de chaque step sont dumpés en binaire brut [N_steps × VOC] (leçon
 // non-vacuité : le verdict G2.2 se prend sur les logits vs l'enveloppe B, PAS sur l'argmax). L'analyse
@@ -23,9 +30,8 @@ const mem_probe = @import("mem_probe.zig");
 pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024;
-// G2.2 : gemm bf16 — SEULE différence de config vs G1 (prec.compute reste .f32).
-// G2.3 : la précision n'est plus dans EngineCfg (PrecRt runtime, cf engine.zig) ; ce runner
-// sera pleinement adapté en Task 5 — en l'état il trace en défaut tout-null (== G1 fp32).
+// G2.2 : 7 familles GEMM bf16 (PrecRt runtime, posé sur model.prec après init) — SEULE différence
+// de config vs G1 (prec.compute reste .f32, non-GEMM et kv_store restent null).
 const Model = engine.EngineModel(struct {}, .{
     .two_masks = true,
     .kmax_sliding = L_MAX,
@@ -67,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
         break :blk try zml.Platform.auto(allocator, io, .{});
     };
     defer platform.deinit(allocator);
-    log.info("G2.2 — backend = {s} ; PrecCfg.gemm = bf16 (dots bf16, inter-GEMM f32).", .{@tagName(platform.target)});
+    log.info("G2.2 — backend = {s} ; PrecRt : 7 familles GEMM = bf16 (qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head ; dots bf16, inter-GEMM f32, non-GEMM/kv_store null).", .{@tagName(platform.target)});
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt);
@@ -78,7 +84,19 @@ pub fn main(init: std.process.Init) !void {
     defer store_fx.deinit();
 
     const base = store_ck.view().withPrefix("model").withPrefix("language_model");
-    const model: Model = try .init(arena.allocator(), base);
+    var model: Model = try .init(arena.allocator(), base);
+    // Config G2.2 en PrecRt (AVANT compile : le traçage lit self.prec) : les 7 familles GEMM à bf16
+    // = l'ex-`gemm=.bf16` global exprimé en familles (couvre les 16 sites dotPrec d'engine.zig).
+    // Les familles non-GEMM (norms/softmax/rope/softcap) et kv_store restent null (f32).
+    model.prec = .{
+        .qkv_proj = .bf16,
+        .qk_scores = .bf16,
+        .pv_ctx = .bf16,
+        .o_proj = .bf16,
+        .mlp = .bf16,
+        .ple = .bf16,
+        .head = .bf16,
+    };
     const packed_in: PackedLong = .init(store_fx.view());
     const cache0: engine.Cache = .init(store_fx.view());
     // Garde G2.3 : cohérence dtype cache (header fixture) ↔ prec (kv_store null ici ⇒ fixture f32).

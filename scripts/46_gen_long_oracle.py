@@ -25,6 +25,8 @@ tenseurs cache_* en bf16 (le dtype de STOCKAGE du cache ZML vient du header de l
 l'arrondi bf16 du KV prefill = le contrat kv_store appliqué à l'état initial). Sorties renommées
 gen_long_kvbf16.safetensors / gen_long_kvbf16_manifest.json — la fixture standard f32 est intacte.
 Tout le reste (oracle HF, masques, embeds, expected) est identique bit-à-bit au run f32 à seed égale.
+NB provenance : la clé `kv_dtype` est désormais écrite dans le manifest dans TOUS les cas (y compris
+le run par défaut f32) ; le .safetensors par défaut, lui, reste byte-identique.
 """
 from __future__ import annotations
 
@@ -120,7 +122,8 @@ def pad_cache(t):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--kv-dtype", choices=["f32", "bf16"], default="f32",
                     help="dtype de STOCKAGE des tenseurs cache_* de la fixture (bf16 = variante "
                          "G2.3 famille kv_store, mécanisme b ; sorties *_kvbf16)")
@@ -243,7 +246,14 @@ def main() -> None:
         "sliding_producers": SLIDING_PRODUCERS, "full_producers": FULL_PRODUCERS,
         "fed_head": fed[:8], "expected_head": expected[:8], "expected_tail": expected[-8:],
         "tensors": {n: {"shape": list(t.shape), "dtype": str(t.dtype).replace("torch.", "")} for n, t in tensors.items()},
-        "pass_criterion_L1a": "argmax ZML[k] == expected[k] pour tout k (cache linéaire L_MAX + masque bande)",
+        # Critère honnête par variante : un run bf16 (kv_store) N'A PAS d'exigence argmax == expected
+        # (bifurcations attendues en bf16, cf G2.0) — son verdict est RELATIF vs D0/enveloppe.
+        "pass_criterion_L1a": (
+            "run kv_store G2.3 : verdict RELATIF vs D0/enveloppe (cf docs/G2_3_OP_SENSITIVITY.md) — "
+            "pas d'exigence argmax ZML[k] == expected[k]"
+            if args.kv_dtype == "bf16"
+            else "argmax ZML[k] == expected[k] pour tout k (cache linéaire L_MAX + masque bande)"
+        ),
     }
     out_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
     print("wrote", out_manifest, "\nL0 oracle génération longue OK.")

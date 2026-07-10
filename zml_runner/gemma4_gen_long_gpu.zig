@@ -2,8 +2,8 @@
 //
 // Le moteur `engine.zig` est device-agnostic : le MÊME graphe XLA tourne sur CPU ou GPU. Ce runner force
 // le backend CUDA (avec fallback auto) et AJOUTE un timer tok/s + logging platform/RSS. Le calcul est
-// STRICTEMENT identique à `gemma4_gen_long.zig` (L1a mono) : `EngineModel(struct{}, .{...})` SANS prec
-// (PrecCfg par défaut = fp32 = today). → G1 = "le moteur L1a, mais sur GPU", pour mesurer le gain brut du
+// STRICTEMENT identique à `gemma4_gen_long.zig` (L1a mono) : `EngineModel(struct{}, .{...})` sans toucher
+// à `self.prec` (PrecRt par défaut = tout-null = fp32). → G1 = "le moteur L1a, mais sur GPU", pour mesurer le gain brut du
 // backend natif et valider que l'argmax == HF tient en fp32-CUDA (drift Eigen→CUDA caractérisé au G1).
 //
 // Critère G1 : argmax == HF sur les N tokens (séquence == L1a CPU == HF greedy) ; drift logits vs
@@ -30,7 +30,7 @@ const L_MAX: i64 = 1024;
 const B: i64 = 1;
 const S: i64 = 1;
 const D: i64 = 1536;
-// G1 : fp32 (PrecCfg défaut) — on n'active PAS le bf16 (c'est G2).
+// G1 : fp32 (PrecRt défaut tout-null, `self.prec` non touché) — on n'active PAS le bf16 (c'est G2).
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
 const PackedLong = engine.Packed(true);
 

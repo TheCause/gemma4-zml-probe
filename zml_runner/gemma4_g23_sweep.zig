@@ -89,7 +89,9 @@ pub fn main(init: std.process.Init) !void {
     };
     defer platform.deinit(allocator);
     log.info("G2.3 — backend = {s} ; PrecRt runtime (converts émis au traçage).", .{@tagName(platform.target)});
-    if (no_prealloc) log.info("G2.3 — preallocate=false : nvidia-smi mesure l'usage VRAM réel (pas la réserve BFC).", .{});
+    // Toujours loggé (finding revue T4) : le manifest doit voir le mode allocateur dans TOUS les cas
+    // (les mesures VRAM kv_store en dépendent — preallocate=true ⇒ nvidia-smi montre la réserve BFC).
+    log.info("G2.3 — CUDA allocator: preallocate={} (false ⇒ nvidia-smi mesure l'usage VRAM réel, pas la réserve BFC).", .{!no_prealloc});
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt);
