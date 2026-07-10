@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Un binaire ZML unique dont la précision bf16 se pilote par famille d'ops au runtime, un sweep one-hot de 12 familles + une config combinée, verdicts vs l'enveloppe G2 — le tout pré-enregistré et auditable.
+**Goal:** Un binaire ZML unique dont la précision bf16 se pilote par famille d'ops au runtime (arg positionnel `<familles>` = `fam1,fam2` ou `none`), un sweep one-hot de 12 familles + une config combinée, verdicts vs l'enveloppe G2 — le tout pré-enregistré et auditable.
 
 **Architecture:** Refactor `PrecCfg` comptime → `PrecRt` runtime dans `engine.zig` (approche B de la spec) ; runner `gemma4_g23_sweep` piloté par `--bf16 fam1,fam2` ; orchestration bash sur la 3090 (build unique, analyse au fil de l'eau, purge) ; analyse Python (métriques vs D0/A, ratios vs enveloppe B, sanité, custody).
 
@@ -101,6 +101,7 @@ fn dotPrec(fam: ?zml.DataType, compute: zml.DataType, a: zml.Tensor, b: zml.Tens
 - Supprimer le champ `prec: PrecCfg = .{}` de `EngineCfg` (ligne 250).
 - Dans `EngineModel(Brick, cfg)` : ajouter un champ **runtime** `prec: PrecRt = .{}` au struct du modèle (à côté de `brick`), et supprimer `const prec: PrecCfg = cfg.prec;` (ligne ~376) au profit de `self.prec` lu dans les forwards.
 - `runLayerGen` : signature `comptime prec: PrecCfg` → **runtime** `prec: PrecRt` (le paramètre cesse d'être comptime ; `i` et `cfg` restent comptime).
+- ⚠ À vérifier au smoke (comme le caveat `@typeInfo` du Step 1.1) : le champ runtime `prec: PrecRt` du struct modèle traverse `zml.Bufferized(Self)` / `zml.io.load` — le précédent `brick` (champ non-Tensor) suggère que oui ; si non, porter `prec` hors du struct (param de `forward` via une closure au compile).
 - Adapter chaque site d'appel de `dotPrec` à sa famille :
 
 | Site (ligne actuelle) | Appel refactoré |
@@ -316,7 +317,7 @@ Les comptes exacts se dérivent en comptant les émissions du code (une passe de
 
 - [ ] **Step 7.2 : Écrire `docs/G2_3_OP_SENSITIVITY.md` (protocole AVANT runs)**
 
-Contenu = reprise opérationnelle de la spec : bras A/B/D0/Dᵢ/D\* ; custody (md5 attendus, remplis à la génération) ; métriques et buckets (§5.2 spec, verbatim) ; départage ; non-vacuité + comptage converts ; sanité (seuils calibrés sur A/B : à remplir depuis `g2_envelope_metrics.npz` AVANT le sweep) ; procédure combinée + 3 essais ; stabilité S49 ; protocole VRAM ; contrats norms/rope tranchés (entrée+poids arrondis / cos-sin arrondis) ; note de préséance sur le croquis G2.3 du doc G2.
+Contenu = reprise opérationnelle de la spec : bras A/B/D0/Dᵢ/D\* ; custody (md5 attendus, remplis à la génération) ; métriques et buckets (§5.2 spec, verbatim) ; départage ; non-vacuité + comptage converts ; sanité (seuils calibrés AVANT le sweep via `52 --calibrate-sanity` sur les **memmaps A/B de la 3090** — le `g2_envelope_metrics.npz` ne contient pas d'entropie) ; procédure combinée + 3 essais ; stabilité S49 ; protocole VRAM ; contrats norms/rope tranchés (entrée+poids arrondis / cos-sin arrondis) ; note de préséance sur le croquis G2.3 du doc G2.
 
 - [ ] **Step 7.3 : Commit (le pré-enregistrement est un commit AVANT tout run de sweep)**
 
@@ -338,13 +339,21 @@ Interface :
 
 ```
 python scripts/52_g2_3_analyze.py \
-  --run-logits g2_3_run_<fam>.bin --run-name <fam> \
-  --ref-a <path A.bin> --ref-d0 <path D0.bin> \
+  --run-logits g2_3_logits_<fam>.bin --run-name <fam> \
+  --ref-a /data/gemma4-zml-probe/g2_logits_a_f32.npy \
+  --ref-d0 /data/g2_3_logits_none.bin \
   --envelope fixtures/g2_envelope_manifest.json \
   --expected-converts fixtures/g2_3_expected_converts.json \
   --hlo-report <sortie de 53, json> \
-  --manifest fixtures/g2_3_manifest.json   # append/update l'entrée du run
+  --manifest fixtures/g2_3_manifest.json \
+  --bin-sha <sha> --zml-rev <rev> --repo-rev <rev>   # provenance complète (spec §7.1)
 ```
+
+**⚠ Formats hétérogènes des références (vérifié dans script 50/51)** : le bras A est un **`.npy`
+memmap** (`g2_logits_a_f32.npy`, écrit par `np.lib.format.open_memmap` dans le script 50, lu par
+`np.load(..., mmap_mode="r")` dans le 51) ; les dumps ZML (D0, Dᵢ) sont du **f32 brut** (`.bin`,
+`np.memmap(dtype=np.float32).reshape(steps, VOC)`). Le loader de 52 choisit par extension — traiter
+le `.npy` comme du brut décalerait toutes les valeurs du header numpy (métriques poubelle).
 
 Pipeline par run :
 1. **Custody** : md5 de A et D0 vs manifest (première exécution : les enregistre ; ensuite : REFUSE si mismatch, exit 2).
@@ -352,7 +361,11 @@ Pipeline par run :
 3. **Non-vacuité logits** : `max_abs(run vs D0) == 0` → verdict `VACUOUS`.
 4. **Métriques** : max_abs p50/p95/max, KL p50/p95/max, argmax mismatches, 1re bifurcation — vs D0 ET vs A (mêmes formules que 51 ; lecture memmap step par step, jamais tout en RAM).
 5. **Verdict** : buckets sur `KL p50 vs A / enveloppe B`, départage `max_abs p50` (le pire l'emporte).
-6. **Écriture manifest** : entrée complète (config, provenance binaire/revs passées par args, toutes métriques `*_vs_D0`/`*_vs_A`, ratios, verdict, converts attendus/observés).
+6. **Écriture manifest + npz** : entrée manifest complète (config, provenance `bin-sha`/`zml-rev`/`repo-rev`, toutes métriques `*_vs_D0`/`*_vs_A`, ratios, verdict, converts attendus/observés, **md5 du dump logits**) **et** un `g2_3_metrics_<fam>.npz` par run (courbes par-step max_abs/KL/match, comme le 51) — c'est ce npz qui survit à la purge du dump (spec §7.2).
+
+Cas spécial `--run-name none` : D0 est **référence seule** — pas d'auto-analyse vs soi-même (pas de verdict `VACUOUS` absurde) ; 52 enregistre seulement custody (md5) + sanité de D0 dans le manifest.
+
+Mode calibration sanité : `--calibrate-sanity` calcule les seuils (entropie moyenne, répétition argmax) **depuis les memmaps A et B sur la 3090** (le `g2_envelope_metrics.npz` ne contient PAS d'entropie — max_abs/kl/match seulement) et les écrit dans le manifest ; à lancer AVANT le sweep, valeurs recopiées dans le doc protocole (Task 7).
 
 Self-check intégré (pattern repo) : `--selfcheck` rejoue les métriques G2.2 depuis `g2_2_metrics.npz` et vérifie la reproduction des ratios publiés (garde anti-régression de formule).
 
@@ -402,17 +415,22 @@ git commit -m "feat(g2.3): check HLO par run — diff vs D0 + comptage converts 
 ```bash
 #!/usr/bin/env bash
 # g2_3_sweep.sh — sweep G2.3 sur la 3090. Un BINAIRE UNIQUE pour tout le sweep (spec §7.1).
-# Usage : bash g2_3_sweep.sh [liste de configs, défaut = les 12 one-hot + none]
+# Usage : bash g2_3_sweep.sh [liste de configs, défaut = none + les 12 one-hot]
+#   KEEP=1 bash g2_3_sweep.sh "fam1,fam2"   # conserver le dump (run combiné D*, spec §7.2)
+#   FIXTURE=... (défaut S46) — surchargée pour la stabilité S49 et la variante kv_store option (b)
 set -euo pipefail
 ZML_WS=${ZML_WS:-/data/rqz_workspace/zml}
 DATA=/data/gemma4-zml-probe
+FIXTURE=${FIXTURE:-$DATA/gen_long.safetensors}   # ⚠ RACINE du repo côté 3090 (cf script 46), PAS fixtures/
+REF_A=/data/gemma4-zml-probe/g2_logits_a_f32.npy # .npy memmap (script 50) — custody vérifiée par 52
 BIN=$ZML_WS/bazel-bin/examples/rqz/gemma4_g23_sweep
 MIN_FREE_GB=6   # 1 dump (~1.1 Go) + dumps HLO + marge
 
-# 0. build unique + hash + provenance
+# 0. build unique + hash + provenance (bin, workspace ZML, repo probe)
 (cd "$ZML_WS" && ./bazel.sh build //examples/rqz:gemma4_g23_sweep --@zml//platforms:cuda=true)
 BIN_SHA=$(sha256sum "$BIN" | cut -d' ' -f1)
 ZML_REV=$(git -C "$ZML_WS" rev-parse HEAD 2>/dev/null || echo "n/a")
+REPO_REV=$(git -C "$DATA" rev-parse HEAD 2>/dev/null || echo "n/a")
 
 FAMILIES=${1:-"none qkv_proj qk_scores pv_ctx o_proj mlp ple head norms softmax rope softcap kv_store"}
 for fam in $FAMILIES; do
@@ -421,27 +439,40 @@ for fam in $FAMILIES; do
   free_gb=$(df --output=avail -BG /data | tail -1 | tr -dc '0-9')
   [ "$free_gb" -ge "$MIN_FREE_GB" ] || { echo "FATAL: espace insuffisant (${free_gb}G)"; exit 1; }
 
-  hlo_dir=/data/g2_3_hlo_$fam ; logits=/data/g2_3_logits_$fam.bin
+  safe=$(echo "$fam" | tr ',' '+')             # nom de fichier pour configs combinées
+  hlo_dir=/data/g2_3_hlo_$safe ; logits=/data/g2_3_logits_$safe.bin
   XLA_FLAGS="--xla_dump_to=$hlo_dir" "$BIN" \
-    "$DATA/weights/model.safetensors" "$DATA/fixtures/gen_long.safetensors" "$logits" "$fam" \
-    2>&1 | tee "$DATA/logs/g2_3_run_$fam.log"
+    "$DATA/weights/model.safetensors" "$FIXTURE" "$logits" "$fam" \
+    2>&1 | tee "$DATA/logs/g2_3_run_$safe.log"
+
+  md5sum "$logits" | tee -a "$DATA/logs/g2_3_md5.log"   # AVANT purge (déterminisme Task 12.1)
+
+  if [ "$fam" = "none" ]; then
+    # D0 = référence seule : custody + sanité, pas d'auto-analyse ni de diff HLO vs soi-même
+    python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name none \
+      --ref-a "$REF_A" --ref-d0 "$logits" --register-reference \
+      --manifest "$DATA/fixtures/g2_3_manifest.json" \
+      --bin-sha "$BIN_SHA" --zml-rev "$ZML_REV" --repo-rev "$REPO_REV"
+    continue   # jamais purgé
+  fi
 
   python3 "$DATA/scripts/53_g2_3_hlo_check.py" --run-dir "$hlo_dir" --d0-dir /data/g2_3_hlo_none \
-    --family "$fam" --expected "$DATA/fixtures/g2_3_expected_converts.json" --out /tmp/hlo_$fam.json
+    --family "$fam" --expected "$DATA/fixtures/g2_3_expected_converts.json" --out /tmp/hlo_$safe.json
   python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name "$fam" \
-    --ref-a /data/g2_logits_a.bin --ref-d0 /data/g2_3_logits_none.bin \
+    --ref-a "$REF_A" --ref-d0 /data/g2_3_logits_none.bin \
     --envelope "$DATA/fixtures/g2_envelope_manifest.json" \
     --expected-converts "$DATA/fixtures/g2_3_expected_converts.json" \
-    --hlo-report /tmp/hlo_$fam.json --manifest "$DATA/fixtures/g2_3_manifest.json" \
-    --bin-sha "$BIN_SHA" --zml-rev "$ZML_REV"
+    --hlo-report /tmp/hlo_$safe.json --manifest "$DATA/fixtures/g2_3_manifest.json" \
+    --bin-sha "$BIN_SHA" --zml-rev "$ZML_REV" --repo-rev "$REPO_REV"
 
-  # purge (on garde D0 = "none" et les manifests ; spec §7.2)
-  [ "$fam" != "none" ] && rm -f "$logits" && rm -rf "$hlo_dir"
+  # purge (spec §7.2) — on garde : D0 (jamais purgé), les npz de métriques, et le dump si KEEP=1 (run D*)
+  if [ "${KEEP:-0}" != "1" ]; then rm -f "$logits" && rm -rf "$hlo_dir"; fi
 done
 echo "SWEEP DONE — manifest: $DATA/fixtures/g2_3_manifest.json"
 ```
 
-NB : `none` tourne en PREMIER (D0 = référence des suivants, jamais purgé). Ajuster les chemins réels de A (`g2_logits_a.bin`, généré en G2.0 — custody vérifiée par 52).
+NB : `none` tourne en PREMIER (D0 = référence des suivants, jamais purgé). Le run combiné (Task 13)
+se lance avec `KEEP=1` pour conserver D\* (spec §7.2).
 
 - [ ] **Step 10.2 : Commit**
 
@@ -454,13 +485,35 @@ git commit -m "feat(g2.3): orchestrateur sweep — binaire unique, D0 d'abord, a
 
 ### Task 11 : Gate G2.3.0 — neutralité (3090, BLOQUANTE)
 
-- [ ] **Step 11.1 : Rerun de déploiement + D0**
+**⚠ Piège de circularité (à ne pas réintroduire)** : après les Tasks 1-5, TOUS les runners embarquent
+l'`engine.zig` refactoré (via `srcs` de BUILD.bazel) — comparer `gemma4_g23_sweep none` à un G1
+**rebuildé** ne prouverait rien (un bug de refactor qui altère les deux graphes à l'identique
+passerait « gold » en silence). La baseline HLO doit venir de la révision **PRÉ-refactor**.
 
-Deploy (Task 6.1), puis run baseline : `bash scripts/g2_3_sweep.sh "none"` — vérifie que le binaire tourne et produit D0.
+- [ ] **Step 11.0 : Baseline HLO pré-refactor (À FAIRE AVANT de déployer le refactor, ou depuis un worktree)**
 
-- [ ] **Step 11.2 : Preuve gold — HLO tout-null vs baseline G1**
+Sur M1 : `git worktree add /tmp/g23-baseline <commit parent de Task 1>` (le dernier commit de la
+branche AVANT `feat(g2.3): PrecRt...`), puis déployer CE worktree :
+```bash
+ZML_REMOTE=... ZML_DST=... /tmp/g23-baseline/zml_runner/deploy_to_3090.sh
+# 3090 : build G1 pré-refactor + dump HLO baseline (conservé, jamais purgé)
+./bazel.sh build //examples/rqz:gemma4_gen_long_gpu --@zml//platforms:cuda=true
+XLA_FLAGS="--xla_dump_to=/data/g2_3_hlo_baseline_prerefactor" ./bazel-bin/examples/rqz/gemma4_gen_long_gpu \
+  /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/gen_long.safetensors 4
+```
+Consigner le commit baseline + md5 du dump dans le manifest. Puis `git worktree remove /tmp/g23-baseline`
+et re-déployer les sources refactorées (Task 6.1).
 
-Dump HLO de `gemma4_gen_long_gpu` (G1, inchangé) et de `gemma4_g23_sweep none` → diff façon E1 (`diff -rq` des dossiers, hors chemins). **Gold = identique.** Sinon : appliquer la hiérarchie de repli pré-enregistrée (spec §6.1) — publier le diff catégorisé ET exiger G1 64/64 + E1 4/4 + replay 1020/1020. En dessous → STOP, retour au refactor.
+- [ ] **Step 11.1 : Run D0**
+
+`bash scripts/g2_3_sweep.sh "none"` — vérifie que le binaire tourne et produit D0.
+
+- [ ] **Step 11.2 : Preuve gold — HLO tout-null vs baseline PRÉ-refactor**
+
+Diff façon E1 (`diff -rq`, hors chemins) : `/data/g2_3_hlo_none` vs `/data/g2_3_hlo_baseline_prerefactor`.
+**Gold = identique.** Sinon : hiérarchie de repli pré-enregistrée (spec §6.1) — publier le diff
+catégorisé ET exiger cumulativement G1 64/64 + E1 4/4 + replay 1020/1020 (tous rebuildés post-refactor,
+comparés à leurs verdicts HISTORIQUES, pas entre eux). En dessous → STOP, retour au refactor.
 
 - [ ] **Step 11.3 : Non-régression G2.2**
 
@@ -484,7 +537,7 @@ git tag gate/G2.3.0-neutrality-pass
 
 - [ ] **Step 12.1 : Lancer le sweep complet (nuit 3090)**
 
-`bash scripts/g2_3_sweep.sh` (les 12 + none). Déterminisme : relancer UNE config (ex `mlp`) et vérifier logits bit-identiques (md5 des dumps avant purge — l'orchestrateur log le md5 de chaque dump).
+`bash scripts/g2_3_sweep.sh` (none + les 12). Déterminisme : relancer UNE config (ex `mlp`) et comparer son md5 à celui du premier passage dans `logs/g2_3_md5.log` (l'orchestrateur md5-somme chaque dump AVANT purge). Attendu : identique.
 
 - [ ] **Step 12.2 : Rapatrier + classement**
 
@@ -504,11 +557,11 @@ git tag gate/G2.3.1-sweep-pass
 
 - [ ] **Step 13.1 : Run combiné**
 
-Config = familles `SAFE` du classement. `bash scripts/g2_3_sweep.sh "<fam1,fam2,...>"`. Si FAIL au critère ≤2× : procédure pré-enregistrée (retrait glouton pire `KL p50 vs D0`, max 3 essais, CHAQUE essai committé au manifest). 3 échecs → null result publié.
+Config = familles `SAFE` du classement. `KEEP=1 bash scripts/g2_3_sweep.sh "<fam1,fam2,...>"` (D\* conservé, spec §7.2). Si FAIL au critère ≤2× : procédure pré-enregistrée (retrait glouton pire `KL p50 vs D0`, max 3 essais, CHAQUE essai committé au manifest). 3 échecs → null result publié.
 
 - [ ] **Step 13.2 : Interaction + stabilité S49**
 
-Métrique d'interaction (52 la calcule depuis le manifest : `KL(D*) / max KL(Dᵢ)`). Stabilité : regénérer la fixture S49 (`49_gen_custom_oracle.py`), runs combiné + 2 familles frontières, verdicts concordants ou discordance publiée.
+Métriques d'interaction (52 les calcule depuis le manifest, spec §5.5) : `KL p50(D*) / max_i KL p50(Dᵢ actives)` **et** le ratio à la **somme** des KL p50 actives. Stabilité : regénérer la fixture S49 (`49_gen_custom_oracle.py`), runs via `FIXTURE=<s49> bash scripts/g2_3_sweep.sh ...` — combiné + 2 familles frontières, verdicts concordants ou discordance publiée.
 
 - [ ] **Step 13.3 : VRAM `kv_store` (protocole G2.1)**
 
