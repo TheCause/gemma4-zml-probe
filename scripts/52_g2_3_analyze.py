@@ -301,10 +301,16 @@ def evaluate_hlo(args) -> tuple[dict, bool]:
         check["invalid_reason"] = f"verdict INVALID du script 53 : {rep}"
         return check, True
     if degraded:
-        # §5.3 : si la somme n'est pas vérifiable (multi-familles), 53 dégrade en
-        # differs_from_d0 seul — consigné, pas INVALID.
-        check["degraded"] = "differs_from_d0 seul (§5.3, comptage non vérifiable)"
-        return check, False
+        # §5.3 : la dégradation en differs_from_d0 seul n'est PRÉ-ENREGISTRÉE que pour les
+        # runs MULTI-familles (« si la somme s'avère non vérifiable en pratique »). Pour un
+        # run one-hot, le comptage EST l'oracle anti-câblage-croisé : indisponible ⇒ gate
+        # non vérifiable ⇒ INVALID, pas un bucket.
+        if len(fams) >= 2:
+            check["degraded"] = "differs_from_d0 seul (§5.3, comptage non vérifiable — multi-familles)"
+            return check, False
+        check["invalid_reason"] = ("comptage converts indisponible pour un run mono-famille — "
+                                   "gate §5.3 non vérifiable")
+        return check, True
     if int(observed) != expected:
         check["invalid_reason"] = (f"delta converts observé {observed} != attendu {expected} "
                                    f"(familles {fams})")
