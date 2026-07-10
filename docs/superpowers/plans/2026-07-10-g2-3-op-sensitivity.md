@@ -305,15 +305,28 @@ Attendu : `OK` sur chaque cible. Toute erreur de compile se corrige ICI (leçon 
 
 Depuis l'architecture (35 layers, producers 0-14, readers 15-34, YOCO writers 13/14) et le code refactoré. Format :
 
+**⚠ Le compte se fait sur les converts ÉMIS, pas sur les opérandes** : les poids sont **déjà bf16
+sur device** (dtype header safetensors, cf G2.1) et `convert` vers le même dtype **n'émet rien**
+(`return self`, tensor.zig). Conséquences :
+- GEMM à poids (qkv_proj, o_proj, mlp, ple, head), famille **active** : 2 converts émis par site
+  (activation-in f32→bf16 + résultat-out bf16→f32) — le convert du poids est un no-op.
+- MAIS la **baseline D0** émet, elle, 1 convert par site à poids (`b.convert(f32)` sur le poids
+  bf16) qui **disparaît** quand la famille s'active (le poids reste bf16). Le compte pertinent est
+  donc un **DELTA vs le recensement de D0**, pas un absolu.
+- GEMM à 2 opérandes f32 (qk_scores, pv_ctx) : +3 converts émis par site (2 in + 1 out).
+
 ```json
 {
-  "qkv_proj":   {"convert_pairs": "35 q_proj + 15 k_proj + 15 v_proj = 65 sites", "hlo_convert_ops_expected": 195},
-  "qk_scores":  {"sites": 35, "hlo_convert_ops_expected": 105},
-  "...": "chaque famille : sites, converts émis attendus (2 opérandes + 1 re-upcast par site GEMM ; in+out par op non-GEMM)"
+  "qkv_proj":   {"sites": "35 q + 15 k + 15 v = 65 (YOCO: readers sans k/v)",
+                 "delta_converts_vs_d0": "+2 émis −1 baseline = +1 net/site → +65"},
+  "qk_scores":  {"sites": 35, "delta_converts_vs_d0": "+3/site → +105"},
+  "...": "chaque famille : sites, delta attendu, dérivé en comptant les ÉMISSIONS du code refactoré"
 }
 ```
 
-Les comptes exacts se dérivent en comptant les émissions du code (une passe de lecture de `runLayerGen` + forwards par famille). ⚠ minutie YOCO : readers sans k/v_proj ni scatter.
+Le script 53 mesure ce **delta** (recensement converts du run − recensement D0). Les comptes exacts
+se dérivent en comptant les émissions du code (une passe de lecture de `runLayerGen` + forwards par
+famille). ⚠ minutie YOCO : readers sans k/v_proj ni scatter.
 
 - [ ] **Step 7.2 : Écrire `docs/G2_3_OP_SENSITIVITY.md` (protocole AVANT runs)**
 
@@ -347,6 +360,10 @@ python scripts/52_g2_3_analyze.py \
   --hlo-report <sortie de 53, json> \
   --manifest fixtures/g2_3_manifest.json \
   --bin-sha <sha> --zml-rev <rev> --repo-rev <rev>   # provenance complète (spec §7.1)
+# Flags de mode : --register-reference (run D0 : custody+sanité seulement, pas d'auto-analyse) ;
+#   --ref-a none (mode vs-D0 seul, runs S49) ; --calibrate-sanity ; --selfcheck.
+# Ré-analyse d'un run existant : UPSERT de l'entrée manifest (clé = run-name), avec compteur
+#   re_run et md5 des deux passages — jamais d'entrée dupliquée silencieuse.
 ```
 
 **⚠ Formats hétérogènes des références (vérifié dans script 50/51)** : le bras A est un **`.npy`
@@ -365,7 +382,7 @@ Pipeline par run :
 
 Cas spécial `--run-name none` : D0 est **référence seule** — pas d'auto-analyse vs soi-même (pas de verdict `VACUOUS` absurde) ; 52 enregistre seulement custody (md5) + sanité de D0 dans le manifest.
 
-Mode calibration sanité : `--calibrate-sanity` calcule les seuils (entropie moyenne, répétition argmax) **depuis les memmaps A et B sur la 3090** (le `g2_envelope_metrics.npz` ne contient PAS d'entropie — max_abs/kl/match seulement) et les écrit dans le manifest ; à lancer AVANT le sweep, valeurs recopiées dans le doc protocole (Task 7).
+Mode calibration sanité : `--calibrate-sanity` calcule les seuils (entropie moyenne, répétition argmax) **depuis les memmaps A et B sur la 3090** (le `g2_envelope_metrics.npz` ne contient PAS d'entropie — max_abs/kl/match seulement) et les écrit dans le manifest ; à lancer AVANT le sweep, valeurs recopiées dans le doc protocole (Task 7). **⚠ Format du bras B** : `/data/gemma4-zml-probe/g2_logits_b_bf16u16.npy` = **bit-patterns bf16 stockés en uint16** (script 50 : `.view(torch.uint16)`) — réinterpréter via `torch.from_numpy(u16).view(torch.bfloat16).float()`, jamais lire comme entiers (même classe de piège que le header .npy du bras A).
 
 Self-check intégré (pattern repo) : `--selfcheck` rejoue les métriques G2.2 depuis `g2_2_metrics.npz` et vérifie la reproduction des ratios publiés (garde anti-régression de formule).
 
@@ -422,7 +439,9 @@ set -euo pipefail
 ZML_WS=${ZML_WS:-/data/rqz_workspace/zml}
 DATA=/data/gemma4-zml-probe
 FIXTURE=${FIXTURE:-$DATA/gen_long.safetensors}   # ⚠ RACINE du repo côté 3090 (cf script 46), PAS fixtures/
-REF_A=/data/gemma4-zml-probe/g2_logits_a_f32.npy # .npy memmap (script 50) — custody vérifiée par 52
+RUN_PREFIX=${RUN_PREFIX:-g2_3}                   # namespace des sorties — S49 utilise RUN_PREFIX=g2_3_s49
+REF_A=${REF_A:-$DATA/g2_logits_a_f32.npy}        # .npy memmap (script 50) — custody vérifiée par 52 ; REF_A=none → mode vs-D0 seul (S49)
+mkdir -p "$DATA/logs"
 BIN=$ZML_WS/bazel-bin/examples/rqz/gemma4_g23_sweep
 MIN_FREE_GB=6   # 1 dump (~1.1 Go) + dumps HLO + marge
 
@@ -440,29 +459,29 @@ for fam in $FAMILIES; do
   [ "$free_gb" -ge "$MIN_FREE_GB" ] || { echo "FATAL: espace insuffisant (${free_gb}G)"; exit 1; }
 
   safe=$(echo "$fam" | tr ',' '+')             # nom de fichier pour configs combinées
-  hlo_dir=/data/g2_3_hlo_$safe ; logits=/data/g2_3_logits_$safe.bin
+  hlo_dir=/data/${RUN_PREFIX}_hlo_$safe ; logits=/data/${RUN_PREFIX}_logits_$safe.bin
   XLA_FLAGS="--xla_dump_to=$hlo_dir" "$BIN" \
     "$DATA/weights/model.safetensors" "$FIXTURE" "$logits" "$fam" \
-    2>&1 | tee "$DATA/logs/g2_3_run_$safe.log"
+    2>&1 | tee "$DATA/logs/${RUN_PREFIX}_run_$safe.log"
 
-  md5sum "$logits" | tee -a "$DATA/logs/g2_3_md5.log"   # AVANT purge (déterminisme Task 12.1)
+  md5sum "$logits" | tee -a "$DATA/logs/${RUN_PREFIX}_md5.log"   # AVANT purge (déterminisme Task 12.1)
 
   if [ "$fam" = "none" ]; then
     # D0 = référence seule : custody + sanité, pas d'auto-analyse ni de diff HLO vs soi-même
-    python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name none \
+    python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name "${RUN_PREFIX}_none" \
       --ref-a "$REF_A" --ref-d0 "$logits" --register-reference \
       --manifest "$DATA/fixtures/g2_3_manifest.json" \
       --bin-sha "$BIN_SHA" --zml-rev "$ZML_REV" --repo-rev "$REPO_REV"
     continue   # jamais purgé
   fi
 
-  python3 "$DATA/scripts/53_g2_3_hlo_check.py" --run-dir "$hlo_dir" --d0-dir /data/g2_3_hlo_none \
-    --family "$fam" --expected "$DATA/fixtures/g2_3_expected_converts.json" --out /tmp/hlo_$safe.json
-  python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name "$fam" \
-    --ref-a "$REF_A" --ref-d0 /data/g2_3_logits_none.bin \
+  python3 "$DATA/scripts/53_g2_3_hlo_check.py" --run-dir "$hlo_dir" --d0-dir /data/${RUN_PREFIX}_hlo_none \
+    --family "$fam" --expected "$DATA/fixtures/g2_3_expected_converts.json" --out /tmp/hlo_${RUN_PREFIX}_$safe.json
+  python3 "$DATA/scripts/52_g2_3_analyze.py" --run-logits "$logits" --run-name "${RUN_PREFIX}_$safe" \
+    --ref-a "$REF_A" --ref-d0 /data/${RUN_PREFIX}_logits_none.bin \
     --envelope "$DATA/fixtures/g2_envelope_manifest.json" \
     --expected-converts "$DATA/fixtures/g2_3_expected_converts.json" \
-    --hlo-report /tmp/hlo_$safe.json --manifest "$DATA/fixtures/g2_3_manifest.json" \
+    --hlo-report /tmp/hlo_${RUN_PREFIX}_$safe.json --manifest "$DATA/fixtures/g2_3_manifest.json" \
     --bin-sha "$BIN_SHA" --zml-rev "$ZML_REV" --repo-rev "$REPO_REV"
 
   # purge (spec §7.2) — on garde : D0 (jamais purgé), les npz de métriques, et le dump si KEEP=1 (run D*)
@@ -504,9 +523,12 @@ XLA_FLAGS="--xla_dump_to=/data/g2_3_hlo_baseline_prerefactor" ./bazel-bin/exampl
 Consigner le commit baseline + md5 du dump dans le manifest. Puis `git worktree remove /tmp/g23-baseline`
 et re-déployer les sources refactorées (Task 6.1).
 
-- [ ] **Step 11.1 : Run D0**
+- [ ] **Step 11.1 : Sync du repo côté 3090 + run D0**
 
-`bash scripts/g2_3_sweep.sh "none"` — vérifie que le binaire tourne et produit D0.
+⚠ `deploy_to_3090.sh` ne synchronise QUE `zml_runner/` vers le workspace ZML — les scripts 52/53,
+`g2_3_expected_converts.json` et le doc protocole doivent arriver par le repo :
+`ssh <3090> "cd /data/gemma4-zml-probe && git fetch && git checkout g2.3-op-sensitivity && git pull"`.
+Puis `bash scripts/g2_3_sweep.sh "none"` — vérifie que le binaire tourne et produit D0.
 
 - [ ] **Step 11.2 : Preuve gold — HLO tout-null vs baseline PRÉ-refactor**
 
@@ -541,7 +563,11 @@ git tag gate/G2.3.0-neutrality-pass
 
 - [ ] **Step 12.2 : Rapatrier + classement**
 
-Rapatrier manifest + logs sur M1. Vérifier : 12 verdicts non-`INVALID`, comptages converts OK. Écrire le classement (tableau par `KL p50 vs D0`) dans `docs/G2_3_OP_SENSITIVITY.md` §résultats.
+Rapatrier manifest + logs + les `g2_3_metrics_*.npz` par run (spec §7.2 les conserve — ce sont eux qui survivent à la purge des dumps) sur M1. Vérifier : 12 verdicts non-`INVALID`, comptages converts OK. Écrire le classement (tableau par `KL p50 vs D0`) dans `docs/G2_3_OP_SENSITIVITY.md` §résultats.
+
+NB `kv_store` : si l'option (b) de Task 3 a été retenue (fixture cache bf16), la lancer **hors du
+sweep par défaut** avec sa fixture variante (`FIXTURE=<gen_long_kvbf16> bash scripts/g2_3_sweep.sh "kv_store"`)
+— la lancer avec la fixture standard f32 donnerait un `VACUOUS` garanti (gaspillage détecté mais évitable).
 
 - [ ] **Step 12.3 : Commit + tag**
 
@@ -561,7 +587,24 @@ Config = familles `SAFE` du classement. `KEEP=1 bash scripts/g2_3_sweep.sh "<fam
 
 - [ ] **Step 13.2 : Interaction + stabilité S49**
 
-Métriques d'interaction (52 les calcule depuis le manifest, spec §5.5) : `KL p50(D*) / max_i KL p50(Dᵢ actives)` **et** le ratio à la **somme** des KL p50 actives. Stabilité : regénérer la fixture S49 (`49_gen_custom_oracle.py`), runs via `FIXTURE=<s49> bash scripts/g2_3_sweep.sh ...` — combiné + 2 familles frontières, verdicts concordants ou discordance publiée.
+Métriques d'interaction (52 les calcule depuis le manifest, spec §5.5) : `KL p50(D*) / max_i KL p50(Dᵢ actives)` **et** le ratio à la **somme** des KL p50 actives.
+
+**Stabilité S49 — sémantique PRÉ-ENREGISTRÉE (pas d'enveloppe A/B pour S49)** : les runs S49 sont
+**vs D0-S49 uniquement** (diagnostic), jamais vs A/B (qui sont des trajectoires S46 — les mélanger
+donnerait des métriques poubelle). Le critère de concordance = **l'ordre relatif** : les familles
+testées gardent-elles leur rang de `KL p50 vs D0` relatif l'une à l'autre et au combiné ?
+Concrètement :
+
+```bash
+python3 scripts/49_gen_custom_oracle.py --prompt "..." --n-tokens 48   # fixture S49 (racine)
+# runs namespacés — nouveau D0-S49 d'abord, puis combiné + 2 familles frontières, refs S46 intouchées
+RUN_PREFIX=g2_3_s49 FIXTURE=/data/gemma4-zml-probe/gen_custom.safetensors REF_A=none \
+  bash scripts/g2_3_sweep.sh "none <combiné> <fam_frontière_1> <fam_frontière_2>"
+```
+
+(`REF_A=none` → 52 saute custody/métriques vs A et n'écrit que les `*_vs_D0` ; le namespace
+`RUN_PREFIX` protège D0-S46 et son md5 de tout écrasement.) Concordance ou discordance : publiée
+telle quelle au manifest et au doc.
 
 - [ ] **Step 13.3 : VRAM `kv_store` (protocole G2.1)**
 
