@@ -81,6 +81,8 @@ pub fn main(init: std.process.Init) !void {
     const model: Model = try .init(arena.allocator(), base);
     const packed_in: PackedLong = .init(store_fx.view());
     const cache0: engine.Cache = .init(store_fx.view());
+    // Garde G2.3 : cohérence dtype cache (header fixture) ↔ prec (kv_store null ici ⇒ fixture f32).
+    try cache0.checkDtype(model.prec);
     const ctrl_sym: engine.Ctrl = .initSymbolic();
 
     log.info("Materializing weights + packed inputs + caches (L_MAX={d}) ...", .{L_MAX});

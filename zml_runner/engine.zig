@@ -83,6 +83,9 @@ fn rmsScaleD(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
 /// fam=null : émission STRICTEMENT identique à `rmsScaleD(x, cvt(w, compute))` d'aujourd'hui
 /// (convert same-dtype = `return self`). NB : zml.nn.rmsNorm upcaste en f32 en interne puis
 /// re-converge au dtype d'entrée — bornes arrondies, calcul interne au gré d'XLA (le contrat).
+/// ORDRE D'ÉMISSION : ici c'est l'INVERSE de rmsScaleHdPrec — `wi` (convert du poids) est émis
+/// AVANT le rmsNorm (dans rmsScaleD), ne pas réordonner : une harmonisation naïve des deux
+/// helpers casserait le byte-diff HLO (gate G2.3.0).
 fn rmsScaleDPrec(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     const xi = inPrec(fam, x);
     const wi = inPrec(fam, w.convert(compute)); // le cvt() d'origine reste la base
@@ -213,6 +216,28 @@ pub const Cache = struct {
     pub fn load(self: *const Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Cache) {
         return zml.io.load(Cache, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
     }
+
+    /// Garde G2.3 (famille kv_store, mécanisme b) : le dtype de STOCKAGE du cache vient du header
+    /// de la fixture (createTensor n'override pas le dtype) — vérifier AVANT compile que fixture et
+    /// prec sont cohérents : kv_store actif ⇒ fixture variante à ce dtype (scripts/46 --kv-dtype
+    /// bf16) ; kv_store null ⇒ fixture au dtype compute (f32). Un mismatch casserait sinon en aval
+    /// avec une erreur obscure (scatter : update typé au dtype de l'opérande, cf zml ops.zig ;
+    /// rethread step→step : sortie ≠ dtype d'entrée déclaré).
+    pub fn checkDtype(self: *const Cache, prec: PrecRt) !void {
+        const expected: zml.DataType = prec.kv_store orelse prec.compute;
+        const entries = [_]struct { []const u8, zml.DataType }{
+            .{ "cache_sl_k", self.sl_k.dtype() },
+            .{ "cache_sl_v", self.sl_v.dtype() },
+            .{ "cache_fl_k", self.fl_k.dtype() },
+            .{ "cache_fl_v", self.fl_v.dtype() },
+        };
+        for (entries) |e| {
+            if (e[1] != expected) {
+                log.err("{s}: dtype fixture = {s} ≠ attendu = {s} (prec.kv_store {s}) — fixture standard f32 pour kv_store=null, variante (scripts/46 --kv-dtype bf16) pour kv_store=bf16", .{ e[0], @tagName(e[1]), @tagName(expected), if (prec.kv_store != null) "actif" else "null" });
+                return error.KvCacheDtypeMismatch;
+            }
+        }
+    }
 };
 
 // Entrées par-step empaquetées (constantes sur la boucle ; sélectionnées par dynamicSlice(.step)).
@@ -315,7 +340,9 @@ pub const PrecRt = struct {
     ple: ?zml.DataType = null,
     head: ?zml.DataType = null,
     // familles non-GEMM (spec §4, 8-12) — norms/softmax/rope/softcap câblées (Task 2) ;
-    // kv_store reste à câbler (Task 3) : le champ existe mais n'a encore AUCUN effet.
+    // kv_store câblée (Task 3, mécanisme b) : le DTYPE DE STOCKAGE vient du header de la fixture
+    // (variante bf16 via scripts/46 --kv-dtype bf16) ; kv_store actif ⇒ writes arrondis avant
+    // scatter + reads re-upcastés (runLayerGen). Cohérence fixture↔prec : Cache.checkDtype.
     norms: ?zml.DataType = null,
     softmax: ?zml.DataType = null,
     rope: ?zml.DataType = null,
@@ -399,10 +426,13 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
         }
         const v_new = v.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
+        // famille kv_store (G2.3, spec §4) — borne ÉCRITURE : k_new/v_new arrondis au dtype de
+        // stockage AVANT scatterSlices (le cache est déclaré au dtype du header fixture, mécanisme b
+        // — l'update d'un scatter doit matcher l'opérande). fam=null : inPrec = `return x`, zéro op.
         if (full) {
             const slot = zml.Tensor.scalar(@as(u32, @intCast(fullSlot(i))), .u32);
-            cache.fl_k = cache.fl_k.scatterSlices(.{ .slot = slot, .k = pos_u }, k_new, so);
-            cache.fl_v = cache.fl_v.scatterSlices(.{ .slot = slot, .k = pos_u }, v_new, so);
+            cache.fl_k = cache.fl_k.scatterSlices(.{ .slot = slot, .k = pos_u }, inPrec(prec.kv_store, k_new), so);
+            cache.fl_v = cache.fl_v.scatterSlices(.{ .slot = slot, .k = pos_u }, inPrec(prec.kv_store, v_new), so);
             cache_k = cache.fl_k.choose1d(.slot, fullSlot(i));
             cache_v = cache.fl_v.choose1d(.slot, fullSlot(i));
         } else {
@@ -410,11 +440,20 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
             // ring-buffer sliding : écriture circulaire à pos % kmax_sliding. `cfg.ring` est comptime →
             // en défaut (false) la branche `remainder` n'est PAS analysée ni émise → HLO == decode4.
             const write_k = if (cfg.ring) pos_u.remainder(zml.Tensor.scalar(@as(u32, @intCast(cfg.kmax_sliding)), .u32)) else pos_u;
-            cache.sl_k = cache.sl_k.scatterSlices(.{ .slot = slot, .k = write_k }, k_new, so);
-            cache.sl_v = cache.sl_v.scatterSlices(.{ .slot = slot, .k = write_k }, v_new, so);
+            cache.sl_k = cache.sl_k.scatterSlices(.{ .slot = slot, .k = write_k }, inPrec(prec.kv_store, k_new), so);
+            cache.sl_v = cache.sl_v.scatterSlices(.{ .slot = slot, .k = write_k }, inPrec(prec.kv_store, v_new), so);
             cache_k = cache.sl_k.choose1d(.slot, slidingSlot(i));
             cache_v = cache.sl_v.choose1d(.slot, slidingSlot(i));
         }
+    }
+
+    // famille kv_store — borne LECTURE : le cache lu (choose1d) est au dtype de stockage ; re-upcast
+    // vers compute AVANT les dots QK/PV. Si qk_scores/pv_ctx sont AUSSI actifs, la chaîne émise reste
+    // bf16→f32→bf16 telle quelle (contrat « aux bornes » : pas d'optimisation manuelle, XLA décide).
+    // fam=null : branche non prise au traçage → aucune op émise, ordre d'émission INCHANGÉ.
+    if (prec.kv_store != null) {
+        cache_k = cache_k.convert(prec.compute);
+        cache_v = cache_v.convert(prec.compute);
     }
 
     const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });

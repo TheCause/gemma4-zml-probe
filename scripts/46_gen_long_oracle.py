@@ -19,9 +19,16 @@ et lit le cache via le masque par type de couche. Donc on ne fournit QUE le cach
 
 Fixture : gen_long.safetensors. Manifest : gen_long_manifest.json.
 CLI : python3 scripts/46_gen_long_oracle.py   (3090, venv gemma4-probe).
+
+Variante G2.3 famille kv_store (mécanisme b, cf plan Task 3) : `--kv-dtype bf16` écrit les 4
+tenseurs cache_* en bf16 (le dtype de STOCKAGE du cache ZML vient du header de la fixture ;
+l'arrondi bf16 du KV prefill = le contrat kv_store appliqué à l'état initial). Sorties renommées
+gen_long_kvbf16.safetensors / gen_long_kvbf16_manifest.json — la fixture standard f32 est intacte.
+Tout le reste (oracle HF, masques, embeds, expected) est identique bit-à-bit au run f32 à seed égale.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -113,6 +120,15 @@ def pad_cache(t):
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--kv-dtype", choices=["f32", "bf16"], default="f32",
+                    help="dtype de STOCKAGE des tenseurs cache_* de la fixture (bf16 = variante "
+                         "G2.3 famille kv_store, mécanisme b ; sorties *_kvbf16)")
+    args = ap.parse_args()
+    kv_dt = torch.bfloat16 if args.kv_dtype == "bf16" else torch.float32
+    out_fixture = ROOT / "gen_long_kvbf16.safetensors" if args.kv_dtype == "bf16" else OUT_FIXTURE
+    out_manifest = ROOT / "gen_long_kvbf16_manifest.json" if args.kv_dtype == "bf16" else OUT_MANIFEST
+
     assert WEIGHTS.exists(), WEIGHTS
     torch.manual_seed(1337)
     cfg = AutoConfig.from_pretrained("google/gemma-4-E2B-it")
@@ -199,8 +215,9 @@ def main() -> None:
         "cos_full": cos_full.contiguous(), "sin_full": sin_full.contiguous(),
         "positions": positions.contiguous(),
         "masks_sliding": masks_sliding.contiguous(), "masks_full": masks_full.contiguous(),
-        "cache_sl_k": cache_sl_k.contiguous(), "cache_sl_v": cache_sl_v.contiguous(),
-        "cache_fl_k": cache_fl_k.contiguous(), "cache_fl_v": cache_fl_v.contiguous(),
+        # dtype de stockage du cache : kv_dt (bf16 = variante kv_store option b ; f32 = standard)
+        "cache_sl_k": cache_sl_k.to(kv_dt).contiguous(), "cache_sl_v": cache_sl_v.to(kv_dt).contiguous(),
+        "cache_fl_k": cache_fl_k.to(kv_dt).contiguous(), "cache_fl_v": cache_fl_v.to(kv_dt).contiguous(),
         "expected": torch.tensor(expected, dtype=torch.int32),
         "fed": torch.tensor(fed, dtype=torch.int32),
     }
@@ -215,21 +232,21 @@ def main() -> None:
     print(f"  expected[:6] = {expected[:6]}")
     print(f"  expected[-4:] = {expected[-4:]}")
 
-    OUT_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-    save_file(tensors, str(OUT_FIXTURE))
-    print("wrote", OUT_FIXTURE)
+    out_fixture.parent.mkdir(parents=True, exist_ok=True)
+    save_file(tensors, str(out_fixture))
+    print("wrote", out_fixture)
 
     manifest = {
         "source": "L0 oracle génération longue (boucle decode N tokens, greedy == HF sliding window 512)",
         "prompt": INPUT_IDS, "seq_len": SEQ_LEN, "n_decode": N_DECODE, "l_max": L_MAX,
-        "sliding_window": SLIDING_WINDOW,
+        "sliding_window": SLIDING_WINDOW, "kv_dtype": args.kv_dtype,
         "sliding_producers": SLIDING_PRODUCERS, "full_producers": FULL_PRODUCERS,
         "fed_head": fed[:8], "expected_head": expected[:8], "expected_tail": expected[-8:],
         "tensors": {n: {"shape": list(t.shape), "dtype": str(t.dtype).replace("torch.", "")} for n, t in tensors.items()},
         "pass_criterion_L1a": "argmax ZML[k] == expected[k] pour tout k (cache linéaire L_MAX + masque bande)",
     }
-    OUT_MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
-    print("wrote", OUT_MANIFEST, "\nL0 oracle génération longue OK.")
+    out_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    print("wrote", out_manifest, "\nL0 oracle génération longue OK.")
 
 
 if __name__ == "__main__":
