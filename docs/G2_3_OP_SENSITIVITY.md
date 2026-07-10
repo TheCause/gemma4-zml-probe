@@ -275,7 +275,7 @@ run**, mesure répétée **2×**, conditions consignées au manifest. Référenc
 |---|---|---|---|
 | G2.3.0 (neutralité + pré-enregistrement) | 10 juil 2026 | **PASS** | HLO gold byte-identique ; D0 1020/1020 == HF ; non-régression G2.2 reproduite (0.271×/0.436×, bifurcation 96) |
 | G2.3.1 (sweep one-hot) | 10 juil 2026 | **PASS — 12/12 SAFE** | oracle converts 12/12 exact ; plage KL p50 : 0.0028×–0.13× B ; bitwise inter-compiles réfuté (effet stable ~2 %) |
-| G2.3.2 (combiné + stabilité + VRAM) | — | — | — |
+| G2.3.2 (combiné + stabilité + VRAM) | 10 juil 2026 | **PASS (1er essai)** | 12 familles ensemble : KL p50 **0.486× B** (SAFE) ; interaction D\*/somme 1.06× ; S49 rangs conservés ; VRAM −17 MiB = ½ cache |
 
 ### 9.1 G2.3.0 — Neutralité du refactor — **PASS (10 juil 2026)**
 
@@ -339,21 +339,53 @@ KL p50 vs D0 = 2.6230e-5 (run 1) vs 2.6776e-5 (run 2) → **effet mesuré stable
 négligeable devant les écarts inter-familles (>1 ordre de grandeur). Le classement est robuste ;
 toute comparaison fine (<5 %) entre familles voisines serait en revanche non significative.
 
-### 9.3 G2.3.2 — Config combinée
+### 9.3 G2.3.2 — Config combinée — **PASS au 1er essai (10 juil 2026)**
 
 | Essai | Familles actives | KL p50 vs A (ratio B) | max_abs p50 vs A (ratio B) | Interaction (D\*/max ; D\*/somme) | Verdict |
 |---|---|---|---|---|---|
-| 1 | — | — | — | — | — |
+| 1 | **les 12** (fixture kvbf16) | **0.486×** | 0.591× | 3.76× ; **1.06×** | **SAFE** |
 
-### 9.4 Stabilité S49
+**La config bf16 « max sûre » = LES 12 FAMILLES ENSEMBLE** : KL p50 = 0.486× l'enveloppe B —
+4× sous le critère PASS (≤ 2×) et même sous le seuil SAFE individuel (≤ 1×). Argmax 1018/1020,
+1re bifurcation step 96, Δ converts 1877 exact. Procédure de retrait glouton : non déclenchée.
 
-| Run (S49, vs D0-S49) | KL p50 vs D0-S49 | Rang S46 | Rang S49 | Concordance |
-|---|---|---|---|---|
-| — | — | — | — | — |
+**Interaction (§5.5)** : D\*/somme des one-hot = **1.06×** — les bruits d'arrondi des 12 familles
+composent **quasi-additivement** en KL (+6 % de superadditivité seulement : pas d'amplification
+catastrophique à travers les 35 couches). D\* = 3.76× la pire famille seule (softcap).
 
-### 9.5 VRAM `kv_store`
+**Dédup inter-familles nommée (trace d'investigation)** : le 1er passage du combiné est sorti
+`INVALID` à Δ1877 vs 1878 attendu — la somme des deltas ignorait UNE déduplication de nœud
+inter-familles (`norms×ple` : un convert bf16[1,1,1536] d'opérande %multiply partagé), localisée
+par bisection exhaustive (GEMM7 exact ; non-GEMM5 exact ; les 7 paires norms×GEMM exactes sauf
+`norms+ple` à −1) puis diff de signatures des converts. Consignée dans
+`_interfamily_dedups` du JSON, appliquée indépendamment par les scripts 52 ET 53 (recalcul
+croisé), vérifiée sur S46 ET S49. L'additivité du §5.3 est donc : somme des deltas − dédups
+inter-familles NOMMÉES.
+
+### 9.4 Stabilité S49 — **PASS (ordre des rangs conservé)**
+
+| Run (vs D0 de sa séquence) | KL p50 S46 | KL p50 S49 | Rang S46 | Rang S49 | Δ converts S49 |
+|---|---|---|---|---|---|
+| combiné (12) | 5.057e-05 | 6.270e-05 | 1 | 1 | 1877 exact |
+| softcap | 1.344e-05 | 2.407e-05 | 2 | 2 | 2 exact |
+| norms | 9.375e-06 | 1.116e-05 | 3 | 3 | 1190 exact |
+
+Ordre relatif **identique** sur les deux séquences, magnitudes du même ordre (S49 un peu plus
+bruitée — séquence courte de 48 steps, stabilité « faible » assumée §7). Sanité informative-only
+respectée. **Nuance d'honnêteté sur le bruit compile-à-compile** (complète §9.2) : ~2 % sur un
+grand effet (paire 7-familles) mais jusqu'à **~16 % sur un petit effet** (norms : 8.06e-6 →
+9.38e-6 entre deux compiles) — les écarts de rang < 20 % entre familles voisines du classement
+§9.2 sont non significatifs (norms/mlp notamment).
+
+### 9.5 VRAM `kv_store` — protocole G2.1 respecté
 
 | Mesure | Pic PID (MiB) | Référence fp32 (G2.1) | Delta |
 |---|---|---|---|
-| 1 | — | 8 494 | — |
-| 2 | — | 8 494 | — |
+| 1 | 8 478 | 8 494 | −16 |
+| 2 | 8 476 | 8 494 | −18 |
+
+Conditions : GPU **vierge** (0 MiB avant run), `--no-prealloc`, pic scopé au PID (polling 0.5 s),
+2 mesures cohérentes (±2 MiB). **Delta −17 MiB ≈ exactement la moitié du cache K/V** (≈40 Mo f32
+→ ≈20 Mo bf16 à L_MAX=1024) : la conclusion G2.1 (« pas de gain VRAM significatif à cette
+échelle ») est confirmée quantitativement. Le gain deviendrait matériel aux contextes longs
+(cache ∝ L_MAX : à 128k tokens, ~2,5 Go économisés) — hors périmètre de ce banc.
