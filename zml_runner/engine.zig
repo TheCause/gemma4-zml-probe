@@ -68,20 +68,59 @@ fn fullSlot(i: usize) i64 {
 fn cvt(t: zml.Tensor, dt: zml.DataType) zml.Tensor {
     return t.convert(dt);
 }
+/// Encadre une valeur aux bornes d'une op non-GEMM (G2.3, spec §4) : arrondi d'entrée si la
+/// famille est active. La sortie de l'op est re-upcastée par l'appelant (via .convert(compute)).
+/// fam=null : `return x` — aucune op émise (neutralité).
+fn inPrec(fam: ?zml.DataType, x: zml.Tensor) zml.Tensor {
+    if (fam) |g| return x.convert(g);
+    return x;
+}
 fn rmsScaleD(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     return zml.nn.rmsNorm(x, .d, RMS_EPS).mul(w.broad(x.shape()));
+}
+/// rmsScaleD prec-aware (famille norms, spec §4) : entrée ET poids arrondis, sortie re-upcastée.
+/// `w` = poids BRUT du checkpoint (le cvt(w, compute) d'origine reste la base, ordre préservé).
+/// fam=null : émission STRICTEMENT identique à `rmsScaleD(x, cvt(w, compute))` d'aujourd'hui
+/// (convert same-dtype = `return self`). NB : zml.nn.rmsNorm upcaste en f32 en interne puis
+/// re-converge au dtype d'entrée — bornes arrondies, calcul interne au gré d'XLA (le contrat).
+fn rmsScaleDPrec(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, w: zml.Tensor) zml.Tensor {
+    const xi = inPrec(fam, x);
+    const wi = inPrec(fam, w.convert(compute)); // le cvt() d'origine reste la base
+    return rmsScaleD(xi, wi).convert(compute);
+}
+/// q_norm/k_norm (rmsNorm .hd + mul poids) prec-aware — même contrat que rmsScaleDPrec.
+/// fam=null : identique à `zml.nn.rmsNorm(x, .hd, eps).mul(cvt(w, compute).broad(x.shape()))`.
+fn rmsScaleHdPrec(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, w: zml.Tensor) zml.Tensor {
+    const xi = inPrec(fam, x);
+    const wi = inPrec(fam, w.convert(compute));
+    return zml.nn.rmsNorm(xi, .hd, RMS_EPS).mul(wi.broad(xi.shape())).convert(compute);
 }
 fn rmsScaleP(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     const n = zml.nn.rmsNorm(x, .p, RMS_EPS);
     return n.mul(w.broad(n.shape()));
 }
-fn slidingRope(x: zml.Tensor, pos: zml.Tensor) zml.Tensor {
-    return zml.nn.rope(x, pos, .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = ROPE_THETA_SLIDING } } });
+/// RoPE sliding prec-aware (famille rope). zml.nn.rope NATIF : ses cos/sin internes sont générés
+/// en f32 puis convertis au dtype de x (cf zml nn.zig:rope) → arrondir x arrondit AUSSI cos/sin
+/// (contrat : q/k ET cos/sin), sans patcher l'intérieur de zml. fam=null : identique + no-op convert.
+fn slidingRope(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, pos: zml.Tensor) zml.Tensor {
+    const xi = inPrec(fam, x);
+    return zml.nn.rope(xi, pos, .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = ROPE_THETA_SLIDING } } }).convert(compute);
 }
-fn manualRope(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, half: i64) zml.Tensor {
-    const halves = x.split(.hd, &.{ half, half });
+/// RoPE full prec-aware (famille rope) : q/k ET cos/sin arrondis en entrée, sortie re-upcastée.
+/// fam=null : ops identiques à l'ancien manualRope + no-op convert.
+fn manualRope(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, half: i64) zml.Tensor {
+    const xi = inPrec(fam, x);
+    const cosi = inPrec(fam, cos);
+    const sini = inPrec(fam, sin);
+    const halves = xi.split(.hd, &.{ half, half });
     const rh = zml.Tensor.concatenate(&.{ halves[1].negate(), halves[0] }, .hd);
-    return x.mul(cos.broad(x.shape())).add(rh.mul(sin.broad(x.shape())));
+    return xi.mul(cosi.broad(xi.shape())).add(rh.mul(sini.broad(xi.shape()))).convert(compute);
+}
+/// Softcap 30·tanh(x/30) prec-aware (famille softcap) : entrée arrondie, sortie re-upcastée.
+/// `scale` émet sa constante au dtype du tensor (cf tensor.zig) → le chemin bf16 reste homogène.
+/// fam=null : émission identique à `raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP)`.
+fn softcapPrec(fam: ?zml.DataType, compute: zml.DataType, raw: zml.Tensor) zml.Tensor {
+    return inPrec(fam, raw).scale(INV_SOFTCAP).tanh().scale(SOFTCAP).convert(compute);
 }
 
 /// Contexte (runtime) passé à un point d'extension, pour info/extensibilité. `is_full` n'y est PAS :
@@ -271,7 +310,8 @@ pub const PrecRt = struct {
     mlp: ?zml.DataType = null,
     ple: ?zml.DataType = null,
     head: ?zml.DataType = null,
-    // familles non-GEMM (spec §4, 8-12)
+    // familles non-GEMM (spec §4, 8-12) — norms/softmax/rope/softcap câblées (Task 2) ;
+    // kv_store reste à câbler (Task 3) : le champ existe mais n'a encore AUCUN effet.
     norms: ?zml.DataType = null,
     softmax: ?zml.DataType = null,
     rope: ?zml.DataType = null,
@@ -319,11 +359,11 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
     const hd: i64 = if (full) HD_FULL else HD_SLIDING;
     const half: i64 = @divExact(hd, 2);
 
-    const h0 = rmsScaleD(hidden, cvt(layer.input_layernorm, prec.compute));
+    const h0 = rmsScaleDPrec(prec.norms, prec.compute, hidden, layer.input_layernorm);
 
     var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
-    q = zml.nn.rmsNorm(q, .hd, RMS_EPS).mul(cvt(layer.q_norm, prec.compute).broad(q.shape()));
-    q = if (full) manualRope(q, cos, sin, half) else slidingRope(q, pos_s);
+    q = rmsScaleHdPrec(prec.norms, prec.compute, q, layer.q_norm);
+    q = if (full) manualRope(prec.rope, prec.compute, q, cos, sin, half) else slidingRope(prec.rope, prec.compute, q, pos_s);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
 
     const so = zml.Tensor.ScatterOpts{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override };
@@ -339,12 +379,13 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
         }
     } else {
         var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
-        k = zml.nn.rmsNorm(k, .hd, RMS_EPS).mul(cvt(layer.k_norm, prec.compute).broad(k.shape()));
-        k = if (full) manualRope(k, cos, sin, half) else slidingRope(k, pos_s);
+        k = rmsScaleHdPrec(prec.norms, prec.compute, k, layer.k_norm);
+        k = if (full) manualRope(prec.rope, prec.compute, k, cos, sin, half) else slidingRope(prec.rope, prec.compute, k, pos_s);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
         var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
-        v = zml.nn.rmsNorm(v, .hd, RMS_EPS);
+        // v_norm n'a PAS de poids : entrée encadrée seulement, sortie re-upcastée (famille norms).
+        v = zml.nn.rmsNorm(inPrec(prec.norms, v), .hd, RMS_EPS).convert(prec.compute);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
         // comptime-mort pour une brique sans cette méthode (ex: struct{}) → V inchangé → bit-exact decode4.
         if (@hasDecl(@TypeOf(brick), "post_v_norm")) {
@@ -375,22 +416,22 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
     const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
     var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
     scores = scores.add(mask.broad(scores.shape()));
-    const probs = scores.softmax(.k);
+    const probs = inPrec(prec.softmax, scores).softmax(.k).convert(prec.compute);
 
     const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
     const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
     const attn_m = ctx_attn.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
     const attn_out = dotPrec(prec.o_proj, prec.compute, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
 
-    const h1 = hidden.add(rmsScaleD(attn_out, cvt(layer.post_attention_layernorm, prec.compute)));
-    const xff = rmsScaleD(h1, cvt(layer.pre_feedforward_layernorm, prec.compute));
+    const h1 = hidden.add(rmsScaleDPrec(prec.norms, prec.compute, attn_out, layer.post_attention_layernorm));
+    const xff = rmsScaleDPrec(prec.norms, prec.compute, h1, layer.pre_feedforward_layernorm);
     const mlp_out = dotPrec(prec.mlp, prec.compute, dotPrec(prec.mlp, prec.compute, xff, layer.gate_proj, .d).gelu().mul(dotPrec(prec.mlp, prec.compute, xff, layer.up_proj, .d)), layer.down_proj, .f);
-    const h2 = h1.add(rmsScaleD(mlp_out, cvt(layer.post_feedforward_layernorm, prec.compute)));
+    const h2 = h1.add(rmsScaleDPrec(prec.norms, prec.compute, mlp_out, layer.post_feedforward_layernorm));
 
     var g = dotPrec(prec.ple, prec.compute, h2, layer.per_layer_input_gate, .d).gelu();
     g = g.mul(ple_i);
     g = dotPrec(prec.ple, prec.compute, g, layer.per_layer_projection, .p);
-    const h3 = h2.add(rmsScaleD(g, cvt(layer.post_per_layer_input_norm, prec.compute)));
+    const h3 = h2.add(rmsScaleDPrec(prec.norms, prec.compute, g, layer.post_per_layer_input_norm));
 
     return h3.mul(cvt(layer.layer_scalar, prec.compute).asScalar());
 }
@@ -488,9 +529,9 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
-            const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+            const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
             const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-            const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+            const logits = softcapPrec(prec.softcap, prec.compute, raw);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
 
@@ -528,9 +569,9 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             }
 
             const out_first = if (last) blk: {
-                const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+                const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
                 const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-                break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+                break :blk softcapPrec(prec.softcap, prec.compute, raw);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -570,9 +611,9 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
 
-            const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+            const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
             const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-            const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+            const logits = softcapPrec(prec.softcap, prec.compute, raw);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
 
@@ -608,9 +649,9 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const out_first = if (last) blk: {
-                const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+                const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
                 const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-                break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
+                break :blk softcapPrec(prec.softcap, prec.compute, raw);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
