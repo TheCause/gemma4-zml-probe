@@ -26,13 +26,20 @@
 
 ### Planning courant
 
-- [H] **PR `generation-longue` → `main`** — tout est PASS et poussé ; solde le chantier. *(en cours)*
+- [x] **PR `generation-longue` → `main`** — mergée le 9 juil (PR #3, `c4d483b`).
+- [x] **G2.3 — cartographie de sensibilité bf16 par-op** — **LES 3 GATES PASS le 10 juil**
+  (branche `g2.3-op-sensitivity`, tags `gate/G2.3.*`) : moteur `PrecRt` runtime (12 familles),
+  sweep one-hot **12/12 SAFE** (classement softcap > norms > mlp > … > softmax), config combinée
+  **12 familles SAFE (KL 0.486× l'enveloppe)**, interaction quasi-additive (1.06×), stabilité S49,
+  VRAM kv_store −17 MiB (= ½ cache). Oracle anti-câblage-croisé 12/12 exact (2 découvertes :
+  déduplication de nœuds au traçage ZML ; dédup inter-familles norms×ple nommée). Résultats :
+  `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
 - [M] **Runtime 100 % autonome** — tokenizer intégré + early-stop EOS (aujourd'hui le banc est
   validé CONTRE l'oracle HF ; limite assumée).
-- [B] **G2.3 bonus** — cartographie de sensibilité par-op (quelles ops tolèrent bf16) → alimente
-  TurboQuant / alambic.
+- [M] **Transfert G2.3 → TurboQuant / alambic** — exploiter la carto (kv_store bf16 quasi-gratuit ;
+  softcap = op la plus sensible ; config 12-familles comme régime de prod candidat).
 
 ### Garde-fous courants
 
