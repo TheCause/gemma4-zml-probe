@@ -470,12 +470,13 @@ const EmbedGather = struct {
     eptl_base_off: u64, // idem embed_tokens_per_layer
     emb_row_bytes: usize, // = D * sizeOf(bf16)
     eptl_row_bytes: usize, // = LF * sizeOf(bf16)
-    // Scratch typés []u16 (bits bruts bf16), PAS []u8 : std.mem.eql exige la même alignement
-    // des deux côtés, et un []u8 alloué par le GPA n'est pas garanti aligné à 2 — l'allouer déjà
-    // en []u16 lève le problème à la racine (élément naturellement aligné) tout en restant
-    // directement comparable en bits aux lectures fixture (elles aussi []u16, cf readFixtureAlloc
-    // (u16, .bf16, ...)). readPositionalAll reçoit `std.mem.sliceAsBytes(...)` (u16→u8 : toujours
-    // valide, alignement plus faible).
+    num_rows: i64, // = vocab, DÉRIVÉ du header (byteSize/row_bytes) — borne du bounds-check de gather
+    // Scratch typés []u16 (bits bruts bf16), PAS []u8 : reformer un []u16 depuis des octets bruts
+    // exige un pointeur aligné à 2, ce qu'un []u8 alloué par le GPA ne garantit pas — l'allouer
+    // directement en []u16 lève le problème à la racine (élément naturellement aligné) tout en
+    // restant directement comparable en bits aux lectures fixture (elles aussi []u16, cf
+    // readFixtureAlloc(u16, .bf16, ...)). readPositionalAll reçoit `std.mem.sliceAsBytes(...)`
+    // (u16→u8 : toujours valide, alignement plus faible).
     emb_scratch: []u16, // {D} bf16 brut — réutilisé à chaque step
     eptl_scratch: []u16, // {LF} bf16 brut — idem
 
@@ -499,6 +500,24 @@ const EmbedGather = struct {
         const emb_row_bytes: usize = @intCast(D * @as(i64, @intCast(emb_dtype.sizeOf())));
         const eptl_row_bytes: usize = @intCast(LF * @as(i64, @intCast(eptl_dtype.sizeOf())));
 
+        // Géométrie des tables VALIDÉE contre le header : byteSize doit être un multiple exact de
+        // row_bytes (sinon D/LF hardcodés ≠ shape réelle du checkpoint), et les deux comptes de
+        // lignes doivent coïncider (même vocab). Garde-fou de revue : sans cette dérivation, un
+        // checkpoint à la géométrie inattendue produirait des lignes décalées silencieusement.
+        const emb_bytes: u64 = emb_t.byteSize();
+        const eptl_bytes: u64 = eptl_t.byteSize();
+        if (emb_bytes % @as(u64, emb_row_bytes) != 0 or eptl_bytes % @as(u64, eptl_row_bytes) != 0) {
+            log.err("géométrie table invalide : emb {d} % {d} = {d}, eptl {d} % {d} = {d} (D/LF hardcodés ≠ checkpoint ?)", .{ emb_bytes, emb_row_bytes, emb_bytes % @as(u64, emb_row_bytes), eptl_bytes, eptl_row_bytes, eptl_bytes % @as(u64, eptl_row_bytes) });
+            return error.BadTableGeometry;
+        }
+        const emb_rows: u64 = emb_bytes / @as(u64, emb_row_bytes);
+        const eptl_rows: u64 = eptl_bytes / @as(u64, eptl_row_bytes);
+        if (emb_rows != eptl_rows) {
+            log.err("géométrie table invalide : emb {d} lignes ≠ eptl {d} lignes (vocab incohérent)", .{ emb_rows, eptl_rows });
+            return error.BadTableGeometry;
+        }
+        log.info("EmbedGather : {d} lignes/table (vocab), emb {d} o/ligne, eptl {d} o/ligne", .{ emb_rows, emb_row_bytes, eptl_row_bytes });
+
         var file = try std.Io.Dir.cwd().openFile(io, ckpt_path, .{ .mode = .read_only });
         errdefer file.close(io);
         const emb_scratch = try allocator.alloc(u16, emb_row_bytes / 2);
@@ -512,6 +531,7 @@ const EmbedGather = struct {
             .eptl_base_off = eptl_t.offset,
             .emb_row_bytes = emb_row_bytes,
             .eptl_row_bytes = eptl_row_bytes,
+            .num_rows = @intCast(emb_rows),
             .emb_scratch = emb_scratch,
             .eptl_scratch = eptl_scratch,
         };
@@ -527,6 +547,15 @@ const EmbedGather = struct {
     // tok*row_bytes — cf gchunk_auto.zig:220-223) — RAW, aucun scaling. Résultat dans
     // self.emb_scratch/self.eptl_scratch (réutilisés, PAS de nouvelle alloc).
     fn gather(self: *EmbedGather, io: std.Io, tok: i64) !void {
+        // Bounds-check EXPLICITE (revue) : tok ≥ vocab tomberait dans le tenseur SUIVANT du
+        // checkpoint — la lecture réussirait (pas de ShortRead) et une ligne plausible mais
+        // FAUSSE partirait dans le forward = divergence silencieuse, exactement la classe
+        // d'erreur que la méthodo de ce repo existe pour empêcher. tok < 0 ne panique qu'en
+        // ReleaseSafe (mode de build non épinglé) → check explicite obligatoire.
+        if (tok < 0 or tok >= self.num_rows) {
+            log.err("gather: token hors table — tok={d}, bornes [0, {d})", .{ tok, self.num_rows });
+            return error.TokenOutOfRange;
+        }
         const emb_off: u64 = self.emb_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.emb_row_bytes));
         const eptl_off: u64 = self.eptl_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.eptl_row_bytes));
         const got_emb = try self.file.readPositionalAll(io, std.mem.sliceAsBytes(self.emb_scratch), emb_off);
@@ -569,6 +598,10 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u
     defer allocator.free(embptls_fx);
 
     const n_decode = fed.len;
+    if (n_decode == 0) {
+        log.err("SELFTEST GATHER : fixture vide (fed.len=0) — un PASS à 0 step serait vacueux", .{});
+        return error.EmptyFixture;
+    }
     const d: usize = @intCast(D);
     const lf: usize = @intCast(LF);
     if (embeds_fx.len != n_decode * d) {
