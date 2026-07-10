@@ -2,7 +2,7 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## État 9 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
+## État 9-10 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
 
 **Le portage est complet et la claim de fidélité est solide aux deux régimes de précision.**
 
@@ -45,7 +45,9 @@
 
 - **Piège workspace ZML** : patch local 1 ligne `@setEvalBranchQuota(100_000)` dans `pjrt.zig`
   (`structSize`, commenté `local patch rqz`) — **à réappliquer si le workspace ZML de la 3090 est
-  resynchronisé upstream**, sinon le build des runners à cfg comptime `.prec` casse.
+  resynchronisé upstream**. Requis dès qu'un `@typeName` de type (modèle, runner) devient assez long
+  pour dépasser le quota comptime 1000 (`indexOf` sur `@typeName`) — un piège général, pas propre à
+  une famille de runners donnée.
 - Critère « 1020/1020 » exigible en fp32 seulement — en bf16, HF lui-même ne le tient pas (G2.0) ;
   le critère bf16 est l'enveloppe chiffrée de `docs/G2_BF16_FIDELITY.md` §7.1.
 - Leçons méthodo toujours actives : argmax greedy trop robuste (comparer les LOGITS) ; un audit

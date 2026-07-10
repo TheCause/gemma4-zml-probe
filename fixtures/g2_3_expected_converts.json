@@ -24,7 +24,7 @@
       "Famille norms, chaîne poids : le code émet inPrec(fam, w.convert(compute)) — le w.convert(f32) baseline RESTE émis quand la famille est active (bf16→f32→bf16 aux bornes) ⇒ delta poids = +1/site (poids tous distincts : pas de dédup).",
       "ADDITIVITÉ SOUS CSE : l'attendu d'un run multi-familles = SOMME des deltas des familles actives, VALIDE tant qu'aucun nœud n'est partagé ENTRE familles (aucun partage inter-familles identifié à la dérivation ; vérifié empiriquement sur le run 7-familles GEMM : 382 = somme exacte). Si un mismatch multi-familles apparaît, le script 53 dégrade en differs_from_d0 et le consigne."
     ],
-    "uncertain_resolution": "Les 3 uncertain (norms/softmax/rope) sont sortis sur leur prédiction PRINCIPALE au one-hot — oracle validé 11/11 exact (10 juil 2026). Alternatives retirées."
+    "uncertain_resolution": "Les 3 uncertain (norms/softmax/rope) sont sortis sur leur prédiction PRINCIPALE au one-hot — oracle validé 11/11 exact au sweep par défaut, 12/12 avec kv_store (run séparé, fixture variante) (10 juil 2026). Alternatives retirées."
   },
   "qkv_proj": {
     "status": "observed",

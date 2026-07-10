@@ -99,7 +99,9 @@ La claim « == HF » n'est **pas un artefact fp32**. Protocole complet : [`G2_BF
   quantization du cache V branchée comme brique dans le moteur. Résultats :
   [`TURBOQUANT_ZML_RESULTS.md`](TURBOQUANT_ZML_RESULTS.md).
 - **PrecCfg** : configuration de précision comptime par famille d'ops (gemm/normes/softmax/...) —
-  l'outil qui a permis G2.2, réutilisable pour cartographier la sensibilité par-op (G2.3, backlog).
+  l'outil qui a permis G2.2, réutilisé pour cartographier la sensibilité par-op — **G2.3, PASS
+  10 juil 2026** (cf [`G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md)) : 12/12 familles SAFE,
+  config combinée 12-familles SAFE à 0.486× l'enveloppe, kv_store bf16 quasi-gratuit.
 
 ---
 
@@ -193,7 +195,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `gemma4_gchunk.zig` / `_ring` / `_auto` / `_vacuity` | L1a chunké / L1b ring-buffer 512 / L2 autonome / contre-test non-vacuité |
 | `gemma4_vacuity_logits.zig` | Contre-test non-vacuité par **logits** |
 | `gemma4_gen_long_gpu.zig` | **Génération longue GPU fp32** (mono-graphe CUDA, 109 tok/s) |
-| `gemma4_gen_long_gpu_bf16.zig` | Variante **gemm-bf16** (G2.2) avec dump logits |
+| `gemma4_g23_sweep.zig` | Sweep bf16 par familles (G2.2/G2.3), moteur `PrecRt` runtime — CLI `<model> <fixture> <logits_out> <familles> [max_steps] [--no-prealloc]`, familles = champs PrecRt ou `none` ; config G2.2 = `qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head` |
 | `gemma4_engine_e1.zig` / `_e2.zig` | Socle modulaire : non-régression HLO / brique TurboQuant |
 | `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire |
 
@@ -309,7 +311,9 @@ python scripts/48_detokenize.py gen_custom.safetensors
 python scripts/50_bf16_envelope_oracle.py
 
 # Run ZML gemm-bf16 (dump logits) puis analyse vs l'enveloppe
-./bazel.sh run //examples/rqz:gemma4_gen_long_gpu_bf16 --@zml//platforms:cuda=true -- ...
+./bazel.sh run //examples/rqz:gemma4_g23_sweep --@zml//platforms:cuda=true -- \
+  weights/model.safetensors gen_long.safetensors g2_2_logits_d.bin \
+  qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head
 python scripts/51_g2_2_analyze.py
 ```
 
@@ -408,7 +412,9 @@ d'elle-même.
 1. Batching / flash-attention (perf GPU au-delà du mono-séquence).
 2. L3 in-graph (boucle de décode dans le graphe, réduire les 7 syncs host/step du CPU).
 3. Runtime 100 % autonome (tokenizer intégré + early-stop EOS).
-4. G2.3 bonus : cartographie de sensibilité bf16 par-op (valeur pour TurboQuant / alambic).
+4. ~~G2.3 bonus : cartographie de sensibilité bf16 par-op~~ — **PASS 10 juil 2026**
+   (cf [`G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md)) : 12/12 familles SAFE, config combinée
+   12-familles SAFE à 0.486× l'enveloppe, kv_store bf16 quasi-gratuit.
 
 ---
 

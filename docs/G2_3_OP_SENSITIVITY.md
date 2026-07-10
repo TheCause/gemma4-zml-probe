@@ -320,6 +320,11 @@ décroissant (mismatches et bifurcation = vs A) :
 | 11 | `o_proj` | 9.282e-07 | 0.0089× | 0.090× | 0 | — | 35 | **SAFE** |
 | 12 | `softmax` | 3.786e-07 | 0.0028× | 0.047× | 0 | — | 140 | **SAFE** |
 
+> Valeurs de la **PREMIÈRE compile** de chaque famille ; les re-runs upsertés du manifest diffèrent
+> dans la marge compile-à-compile (norms 9.375e-6, ple 1.331e-6 — cf §9.4) ; **le manifest fait
+> foi**. La valeur run-1 du combiné 7-familles (KL p50 vs D0 = 2.6230e-5, base de la quantification
+> du bruit §9.2 ci-dessous) n'est conservée **QUE ici** (l'upsert remplace les métriques).
+
 **Lectures** (diagnostiques, scopées S46) :
 - **`softcap` est la famille la plus sensible** : 1 seul site, mais c'est la dernière op avant les
   logits — l'arrondi les frappe sans amortissement. À l'inverse, `softmax` (35 sites) est la moins
@@ -389,3 +394,7 @@ Conditions : GPU **vierge** (0 MiB avant run), `--no-prealloc`, pic scopé au PI
 → ≈20 Mo bf16 à L_MAX=1024) : la conclusion G2.1 (« pas de gain VRAM significatif à cette
 échelle ») est confirmée quantitativement. Le gain deviendrait matériel aux contextes longs
 (cache ∝ L_MAX : à 128k tokens, ~2,5 Go économisés) — hors périmètre de ce banc.
+
+> **Amendement** : ces mesures sont consignées ici (doc versionné) et non au manifest — écart
+> assumé au §8.4 qui pré-enregistrait le manifest comme lieu ; les conditions complètes figurent
+> ci-dessus.
