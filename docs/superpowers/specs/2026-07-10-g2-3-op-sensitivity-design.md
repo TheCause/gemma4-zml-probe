@@ -44,6 +44,10 @@ Refactor :
   runtime suffit à émettre (ou non) les converts — le graphe compilé diffère par run, le binaire
   est unique.
 - `dotPrec` prend le champ de **sa** famille (`prec.qk_scores`, `prec.mlp`, …) au lieu du global.
+- **Familles non-GEMM (8–12)** : elles ne passent pas par `dotPrec` — le refactor inclut des
+  wrappers convert-in/convert-out à leurs sites (`rmsNorm`, `softmax`, application rope, softcap),
+  plus le changement de dtype des buffers de cache pour `kv_store` (§4). Le plan doit budgéter ces
+  wrappers, pas seulement le chemin GEMM.
 - `EngineCfg.prec` (comptime) est **retiré**. Le runner G2.2 (`gemma4_gen_long_gpu_bf16`) est
   réexprimé comme un cas du nouveau mécanisme (toutes les familles GEMM à bf16) — non-régression §6.1.
 - Bénéfice collatéral : la cfg de précision sort du type → `@typeName` raccourcit, on cesse
@@ -90,6 +94,16 @@ change une **empreinte mémoire**, pas seulement le compute → outcome secondai
 Les comptes de converts attendus par famille sont **dérivés et committés en G2.3.0** (avant le
 sweep) — ils servent d'oracle au check anti-câblage-croisé (§5.3). YOCO impose la minutie : les
 readers (15–34) n'ont pas de sites K/V.
+
+**Questions ouvertes tranchées en G2.3.0** (avec la dérivation des comptes) : pour `norms`,
+l'arrondi porte-t-il aussi sur le **poids** de la norme (ou seulement l'entrée) ? Pour `rope`,
+les tables cos/sin sont-elles arrondies ? La réponse choisie est pré-enregistrée dans
+`G2_3_OP_SENSITIVITY.md` avant le sweep.
+
+**Note de préséance** : cette spec **supersede le croquis G2.3 de `G2_BF16_FIDELITY.md` §3**, qui
+balayait dans le sens inverse (tout-bf16 moins une famille). Le sens one-hot-bf16 sur base f32 est
+justifié par la double référence D0 (§5.1) : chaque famille est mesurée isolément contre une
+baseline propre.
 
 ## 5. Protocole de mesure (pré-enregistré)
 
@@ -179,7 +193,9 @@ Livrable : classement committé (manifest + doc), toutes familles avec verdict
 
 ### 6.3 G2.3.2 — Config combinée
 
-- Config initiale = toutes les familles `SAFE`. Critère PASS : **≤ 2× l'enveloppe B** (identique G2.2).
+- Config initiale = toutes les familles `SAFE`. Critère PASS : **≤ 2× l'enveloppe B appliqué aux
+  métriques de verdict du §5.2** (KL p50 vs A, départage max_abs p50) — et non la table
+  multi-percentile complète de G2.2 §7.1, qui reste publiée à titre informatif.
 - **Procédure d'échec pré-enregistrée** (durcissement C1-i7) : retrait glouton de la famille au
   pire `KL p50 vs D0`, **max 3 essais**, **chaque essai publié** dans le manifest. Si 3 échecs →
   verdict publié : « pas de config combinée SAFE au critère ≤ 2× » — null result assumé.
