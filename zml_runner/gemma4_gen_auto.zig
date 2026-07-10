@@ -909,6 +909,11 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("Boucle autonome : {d} steps de prefill, puis génération (limite {d}{s})", .{ ids.items.len, limit, if (oracle_ids != null) " = fed.len, oracle" else " = max_tokens" });
 
+    // Raison d'arrêt (A3) : capturée DANS la boucle (pas reconstruite après coup) — le strip EOT
+    // du détok et le verdict A3 en dépendent. `.oracle` = sortie par compte fed.len (mode --oracle).
+    const StopReason = enum { oracle, eot, max_tokens, l_max };
+    var stop_reason: StopReason = .oracle;
+
     var fed: i64 = @intCast(ids.items[0]);
     var step: usize = 0;
     const t0: std.Io.Timestamp = .now(io, .awake);
@@ -962,11 +967,19 @@ pub fn main(init: std.process.Init) !void {
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.append(allocator, tok);
         if (oracle_ids) |fx| {
-            if (generated.items.len >= fx.len) break;
-        } else if (tok == @as(i64, @intCast(eot_id)) or generated.items.len >= max_tokens) {
-            break;
+            if (generated.items.len >= fx.len) break; // stop_reason reste .oracle
+        } else {
+            if (tok == @as(i64, @intCast(eot_id))) {
+                stop_reason = .eot;
+                break;
+            }
+            if (generated.items.len >= max_tokens) {
+                stop_reason = .max_tokens;
+                break;
+            }
         }
         if (step + 1 >= @as(usize, @intCast(L_MAX))) {
+            stop_reason = .l_max;
             log.warn("garde L_MAX atteinte (step={d}) — arrêt forcé", .{step});
             break;
         }
@@ -1013,6 +1026,40 @@ pub fn main(init: std.process.Init) !void {
             return error.A1Mismatch;
         }
     } else {
-        log.info("A1 (mode libre, pas d'oracle) : {d} tokens générés (EOT_ID={d}, max_tokens={d})", .{ generated.items.len, eot_id, max_tokens });
+        // === Task 7 (gate A3) : mode libre — ids générés → décodeur ZML → texte stdout (spec §2) ===
+        log.info("mode libre : {d} tokens générés (EOT_ID={d}, max_tokens={d})", .{ generated.items.len, eot_id, max_tokens });
+        log.info("generated = {any}", .{generated.items});
+        switch (stop_reason) {
+            .eot => log.info("arrêt : early-stop EOT", .{}),
+            .max_tokens => log.info("arrêt : max-tokens ({d})", .{max_tokens}),
+            .l_max => log.info("arrêt : garde L_MAX", .{}),
+            .oracle => unreachable, // .oracle n'est atteignable qu'avec --oracle (branche du dessus)
+        }
+
+        // Détok : strip du EOT FINAL si l'arrêt vient de l'EOS (le texte de la réponse ne contient
+        // pas le token de fin de tour) ; sinon tout `generated` est du texte.
+        const n_text = if (stop_reason == .eot) generated.items.len - 1 else generated.items.len;
+        // Conversion i64→u32 EXPLICITE à la frontière du décodeur (piège de revue : pas de
+        // reinterprétation de slice — boucle élément par élément, @intCast borné par le vocab).
+        const ids_u32 = try allocator.alloc(u32, n_text);
+        defer allocator.free(ids_u32);
+        for (generated.items[0..n_text], 0..) |t, k| ids_u32[k] = @intCast(t);
+        // Décodeur FRAIS pour ce décodage final (piège de revue : l'automate iree est à état —
+        // ne pas réutiliser un décodeur partiellement consommé ; NB reset() retourne !void).
+        var decoder = try tokenizer.decoder();
+        defer decoder.deinit();
+        var text = try decoder.decodeAlloc(allocator, ids_u32);
+        defer text.deinit(allocator);
+
+        // Texte final sur STDOUT (les logs vont sur stderr) — dernier maillon du pipeline spec §2.
+        var stdout_w = std.Io.File.stdout().writer(io, &.{});
+        try stdout_w.interface.print("réponse : \"{s}\"\n", .{text.items});
+        try stdout_w.interface.flush();
+
+        // Verdict A3 (le critère numérique N == index_EOT_expected + 2 est vérifié côté contrôleur
+        // contre la fixture ; ici on rend N et la raison d'arrêt VISIBLES).
+        if (stop_reason == .eot) {
+            log.info("A3 : stop early-EOT après {d} tokens (dernier = EOT_ID={d})", .{ generated.items.len, eot_id });
+        }
     }
 }
