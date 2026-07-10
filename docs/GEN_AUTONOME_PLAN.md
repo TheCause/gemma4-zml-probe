@@ -187,10 +187,14 @@ const LF: i64 = 8960;
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
 const PackedLong = engine.Packed(true);
 
-// Chat template Gemma — VÉRITÉ = repr() du step 1.1, recopié ici à l'octet près.
-// (la conformité est le gate A0, pas une hypothèse)
+// Chat template Gemma — VÉRITÉ = repr() du step 1.1 (mesuré 10 juil) :
+//   '<bos><|turn>user\nPROMPT<turn|>\n<|turn>model\n'
+// ⚠ Les tokens de tour sont <|turn>/(id 105) et <turn|>/(id 106) — PAS <start_of_turn>/<end_of_turn>.
+// BOS (id 2) : PRÉFIXÉ en id (l'encoder ZML n'ajoute AUCUN token spécial, Task 0) — le rendu
+// texte ci-dessous commence donc APRÈS <bos>. Ids de réf complets (prompt capital of France) :
+//   [2, 105, 2364, 107, …, 106, 107, 105, 4368, 107]
 fn renderChatTemplate(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "<start_of_turn>user\n{s}<end_of_turn>\n<start_of_turn>model\n", .{prompt});
+    return std.fmt.allocPrint(allocator, "<|turn>user\n{s}<turn|>\n<|turn>model\n", .{prompt});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -434,8 +438,9 @@ git tag gate/gen-auto-a1-pass
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "<prompt exact du step 1.4>" --oracle /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
-Expected: `A2 PASS — N/N argmax-match` (N ≥ 1000, ~10 s de génération + prefill). Reporter
-le tok/s (référence : 109 tok/s en replay).
+Expected: `A2 PASS — N/N argmax-match` (N = 999 : fixture générée au plafond structurel
+exact, seq_len 25 + 999 = L_MAX — mieux que le « ≥ 1000 » nominal ; ~10 s de génération +
+prefill). Reporter le tok/s (référence : 109 tok/s en replay).
 
 - [ ] **Step 6.2 : Commit (doc statut) + tag `gate/gen-auto-a2-pass`**
 

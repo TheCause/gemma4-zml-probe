@@ -60,16 +60,20 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
    parse** (format SentencePiece/Gemma) — c'est le premier step du plan, avant tout
    le reste.
 2. **Chat template** : reproduit en Zig (il ne vit PAS dans `tokenizer.json`) —
-   format Gemma `<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n`,
-   à vérifier caractère près contre l'oracle 49 (**la conformité est un gate, pas une
-   hypothèse** — gate A0).
+   **mesuré (Task 1, repr() HF)** : `<bos><|turn>user\n{prompt}<turn|>\n<|turn>model\n` —
+   les tokens de tour de CE tokenizer sont `<|turn>` (105) / `<turn|>` (106), pas les
+   `<start_of_turn>`/`<end_of_turn>` classiques de la famille Gemma. Conformité vérifiée
+   caractère près contre l'oracle 49 (**gate A0**).
 3. **Gather embeds host** : lecture streaming depuis `model.safetensors` (le pattern qui a
    résolu l'OOM du L2 CPU, repris de `gemma4_gchunk_auto`) : par token, lignes
    `embed_tokens[id]` et `embed_tokens_per_layer[id]` injectées **BRUTES (bf16, sans
    scaling)** — les scalings ScaledWordEmbedding ×√1536 et ×16 sont DÉJÀ dans le graphe
    (`EMBED_SCALE` engine.zig:644, `SQRT_PLE` engine.zig:535 ; doc `forwardStep` : « AVANT
    scale √1536, brut »). Les appliquer host serait un DOUBLE scaling → divergence garantie.
-4. **EOS** : id de `<end_of_turn>` extrait du tokenizer au démarrage (pas hardcodé).
+4. **EOS** : id du token de fin de tour extrait du tokenizer au démarrage (pas hardcodé).
+   **Mesuré (Task 1)** : `<turn|>` = **106**. ⚠ Piège consigné : `convert_tokens_to_ids("<end_of_turn>")`
+   retourne silencieusement `<unk>` (3) — ce token n'existe pas dans ce vocab ; extraire
+   l'EOT du champ `eot_token` de la special_tokens_map, jamais par lookup de chaîne supposée.
    Early-stop + garde `--max-tokens` (défaut 200) + garde
    `len(prompt_ids) + max_tokens ≤ L_MAX` (sinon erreur claire au lancement).
 5. **Détokenisation** : decoder ZML sur les ids générés ; round-trip sanity (re-encode du
