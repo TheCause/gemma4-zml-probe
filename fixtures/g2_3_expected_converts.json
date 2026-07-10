@@ -23,7 +23,8 @@
       "dot exige lhs.dtype == rhs.dtype et sort AU DTYPE des opérandes (tensor.zig dotGeneral) ⇒ le convert-out d'une famille GEMM active est toujours une vraie op.",
       "Famille norms, chaîne poids : le code émet inPrec(fam, w.convert(compute)) — le w.convert(f32) baseline RESTE émis quand la famille est active (bf16→f32→bf16 aux bornes) ⇒ delta poids = +1/site (poids tous distincts : pas de dédup).",
       "ADDITIVITÉ SOUS CSE : l'attendu d'un run multi-familles = SOMME des deltas des familles actives, VALIDE tant qu'aucun nœud n'est partagé ENTRE familles (aucun partage inter-familles identifié à la dérivation ; vérifié empiriquement sur le run 7-familles GEMM : 382 = somme exacte). Si un mismatch multi-familles apparaît, le script 53 dégrade en differs_from_d0 et le consigne."
-    ]
+    ],
+    "uncertain_resolution": "Les 3 uncertain (norms/softmax/rope) sont sortis sur leur prédiction PRINCIPALE au one-hot — oracle validé 11/11 exact (10 juil 2026). Alternatives retirées."
   },
   "qkv_proj": {
     "status": "observed",
@@ -35,19 +36,22 @@
     "status": "derived_with_cse_rule",
     "sites": "35 dots (qs·cache_k) → converts : 35 qs-in (distincts par couche) + 15 cache_k-in (producers 0-12 distincts = 13 ; producer 13 ≡ 16 sliding readers = 1 ; producer 14 ≡ 4 full readers = 1) + 35 outs",
     "delta_converts_vs_d0": 85,
-    "derivation": "by_transition : +50 ?→bf16 (35 qs + 15 cache_k — les choose1d des readers ont les MÊMES opérandes que ceux des writers 13/14 : cache final + même slot → converts dédupliqués) + 35 ?→f32 (outs). Cohérent avec le run 7-familles observé (Δ382 = somme exacte) ; pas encore observé isolément"
+    "derivation": "by_transition : +50 ?→bf16 (35 qs + 15 cache_k — les choose1d des readers ont les MÊMES opérandes que ceux des writers 13/14 : cache final + même slot → converts dédupliqués) + 35 ?→f32 (outs). Cohérent avec le run 7-familles observé (Δ382 = somme exacte) ; pas encore observé isolément",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "pv_ctx": {
     "status": "derived_with_cse_rule",
     "sites": "35 dots (probs·cache_v) → converts : 35 ps-in + 15 cache_v-in (même structure de dédup que qk_scores) + 35 outs",
     "delta_converts_vs_d0": 85,
-    "derivation": "by_transition : +50 ?→bf16 + 35 ?→f32. Cohérent avec le run 7-familles observé ; pas encore observé isolément"
+    "derivation": "by_transition : +50 ?→bf16 + 35 ?→f32. Cohérent avec le run 7-familles observé ; pas encore observé isolément",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "o_proj": {
     "status": "derived_with_cse_rule",
     "sites": "35 (dot attn_m·o_proj) — attn_m distincts par couche, aucun partage",
     "delta_converts_vs_d0": 35,
-    "derivation": "by_transition : +35 ?→bf16 (attn_m-in) ; ?→f32 net 0 (−35 poids +35 outs). Cohérent avec le run 7-familles"
+    "derivation": "by_transition : +35 ?→bf16 (attn_m-in) ; ?→f32 net 0 (−35 poids +35 outs). Cohérent avec le run 7-familles",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "mlp": {
     "status": "observed",
@@ -59,43 +63,43 @@
     "status": "derived_with_cse_rule",
     "sites": "71 = 2×35 (per_layer_input_gate in = h2, per_layer_projection in = g — tous distincts) + 1 frontend (embeds, perLayerInputs)",
     "delta_converts_vs_d0": 71,
-    "derivation": "by_transition : +71 ?→bf16 ; ?→f32 net 0 (−71 poids +71 outs). Aucun partage (h2/g/embeds distincts). Cohérent avec le run 7-familles. NB : rmsScaleP(per_layer_projection_norm) au frontend N'EST PAS dans la famille ple ni norms (limitation documentée, doc §3)"
+    "derivation": "by_transition : +71 ?→bf16 ; ?→f32 net 0 (−71 poids +71 outs). Aucun partage (h2/g/embeds distincts). Cohérent avec le run 7-familles. NB : rmsScaleP(per_layer_projection_norm) au frontend N'EST PAS dans la famille ple ni norms (limitation documentée, doc §3)",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "head": {
     "status": "derived_with_cse_rule",
     "sites": "1 (dot last_hidden·embed_tokens tied, graphe .forward — seul graphe compilé par le sweep runner)",
     "delta_converts_vs_d0": 1,
-    "derivation": "by_transition : +1 ?→bf16 (last_hidden-in) ; ?→f32 net 0 (−1 poids +1 out). Cohérent avec le run 7-familles"
+    "derivation": "by_transition : +1 ?→bf16 (last_hidden-in) ; ?→f32 net 0 (−1 poids +1 out). Cohérent avec le run 7-familles",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "norms": {
     "status": "derived_with_cse_rule",
     "sites": "241 = 176 rmsScaleDPrec (5 layernorms×35 + final_norm) + 50 rmsScaleHdPrec (q_norm 35 + k_norm 15 producers) + 15 v_norm sans poids (producers) — entrées ET poids TOUS distincts : aucune dédup attendue",
     "delta_converts_vs_d0": 1190,
     "derivation": "rmsScale{D,Hd}Prec : +5/site = x-in +1 (f32→bf16), poids +1 (f32→bf16 APRÈS le w.convert(f32) baseline qui reste émis), rmsNorm INTERNE +2 (nn.zig l.96 convert(.f32) + l.99 convert(x_.dtype()) — vraies ops sur entrée bf16, no-ops en baseline f32), out +1 (bf16→f32) → 226×5 = 1130 ; v_norm (pas de poids) : +4/site → 15×4 = 60. by_transition attendu : +708 ?→bf16 (241 x-in + 226 w + 241 rmsNorm-exit), +482 ?→f32 (241 rmsNorm-entry + 241 outs)",
-    "uncertain": true,
-    "alternative": "si le rmsNorm du workspace 3090 n'upcaste PAS en interne (rev divergente du miroir M1) : +3/site (226 sites) + +2/site (15 v_norm) → 708. La règle CSE ne change rien ici (aucun opérande partagé). Tranché au premier run one-hot norms"
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "softmax": {
     "status": "derived_with_cse_rule",
     "sites": "35 (softmax attention, post-add mask) — scores distincts par couche : aucune dédup",
     "delta_converts_vs_d0": 140,
     "derivation": "+4/site = scores-in +1, softmax INTERNE +2 (tensor.zig l.1374 .convert(.f32) sur sub(max) + l.1375 .convert(self.dtype()) — vraies ops sur entrée bf16, no-ops en baseline), out +1 → 35×4 = 140. by_transition attendu : +70 ?→bf16, +70 ?→f32. NB : le softmax zml calcule exp/sum/div en f32 même en bf16 — contrat « bornes arrondies » respecté",
-    "uncertain": true,
-    "alternative": "si le softmax du workspace 3090 n'upcaste PAS en interne : +2/site → 70. Tranché au premier run one-hot softmax"
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "rope": {
     "status": "derived_with_cse_rule",
     "sites": "manualRope (couches full 4,9,14,19,24,29,34) : 10 appels (q×7 + k×3 full producers) → x-in 10 distincts + cos-in 1 + sin-in 1 (cos_full/sin_full = pickStep hoisté AVANT la boucle : MÊME nœud pour les 10 appels → converts dédupliqués) + outs 10 = 22 ; slidingRope→zml.nn.rope (28 couches sliding) : 40 appels (q×28 + k×12 sliding producers) → x-in 40 + cos/sin internes 2 (chaîne inv_freq→outer→cos/scale IDENTIQUE pour les 40 appels : même idx=pos_s, même constante inv_freq hd=256, même theta/scaling → dédup) + outs 40 = 82",
     "delta_converts_vs_d0": 104,
     "derivation": "by_transition attendu : +54 ?→bf16 (50 x-in + 2 cos/sin fixture [f32, script 46] + 2 cos/sin internes [nn.zig l.286-287 convert(x.dtype())]), +50 ?→f32 (outs). Le idx.convert(.f32) interne (i32) est émis dans les DEUX cas (delta 0) — et le recensement D0 (542) prouve qu'il est dédupliqué à 1 sur les 40 appels : la dédup À TRAVERS les invocations nn.rope est un FAIT OBSERVÉ (evidence 4)",
-    "uncertain": true,
-    "alternative": "deux alternatives : (A) si les constantes constantTensor (inv_freq) ne se dédupliquent PAS (nœuds constants distincts par appel → chaînes cos/sin internes distinctes) : sliding = 40 x-in + 80 internes + 40 outs = 160 → total 182 ; (B) si le nn.rope du workspace 3090 n'émet pas les converts cos/sin internes : sliding = 80 → total 102. La part manualRope (22) est certaine sous la règle CSE. Tranché au premier run one-hot rope"
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "softcap": {
     "status": "derived_with_cse_rule",
     "sites": "1 (30·tanh(x/30) sur les logits, forward) — site unique, aucune dédup possible",
     "delta_converts_vs_d0": 2,
-    "derivation": "+2 = raw-in +1 (?→bf16), out +1 (?→f32). scale() émet sa constante AU DTYPE du tensor (tensor.zig l.1024-1026 mul .scalar(val, self.dtype())) : aucun convert ; tanh idem"
+    "derivation": "+2 = raw-in +1 (?→bf16), out +1 (?→f32). scale() émet sa constante AU DTYPE du tensor (tensor.zig l.1024-1026 mul .scalar(val, self.dtype())) : aucun convert ; tanh idem",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
   },
   "kv_store": {
     "status": "derived_with_cse_rule",
