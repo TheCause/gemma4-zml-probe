@@ -378,7 +378,7 @@ Pipeline par run :
 3. **Non-vacuité logits** : `max_abs(run vs D0) == 0` → verdict `VACUOUS`.
 4. **Métriques** : max_abs p50/p95/max, KL p50/p95/max, argmax mismatches, 1re bifurcation — vs D0 ET vs A (mêmes formules que 51 ; lecture memmap step par step, jamais tout en RAM).
 5. **Verdict** : buckets sur `KL p50 vs A / enveloppe B`, départage `max_abs p50` (le pire l'emporte).
-6. **Écriture manifest + npz** : entrée manifest complète (config, provenance `bin-sha`/`zml-rev`/`repo-rev`, toutes métriques `*_vs_D0`/`*_vs_A`, ratios, verdict, converts attendus/observés, **md5 du dump logits**) **et** un `g2_3_metrics_<fam>.npz` par run (courbes par-step max_abs/KL/match, comme le 51) — c'est ce npz qui survit à la purge du dump (spec §7.2).
+6. **Écriture manifest + npz** : entrée manifest complète (config, provenance `bin-sha`/`zml-rev`/`repo-rev`, toutes métriques `*_vs_D0`/`*_vs_A`, ratios, verdict, converts attendus/observés, **md5 du dump logits**) **et** un npz de courbes par-step par run (max_abs/KL/match, comme le 51), nommé par 52 **depuis le run-name seul** (`<run-name>_metrics.npz` — le run-name arrive déjà préfixé par l'orchestrateur, pas de double préfixe) — c'est ce npz qui survit à la purge du dump (spec §7.2).
 
 Cas spécial `--run-name none` : D0 est **référence seule** — pas d'auto-analyse vs soi-même (pas de verdict `VACUOUS` absurde) ; 52 enregistre seulement custody (md5) + sanité de D0 dans le manifest.
 
@@ -411,7 +411,14 @@ git commit -m "feat(g2.3): analyse par run — custody, sanité, non-vacuité, m
 
 Entrées : dossier de dump XLA du run (`XLA_FLAGS=--xla_dump_to=<dir>` posé par l'orchestrateur), dossier de dump de D0 (baseline), famille, table `g2_3_expected_converts.json`.
 Sorties (json) : `{"differs_from_d0": bool, "convert_ops_observed": N, "convert_ops_expected": N, "verdict": "OK|INVALID|IDENTICAL"}`.
-Méthode : compter les ops `convert` dans le HLO texte du module principal (grep structuré `= bf16[...] convert(` / `= f32[...] convert(`), diff du nombre de fichiers/hash vs D0 (réutiliser l'approche E1 `diff -rq`).
+Méthode : compter les ops `convert` dans le HLO texte du module principal — **sur le dump
+PRÉ-optimisation** (`*before_optimizations*`), pas le post-opt (XLA peut simplifier les chaînes de
+converts → mismatchs spurieux vs l'oracle des émissions) ; grep structuré `= bf16[...] convert(` /
+`= f32[...] convert(`, diff du nombre de fichiers/hash vs D0 (réutiliser l'approche E1 `diff -rq`).
+
+**Runs multi-familles** (D\*, S49 combiné) : l'attendu = **somme des deltas** des familles actives
+(valide car Task 3.2 impose d'émettre les chaînes telles quelles) ; si la somme s'avère non
+vérifiable en pratique, 53 dégrade en `differs_from_d0` seul pour les multi-familles et le consigne.
 
 - [ ] **Step 9.2 : Commit**
 
@@ -603,8 +610,9 @@ RUN_PREFIX=g2_3_s49 FIXTURE=/data/gemma4-zml-probe/gen_custom.safetensors REF_A=
 ```
 
 (`REF_A=none` → 52 saute custody/métriques vs A et n'écrit que les `*_vs_D0` ; le namespace
-`RUN_PREFIX` protège D0-S46 et son md5 de tout écrasement.) Concordance ou discordance : publiée
-telle quelle au manifest et au doc.
+`RUN_PREFIX` protège D0-S46 et son md5 de tout écrasement.) Les seuils de sanité étant calibrés
+sur S46, la sanité des runs S49 est **informative-only** (pas de FAIL-SANITY bloquant sur le
+diagnostic de stabilité). Concordance ou discordance : publiée telle quelle au manifest et au doc.
 
 - [ ] **Step 13.3 : VRAM `kv_store` (protocole G2.1)**
 
