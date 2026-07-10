@@ -41,9 +41,14 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
   buffer packé de la fixture).
 - **Inputs host par step — code Zig NEUF à écrire** (le L2 CPU actuel les lit de la
   fixture, il n'existe pas de pattern host à reprendre) : cos/sin **full** (RoPE
-  theta=1e6, hd=512 — le RoPE sliding est calculé in-graph depuis la position,
-  engine.zig:112-114), positions, masques bande/causal, et **cache initial à zéros**
-  (les runners existants chargent tous un `cache0` prefill HF depuis la fixture).
+  theta=1e6, hd=512, **partial rotary 0.25, scaling "proportional"** — la formule exacte
+  de l'oracle 46/49 `Gemma4TextRotaryEmbedding(layer_type="full_attention")`, PAS un RoPE
+  standard ; le RoPE sliding est calculé in-graph depuis la position, engine.zig:112-114),
+  positions, masques bande/causal, et **cache initial à zéros** (les runners existants
+  chargent tous un `cache0` prefill HF depuis la fixture).
+- **Champs `Packed(true)` non consommés** : `forwardStep` n'utilise pas `embeds`/`embptls`
+  du `Packed`, mais la struct les déclare — le runner devra les fournir (buffers factices
+  ~21 Mo bf16, ou variante allégée à trancher au plan). À budgéter, pas à découvrir.
 - CLI : `gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "…" [--max-tokens 200]`.
 
 ## 3. Composants
@@ -91,6 +96,11 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
 - Greedy seul, fp32, L_MAX=1024, batch-1 : les régimes validés du banc, rien au-delà.
 - Prefill à ~109 tok/s (≈0,5 s pour 50 tokens) : assumé (approche A) ; l'optimisation
   (vrai prefill S>1) est un chantier ultérieur documenté §1.
+- **Compile `forwardStep` mono sur GPU : jamais fait** (seul le chunké CPU l'a compilé).
+  Risque faible : `gemma4_gen_long_gpu` compile déjà le mono `.forward` 35 couches
+  op-identique sur GPU sans incident — le « ~33 Go, thrash » de la doc engine.zig:667
+  était le compile **XLA-CPU** sur la VM 23 Go, pas un plafond GPU. Si surprise : le
+  précédent chunké existe.
 - Le chat template Zig est spécifique Gemma 4 chat mono-tour (pas de multi-tour, pas de
   system prompt) — YAGNI, extensible au besoin.
 
