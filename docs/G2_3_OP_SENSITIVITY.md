@@ -103,21 +103,32 @@ mis à jour (commit) **avant le sweep complet** — les alternatives chiffrées 
 
 ## 4. Métriques et verdicts (PRÉ-ENREGISTRÉS)
 
-Par run, chacune **vs D0 ET vs A** : `max_abs(logits)` p50/p95/max, `KL(A‖·)` p50/p95/max,
+Par run, chacune **vs D0 ET vs A** : `max_abs(logits)` p50/p95/max, KL p50/p95/max,
 mismatches argmax /1020, step de première bifurcation. **Toutes publiées** dans le manifest, quel
 que soit le verdict — engagement anti-cherry-picking : aucune métrique ne sera ajoutée, retirée ou
 re-pondérée après le premier run ; un résultat gênant se publie tel quel.
 
+**Direction des KL (pré-enregistrée, convention du script 51 qui fait foi — ligne 65 :
+`(lsa.exp() * (lsa - lsd)).sum()` = KL(référence‖run))** : toutes les KL de ce protocole sont
+**KL(ref‖run)** avec ref ∈ {A, D0} selon la métrique — `kl_vs_A` = KL(A‖Dᵢ), `kl_vs_D0` =
+KL(D0‖Dᵢ). Les ratios restent ainsi directement comparables aux ratios publiés de G2.2.
+
+**Source normative des seuils** : les ratios se calculent sur les **valeurs NON-ARRONDIES** du
+manifest `fixtures/g2_envelope_manifest.json` (chargé par le script 52 via `--envelope`) — c'est
+LUI qui fait foi. Les valeurs chiffrées ci-dessous et dans le tableau sont **indicatives**
+(arrondies) ; en cas d'écart à la marge, le manifest gagne. Règle identique pour max_abs et
+toute métrique rapportée à l'enveloppe.
+
 - **Métrique primaire de VERDICT** : `KL p50 vs A`, en **ratio de l'enveloppe B** (la plus
-  discriminante en G2.2). Enveloppe B (G2.0, §7.1 du doc parent) : KL p50 = 1.0e-4,
-  max_abs p50 = 0.425.
+  discriminante en G2.2). Enveloppe B (G2.0, §7.1 du doc parent), valeurs indicatives :
+  KL p50 ≈ 1.0e-4, max_abs p50 ≈ 0.425.
 - **Buckets** :
 
-| Bucket | Critère (ratio vs enveloppe B) | Seuil chiffré KL p50 vs A | Seuil chiffré max_abs p50 vs A |
+| Bucket | Critère (ratio vs enveloppe B, **manifest non-arrondi = normatif**) | Indicatif KL p50 vs A | Indicatif max_abs p50 vs A |
 |---|---|---|---|
-| `SAFE` | ≤ 1× B | ≤ 1.0e-4 | ≤ 0.425 |
-| `TOLERABLE` | ≤ 2× B | ≤ 2.1e-4 | ≤ 0.85 |
-| `SENSITIVE` | > 2× B | > 2.1e-4 | > 0.85 |
+| `SAFE` | ≤ 1× B | ≈ ≤ 1.0e-4 | ≈ ≤ 0.425 |
+| `TOLERABLE` | ≤ 2× B | ≈ ≤ 2.1e-4 | ≈ ≤ 0.85 |
+| `SENSITIVE` | > 2× B | ≈ > 2.1e-4 | ≈ > 0.85 |
 
 - **Départage pré-enregistré** : si `KL p50` et `max_abs p50` donnent des buckets différents,
   **le pire l'emporte**.
