@@ -1,0 +1,390 @@
+{
+  "_meta": {
+    "source": "G2.3 manifest par run (docs/G2_3_OP_SENSITIVITY.md \u00a74-\u00a75)",
+    "created": "2026-07-10T10:51:52"
+  },
+  "custody": {
+    "/data/gemma4-zml-probe/g2_logits_a_f32.npy": {
+      "role": "ref_a",
+      "md5": "f0bc3b129b0fa22365b698da9614aec7",
+      "size_bytes": 1069547648,
+      "registered_at": "2026-07-10T10:52:07",
+      "params": {
+        "bin_sha": "n/a",
+        "zml_rev": "n/a",
+        "repo_rev": "n/a"
+      }
+    },
+    "/data/gemma4-zml-probe/g2_logits_b_bf16u16.npy": {
+      "role": "ref_b",
+      "md5": "e46fbc442aa2e2c71ae23e4b787570f3",
+      "size_bytes": 534773888,
+      "registered_at": "2026-07-10T10:52:13",
+      "params": {
+        "bin_sha": "n/a",
+        "zml_rev": "n/a",
+        "repo_rev": "n/a"
+      }
+    },
+    "/data/g2_3_logits_none.bin": {
+      "role": "ref_d0",
+      "md5": "f31e0fff83ea6231cdc4f9ba57c04228",
+      "size_bytes": 1069547520,
+      "registered_at": "2026-07-10T10:55:19",
+      "params": {
+        "bin_sha": "8d7caeb2f9bb21b765156407725bec438fdcd7def0fa77ba6d5d4770044d7324",
+        "zml_rev": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+        "repo_rev": "n/a"
+      }
+    }
+  },
+  "sanity_thresholds": {
+    "nan_inf_tolerated": 0,
+    "entropy_mean_min": -0.7411193251609802,
+    "argmax_repeat_max": 1536,
+    "calibration": {
+      "ref_a": "/data/gemma4-zml-probe/g2_logits_a_f32.npy",
+      "ref_b": "/data/gemma4-zml-probe/g2_logits_b_bf16u16.npy",
+      "entropy_mean_a": 0.30794259905815125,
+      "entropy_std_a": 0.34737905859947205,
+      "entropy_mean_b": 0.3010178506374359,
+      "entropy_std_b": 0.34538283944129944,
+      "argmax_repeat_a": 768,
+      "argmax_repeat_b": 768,
+      "formula_entropy": "min(mean_A, mean_B) - 3*max(std_A, std_B)",
+      "formula_repeat": "max(2*max_obs(A,B), max_obs+8)",
+      "calibrated_at": "2026-07-10T10:52:28"
+    }
+  },
+  "runs": {
+    "g2_3_none": {
+      "type": "reference",
+      "run_name": "g2_3_none",
+      "run_logits": "/data/g2_3_logits_none.bin",
+      "dump_md5": "f31e0fff83ea6231cdc4f9ba57c04228",
+      "n_steps": 1020,
+      "provenance": {
+        "bin_sha": "8d7caeb2f9bb21b765156407725bec438fdcd7def0fa77ba6d5d4770044d7324",
+        "zml_rev": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+        "repo_rev": "n/a",
+        "analyzed_at": "2026-07-10T10:55:19"
+      },
+      "sanity": {
+        "ok": true,
+        "informative": false,
+        "nonfinite_steps": 0,
+        "nonfinite_elems": 0,
+        "entropy_mean": 0.30792999267578125,
+        "argmax_repeat_max": 768,
+        "thresholds": {
+          "entropy_mean_min": -0.7411193251609802,
+          "argmax_repeat_max": 1536,
+          "nan_inf_tolerated": 0
+        }
+      },
+      "verdict": "REFERENCE",
+      "metrics_npz": "/data/gemma4-zml-probe/fixtures/g2_3_none_metrics.npz",
+      "re_run": 0,
+      "md5_history": [
+        "f31e0fff83ea6231cdc4f9ba57c04228"
+      ]
+    },
+    "g2_3_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head": {
+      "type": "run",
+      "run_name": "g2_3_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head",
+      "run_logits": "/data/g2_3_logits_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head.bin",
+      "dump_md5": "5485906d1389d06b386c735d10100b07",
+      "n_steps": 1020,
+      "provenance": {
+        "bin_sha": "8d7caeb2f9bb21b765156407725bec438fdcd7def0fa77ba6d5d4770044d7324",
+        "zml_rev": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+        "repo_rev": "n/a",
+        "analyzed_at": "2026-07-10T11:14:48"
+      },
+      "sanity": {
+        "ok": true,
+        "informative": false,
+        "nonfinite_steps": 0,
+        "nonfinite_elems": 0,
+        "entropy_mean": 0.30421188473701477,
+        "argmax_repeat_max": 768,
+        "thresholds": {
+          "entropy_mean_min": -0.7411193251609802,
+          "argmax_repeat_max": 1536,
+          "nan_inf_tolerated": 0
+        }
+      },
+      "metrics_vs_D0": {
+        "max_abs": {
+          "p50": 0.1842789649963379,
+          "p95": 0.3454664349555969,
+          "p99": 0.45452407002449036,
+          "max": 0.7013511657714844
+        },
+        "kl": {
+          "p50": 2.6775513106258586e-05,
+          "p95": 0.00048296633758582175,
+          "p99": 0.0019124385435134172,
+          "max": 0.004017135128378868
+        },
+        "argmax_mismatches": 2,
+        "first_bifurcation_step": 96
+      },
+      "hlo_check": {
+        "families": [
+          "qkv_proj",
+          "qk_scores",
+          "pv_ctx",
+          "o_proj",
+          "mlp",
+          "ple",
+          "head"
+        ],
+        "expected_delta": 382,
+        "observed_delta": 382,
+        "differs_from_d0": true,
+        "report": "/data/gemma4-zml-probe/logs/hlo_g2_3_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head.json",
+        "report_verdict": "OK"
+      },
+      "families": [
+        "qkv_proj",
+        "qk_scores",
+        "pv_ctx",
+        "o_proj",
+        "mlp",
+        "ple",
+        "head"
+      ],
+      "metrics_vs_A": {
+        "max_abs": {
+          "p50": 0.1848745346069336,
+          "p95": 0.34756821393966675,
+          "p99": 0.46218129992485046,
+          "max": 0.7019252777099609
+        },
+        "kl": {
+          "p50": 2.8289141482673585e-05,
+          "p95": 0.00047657580580562353,
+          "p99": 0.001883632387034595,
+          "max": 0.004023212939500809
+        },
+        "argmax_mismatches": 2,
+        "first_bifurcation_step": 96
+      },
+      "ratios_vs_envelope": {
+        "max_abs": {
+          "p50": 0.43551079369429885,
+          "p95": 0.5256422483451613,
+          "max": 0.45409182498738326
+        },
+        "kl": {
+          "p50": 0.2713321384017711,
+          "p95": 0.27341388416549006,
+          "max": 0.3036541472742563
+        }
+      },
+      "buckets": {
+        "kl_p50": "SAFE",
+        "max_abs_p50": "SAFE"
+      },
+      "verdict": "SAFE",
+      "metrics_npz": "/data/gemma4-zml-probe/fixtures/g2_3_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head_metrics.npz",
+      "re_run": 1,
+      "md5_history": [
+        "4fd13dfbdc78dc5359f3d73cd681d303",
+        "5485906d1389d06b386c735d10100b07"
+      ],
+      "previous_verdict": "INVALID"
+    },
+    "g2_3_mlp": {
+      "type": "run",
+      "run_name": "g2_3_mlp",
+      "run_logits": "/data/g2_3_logits_mlp.bin",
+      "dump_md5": "29e804a2a7ec2146ea6e58175ad7cd95",
+      "n_steps": 1020,
+      "provenance": {
+        "bin_sha": "8d7caeb2f9bb21b765156407725bec438fdcd7def0fa77ba6d5d4770044d7324",
+        "zml_rev": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+        "repo_rev": "n/a",
+        "analyzed_at": "2026-07-10T11:13:33"
+      },
+      "sanity": {
+        "ok": true,
+        "informative": false,
+        "nonfinite_steps": 0,
+        "nonfinite_elems": 0,
+        "entropy_mean": 0.30701959133148193,
+        "argmax_repeat_max": 768,
+        "thresholds": {
+          "entropy_mean_min": -0.7411193251609802,
+          "argmax_repeat_max": 1536,
+          "nan_inf_tolerated": 0
+        }
+      },
+      "metrics_vs_D0": {
+        "max_abs": {
+          "p50": 0.11441230773925781,
+          "p95": 0.21594944596290588,
+          "p99": 0.27787843346595764,
+          "max": 1.067986011505127
+        },
+        "kl": {
+          "p50": 7.859597644710448e-06,
+          "p95": 0.0001487828412791714,
+          "p99": 0.00042412918992340565,
+          "max": 0.002015240490436554
+        },
+        "argmax_mismatches": 1,
+        "first_bifurcation_step": 96
+      },
+      "hlo_check": {
+        "families": [
+          "mlp"
+        ],
+        "expected_delta": 70,
+        "observed_delta": 70,
+        "differs_from_d0": true,
+        "report": "/data/gemma4-zml-probe/logs/hlo_g2_3_mlp.json",
+        "report_verdict": "OK"
+      },
+      "families": [
+        "mlp"
+      ],
+      "metrics_vs_A": {
+        "max_abs": {
+          "p50": 0.1155385971069336,
+          "p95": 0.2141873687505722,
+          "p99": 0.27530473470687866,
+          "max": 1.080216884613037
+        },
+        "kl": {
+          "p50": 7.894574082456529e-06,
+          "p95": 0.00014433456817641854,
+          "p99": 0.00047318320139311254,
+          "max": 0.002050577662885189
+        },
+        "argmax_mismatches": 1,
+        "first_bifurcation_step": 96
+      },
+      "ratios_vs_envelope": {
+        "max_abs": {
+          "p50": 0.272175430950236,
+          "p95": 0.3239247018622029,
+          "max": 0.6988174839869551
+        },
+        "kl": {
+          "p50": 0.07571992486502586,
+          "p95": 0.08280545177435793,
+          "max": 0.15476844527157904
+        }
+      },
+      "buckets": {
+        "kl_p50": "SAFE",
+        "max_abs_p50": "SAFE"
+      },
+      "verdict": "SAFE",
+      "metrics_npz": "/data/gemma4-zml-probe/fixtures/g2_3_mlp_metrics.npz",
+      "re_run": 1,
+      "md5_history": [
+        "b2d7120b11165535c0978eacbfb2cee5",
+        "29e804a2a7ec2146ea6e58175ad7cd95"
+      ],
+      "previous_verdict": "INVALID"
+    },
+    "g2_3_qkv_proj": {
+      "type": "run",
+      "run_name": "g2_3_qkv_proj",
+      "run_logits": "/data/g2_3_logits_qkv_proj.bin",
+      "dump_md5": "ad8318a2b809361b678c2eb283b08a13",
+      "n_steps": 1020,
+      "provenance": {
+        "bin_sha": "8d7caeb2f9bb21b765156407725bec438fdcd7def0fa77ba6d5d4770044d7324",
+        "zml_rev": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+        "repo_rev": "n/a",
+        "analyzed_at": "2026-07-10T11:14:14"
+      },
+      "sanity": {
+        "ok": true,
+        "informative": false,
+        "nonfinite_steps": 0,
+        "nonfinite_elems": 0,
+        "entropy_mean": 0.30760031938552856,
+        "argmax_repeat_max": 768,
+        "thresholds": {
+          "entropy_mean_min": -0.7411193251609802,
+          "argmax_repeat_max": 1536,
+          "nan_inf_tolerated": 0
+        }
+      },
+      "metrics_vs_D0": {
+        "max_abs": {
+          "p50": 0.0447840690612793,
+          "p95": 0.08763615787029266,
+          "p99": 0.11006856709718704,
+          "max": 0.17969942092895508
+        },
+        "kl": {
+          "p50": 1.13069052076753e-06,
+          "p95": 2.2656495275441557e-05,
+          "p99": 6.202005170052871e-05,
+          "max": 0.00019573948520701379
+        },
+        "argmax_mismatches": 0,
+        "first_bifurcation_step": -1
+      },
+      "hlo_check": {
+        "families": [
+          "qkv_proj"
+        ],
+        "expected_delta": 35,
+        "observed_delta": 35,
+        "differs_from_d0": true,
+        "report": "/data/gemma4-zml-probe/logs/hlo_g2_3_qkv_proj.json",
+        "report_verdict": "OK"
+      },
+      "families": [
+        "qkv_proj"
+      ],
+      "metrics_vs_A": {
+        "max_abs": {
+          "p50": 0.04433584213256836,
+          "p95": 0.08758604526519775,
+          "p99": 0.11287109553813934,
+          "max": 0.1858835220336914
+        },
+        "kl": {
+          "p50": 1.084560153685743e-06,
+          "p95": 2.1687597836717032e-05,
+          "p99": 6.203423981787637e-05,
+          "max": 0.00022645473654847592
+        },
+        "argmax_mismatches": 0,
+        "first_bifurcation_step": -1
+      },
+      "ratios_vs_envelope": {
+        "max_abs": {
+          "p50": 0.10444238757551318,
+          "p95": 0.1324601154835504,
+          "max": 0.1202523836023459
+        },
+        "kl": {
+          "p50": 0.010402437483129105,
+          "p95": 0.012442281564696909,
+          "max": 0.017091792295581526
+        }
+      },
+      "buckets": {
+        "kl_p50": "SAFE",
+        "max_abs_p50": "SAFE"
+      },
+      "verdict": "SAFE",
+      "metrics_npz": "/data/gemma4-zml-probe/fixtures/g2_3_qkv_proj_metrics.npz",
+      "re_run": 1,
+      "md5_history": [
+        "a19fcd918924de647a80f193edfcb67f",
+        "ad8318a2b809361b678c2eb283b08a13"
+      ],
+      "previous_verdict": "INVALID"
+    }
+  }
+}

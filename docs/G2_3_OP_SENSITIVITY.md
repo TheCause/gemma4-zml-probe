@@ -273,20 +273,30 @@ run**, mesure répétée **2×**, conditions consignées au manifest. Référenc
 
 | Gate | Date | Verdict | Mesures clés |
 |---|---|---|---|
-| G2.3.0 (neutralité + pré-enregistrement) | — | — | — |
+| G2.3.0 (neutralité + pré-enregistrement) | 10 juil 2026 | **PASS** | HLO gold byte-identique ; D0 1020/1020 == HF ; non-régression G2.2 reproduite (0.271×/0.436×, bifurcation 96) |
 | G2.3.1 (sweep one-hot) | — | — | — |
 | G2.3.2 (combiné + stabilité + VRAM) | — | — | — |
 
-### 9.1 G2.3.0 — Neutralité du refactor
+### 9.1 G2.3.0 — Neutralité du refactor — **PASS (10 juil 2026)**
 
 | Preuve | Attendu | Observé |
 |---|---|---|
-| HLO tout-null vs baseline PRÉ-refactor (gold) | byte-identique (méthode E1) | — |
-| Repli (si diff cosmétique) : G1 64/64 + E1 4/4 + replay 1020/1020 | cumulatif complet | — |
-| Non-régression G2.2 (`qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head`) | ratios 0.44×/0.28×, argmax 1016/1020, bifurcation 96 | — |
-| Custody A / D0 (md5) | enregistrés au manifest | — |
-| Comptes *uncertain* du JSON tranchés (norms/softmax/rope) | JSON mis à jour + committé avant sweep | — |
-| Seuils de sanité calibrés (§5.1) | valeurs consignées §5.1 | — |
+| HLO tout-null vs baseline PRÉ-refactor (gold) | byte-identique (méthode E1) | **PASS byte-identique** — `module_0001.zml.before_optimizations.txt` md5 `b8e5b90bfa7739a72e3f2101f9031059` des DEUX côtés (baseline = worktree `6489e47`, dump 302 fichiers ; les 5 `.txt` post-opt diffèrent = autotuning GPU entre compiles, attendu) |
+| Repli (si diff cosmétique) : G1 64/64 + E1 4/4 + replay 1020/1020 | cumulatif complet | **non requis** (gold PASS) ; évidence surnuméraire : D0 = **1020/1020 == HF** à 102,8 tok/s |
+| Non-régression G2.2 (`qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head`) | ratios 0.44×/0.28×, argmax 1016/1020, bifurcation 96 | **PASS** — KL p50 **0.271×** / max_abs p50 **0.436×** (≈ G2.2 à ~3 %), argmax 1018/1020 (±2 flips = variance d'autotuning post-opt entre binaires), **bifurcation 96 exacte** ; Δ converts 382 == attendu ; l'ex-runner comptime `gemma4_gen_long_gpu_bf16` supprimé après ce PASS |
+| Custody A / D0 (md5) | enregistrés au manifest | **PASS** — A `f0bc3b12…`, D0 `f31e0fff…` (manifest `g2_3_manifest.json`) |
+| Comptes *uncertain* du JSON tranchés (norms/softmax/rope) | JSON mis à jour + committé avant sweep | **fait pour les GEMM** (règle de déduplication découverte, §5.3 ; table v2 `be4b8fa`, Δ382 observé exact) ; norms/softmax/rope restent *uncertain* avec alternatives — tranchés à leur one-hot (§3) |
+| Seuils de sanité calibrés (§5.1) | valeurs consignées §5.1 | **fait** (constat d'honnêteté : non-mordants sur S46, gate ≡ NaN/Inf) |
+
+**Trace d'investigation (auditable au manifest)** : les 3 premiers runs (7-familles, mlp, qkv_proj)
+sont sortis `INVALID` sur la table v1 — faux positif de la TABLE (métriques saines), la gate
+anti-câblage-croisé ayant correctement refusé une prédiction fausse. L'investigation a établi la
+règle de déduplication des nœuds au traçage (§5.3), la table v2 a été committée AVANT le sweep,
+et les 3 runs rejoués sortent `SAFE` avec Δ exacts (upsert `re_run=1`).
+
+**Acquis collatéral pour G2.3.1** : `mlp` **SAFE** (KL p50 vs A = 0.0757× B ; bifurcation 96) et
+`qkv_proj` **SAFE** (KL p50 = 0.0104× B ; argmax **1020/1020**, aucune bifurcation) — 2 des 12
+one-hot déjà mesurés au passage de la non-régression.
 
 ### 9.2 G2.3.1 — Classement de sensibilité (12 familles)
 
