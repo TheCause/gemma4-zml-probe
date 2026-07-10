@@ -57,26 +57,30 @@ jamais « calculé en bf16 », seulement « arrondi aux bornes ». NB assumé : 
 conforme au contrat (bornes arrondies), et c'est compté dans les converts attendus.
 
 Comptes détaillés + dérivations : **`fixtures/g2_3_expected_converts.json`** (oracle du check
-anti-câblage-croisé §5.3, dérivé de `engine.zig` @ `1230175`). Résumé :
+anti-câblage-croisé §5.3, dérivé de `engine.zig` @ `1230175`, **v2 re-dérivée avec la règle de
+déduplication des nœuds** — cf §5.3). Résumé (converts APRÈS déduplication) :
 
-| # | Famille | Sites (graphe `.forward`, seul compilé) | Delta converts vs D0 |
-|---|---|---|---|
-| 1 | `qkv_proj` | 35 q + 15 k + 15 v (producers 0–14, YOCO) | **+65** (+1 net/site) |
-| 2 | `qk_scores` | 35 | **+105** (+3/site, cache f32 en one-hot) |
-| 3 | `pv_ctx` | 35 | **+105** (+3/site) |
-| 4 | `o_proj` | 35 | **+35** (+1 net/site) |
-| 5 | `mlp` | 3×35 | **+105** (+1 net/site) |
-| 6 | `ple` | 2×35 + 1 frontend | **+71** (+1 net/site) |
-| 7 | `head` | 1 | **+1** |
-| 8 | `norms` | 176 rmsScaleD + 50 q/k_norm + 15 v_norm | **+1190** (+5/site pondéré, +4 v_norm) — *uncertain* |
-| 9 | `softmax` | 35 | **+140** (+4/site) — *uncertain* |
-| 10 | `rope` | 10 manualRope (full) + 40 slidingRope | **+200** (+4/site) — *uncertain* |
-| 11 | `softcap` | 1 | **+2** |
-| 12 | `kv_store` | 30 writes + 70 reads | **+100** (caveat fixture variante) |
+| # | Famille | Sites (graphe `.forward`, seul compilé) | Delta converts vs D0 | Statut |
+|---|---|---|---|---|
+| 1 | `qkv_proj` | 65 appels, h0-in partagé q/k/v | **+35** | **observé** ✓ |
+| 2 | `qk_scores` | 35 (cache-in : readers ≡ writers 13/14) | **+85** (35 qs + 15 cache + 35 outs) | dérivé (CSE) |
+| 3 | `pv_ctx` | 35 | **+85** | dérivé (CSE) |
+| 4 | `o_proj` | 35 | **+35** | dérivé (CSE) |
+| 5 | `mlp` | 3×35, xff-in partagé gate/up | **+70** | **observé** ✓ |
+| 6 | `ple` | 2×35 + 1 frontend | **+71** | dérivé (CSE) |
+| 7 | `head` | 1 | **+1** | dérivé (CSE) |
+| 8 | `norms` | 176 rmsScaleD + 50 q/k_norm + 15 v_norm (aucun partage) | **+1190** (+5/site, +4 v_norm) | *uncertain* |
+| 9 | `softmax` | 35 (aucun partage) | **+140** (+4/site) | *uncertain* |
+| 10 | `rope` | 10 manualRope + 40 slidingRope (cos/sin partagés) | **+104** (22 + 82) | *uncertain* |
+| 11 | `softcap` | 1 | **+2** | dérivé |
+| 12 | `kv_store` | 30 writes + 30 reads (dédup readers) | **+60** (caveat fixture variante) | dérivé (CSE) |
 
-Les trois comptes *uncertain* (émissions internes zml vérifiées sur le miroir M1, pas sur la rev
-du workspace 3090) sont **tranchés par le premier run one-hot** de leur famille et le JSON est
-mis à jour (commit) **avant le sweep complet** — les alternatives chiffrées sont dans le JSON.
+Somme des 7 familles GEMM (non-régression G2.2) = **+382, OBSERVÉE exactement** au run
+7-familles (+312 ?→bf16, +70 ?→f32). Les trois comptes *uncertain* (émissions internes zml —
+rmsNorm/softmax : upcast f32 interne ; rope : dédup des constantes `inv_freq`) sont **tranchés
+par le premier run one-hot** de leur famille et le JSON est mis à jour (commit) **avant la suite
+du sweep** — les alternatives chiffrées sont dans le JSON (norms 708 ; softmax 70 ;
+rope 182 ou 102).
 
 **Décisions actées** (questions ouvertes de la spec §4, tranchées ici) :
 
@@ -179,10 +183,23 @@ Le graphe HLO du run doit **différer** de celui de D0, et le **delta de convert
 converts du run − recensement D0, sur le dump **PRÉ-optimisation** `*before_optimizations*`) doit
 être **== à l'attendu** de `fixtures/g2_3_expected_converts.json` (script 53). Mismatch ⇒ run
 `INVALID`, à corriger avant de continuer. **Multi-familles** (D\*, S49 combiné) : attendu =
-**somme des deltas** des familles actives (additivité stricte : chaque famille re-upcaste f32 à
-ses bornes, les chaînes bf16→f32→bf16 sont émises telles quelles) ; si la somme s'avère non
-vérifiable en pratique, 53 dégrade en `differs_from_d0` seul pour les multi-familles et le
-consigne au manifest.
+**somme des deltas** des familles actives (additivité valide sans partage de nœuds ENTRE
+familles — aucun identifié à la dérivation, et vérifiée empiriquement au run 7-familles GEMM) ;
+si la somme s'avère non vérifiable en pratique, 53 dégrade en `differs_from_d0` seul pour les
+multi-familles et le consigne au manifest.
+
+**Règle d'émission découverte au premier run (pré-enregistrement amendé AVANT le sweep,
+10 juil 2026)** : le traçage ZML/MLIR **déduplique les nœuds identiques** (même op, mêmes
+opérandes, mêmes attributs → un seul nœud émis) — la table v1 des converts attendus (commit
+`32bb162`) comptait chaque site d'appel séparément et surestimait donc les deltas
+(`h0.convert(bf16)` partagé par q/k/v, `xff.convert(bf16)` par gate/up, les `choose1d` des 20
+readers dédupliqués avec ceux des writers 13/14, etc.). **L'INVALID initial du run 7-familles
+était un faux positif de la TABLE** (les métriques du run étaient saines) : la gate a fonctionné
+comme prévu en forçant cette investigation avant tout verdict. Preuves de la règle : 4 points de
+données (one-hot `mlp` Δ70, one-hot `qkv_proj` Δ35, run 7-familles Δ382 = somme exacte,
+recensement D0 542 réconcilié à la main — détail dans le `_meta` du JSON). Les 3 runs `INVALID`
+restent au manifest comme trace de l'investigation. La table v2 compte les converts **après
+déduplication** ; c'est elle qui fait foi pour le sweep.
 
 ## 6. Procédure combinée (G2.3.2)
 
