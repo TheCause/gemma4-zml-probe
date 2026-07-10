@@ -320,6 +320,13 @@ def preflight_hlo(args, ref_a_none: bool) -> dict | None:
         sys.exit(f"[erreur] rapport HLO {args.hlo_report}: clé 'differs_from_d0' absente — "
                  f"pas un rapport du script 53 ?")
     expected = sum(int(exp[f]["delta_converts_vs_d0"]) for f in fams)
+    # Dédups INTER-familles nommées (cf _interfamily_dedups du JSON + docstring du 53) : quand
+    # toutes les familles d'une clé "famA+famB" sont actives, un nœud convert est partagé au
+    # traçage → correction du delta consigné. Même règle que parse_families du 53 (recalcul
+    # croisé : les deux scripts appliquent la correction indépendamment).
+    for key, entry in (exp.get("_interfamily_dedups") or {}).items():
+        if all(m in fams for m in key.split("+")):
+            expected += int(entry["delta"])
     return {"families": fams, "expected": expected, "report": rep}
 
 
