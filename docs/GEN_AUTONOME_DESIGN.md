@@ -25,8 +25,9 @@ Le moteur et ses graphes ne changent **pas d'un octet** — tout est host-side.
 
 ```
 prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
-→ boucle unique sur le graphe decode S=1 (celui de gemma4_gen_long_gpu) :
-     gather embeds host (streaming safetensors) → forward GPU → logits → argmax host
+→ boucle unique sur le graphe decode S=1 :
+     gather embeds host (lignes BRUTES bf16, streaming safetensors) → forwardStep GPU
+     → logits → argmax host
      · i < len(ids)-1  (prefill) : token suivant injecté = ids[i+1], argmax ignoré
      · sinon (génération)        : token suivant injecté = argmax
      · arrêt : argmax == EOS  OU  steps == --max-tokens
@@ -34,24 +35,35 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
 ```
 
 - Moteur : `EngineModel(struct{}, .{ .two_masks = true, .kmax_sliding = 1024, .kmax_full = 1024 })`,
-  fp32 (PrecRt défaut), identique à `gemma4_gen_long_gpu`.
-- cos/sin, positions, masques : calculés host par step (pattern L2 existant).
+  fp32 (PrecRt défaut), identique à `gemma4_gen_long_gpu`. **Point d'entrée compilé =
+  `forwardStep` (engine.zig:632)** — l'entrée créée pour l'autonomie L2, qui prend les
+  embeds token-dépendants (PAS `forward(Packed)` du replay, dont les embeds viennent du
+  buffer packé de la fixture).
+- **Inputs host par step — code Zig NEUF à écrire** (le L2 CPU actuel les lit de la
+  fixture, il n'existe pas de pattern host à reprendre) : cos/sin **full** (RoPE
+  theta=1e6, hd=512 — le RoPE sliding est calculé in-graph depuis la position,
+  engine.zig:112-114), positions, masques bande/causal, et **cache initial à zéros**
+  (les runners existants chargent tous un `cache0` prefill HF depuis la fixture).
 - CLI : `gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "…" [--max-tokens 200]`.
 
 ## 3. Composants
 
 1. **Tokenizer** : `zml.tokenizer.Tokenizer.fromFile(allocator, io, tokenizer.json)` —
    module natif ZML (`zml/tokenizer`, utilisé par `examples/llm`). Encoder pour le prompt,
-   decoder pour la sortie. Prérequis vérifiable au plan : `tokenizer.json` de
-   `google/gemma-4-E2B-it` présent dans le cache HF de la 3090.
+   decoder pour la sortie. Prérequis vérifiable au plan (spike) : `tokenizer.json` de
+   `google/gemma-4-E2B-it` présent dans le cache HF de la 3090 **ET le module ZML le
+   parse** (format SentencePiece/Gemma) — c'est le premier step du plan, avant tout
+   le reste.
 2. **Chat template** : reproduit en Zig (il ne vit PAS dans `tokenizer.json`) —
    format Gemma `<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n`,
    à vérifier caractère près contre l'oracle 49 (**la conformité est un gate, pas une
    hypothèse** — gate A0).
 3. **Gather embeds host** : lecture streaming depuis `model.safetensors` (le pattern qui a
-   résolu l'OOM du L2 CPU, repris de `gemma4_gchunk_auto`) : par token,
-   `embed_tokens[id]` **×√1536** et `embed_tokens_per_layer[id]` **×16** — les scalings
-   ScaledWordEmbedding sont appliqués HOST, explicitement (piège fondateur du projet).
+   résolu l'OOM du L2 CPU, repris de `gemma4_gchunk_auto`) : par token, lignes
+   `embed_tokens[id]` et `embed_tokens_per_layer[id]` injectées **BRUTES (bf16, sans
+   scaling)** — les scalings ScaledWordEmbedding ×√1536 et ×16 sont DÉJÀ dans le graphe
+   (`EMBED_SCALE` engine.zig:644, `SQRT_PLE` engine.zig:535 ; doc `forwardStep` : « AVANT
+   scale √1536, brut »). Les appliquer host serait un DOUBLE scaling → divergence garantie.
 4. **EOS** : id de `<end_of_turn>` extrait du tokenizer au démarrage (pas hardcodé).
    Early-stop + garde `--max-tokens` (défaut 200) + garde
    `len(prompt_ids) + max_tokens ≤ L_MAX` (sinon erreur claire au lancement).
@@ -63,8 +75,9 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
 | Gate | Critère PASS | Oracle |
 |---|---|---|
 | **A0 — tokenizer+template** | ids ZML (chat template inclus) == ids HF sur ≥2 prompts ; round-trip détok OK | dump ids de `49_gen_custom_oracle.py` |
-| **A1 — prefill-par-decode** | prompt de réf (« capital of France ») : génération **48/48 == HF** en partant du prompt injecté token par token (plus AUCUN input de fixture) | fixture 49 recyclée en **oracle de comparaison** (`expected`), plus jamais en source d'inputs |
-| **A2 — bout-en-bout** | S46 autonome complet **1020/1020 == HF** ; early-stop EOS : longueur générée == HF (qui s'arrête aussi à EOS) sur un prompt court | fixtures 46/49 (`expected`) |
+| **A1 — prefill-par-decode** | prompt de réf (« What is the capital of France? Answer in one word. », 48 tokens de génération) : **48/48 == HF** en partant du prompt injecté token par token (plus AUCUN input de fixture) | fixture 49 recyclée en **oracle de comparaison** (`expected`), plus jamais en source d'inputs |
+| **A2 — bout-en-bout long** | fixture 49 **longue** (prompt court templaté ~13 tokens, `--n-tokens` ≈ 1010, jusqu'à L_MAX) : **N/N == HF** en autonome complet. NB : S46 est inatteignable en texte pur (son prompt = ids bruts `[2,105,2048,4095]` sans antécédent par le chat template) — S46 reste couvert par la non-régression replay | fixture 49 longue (`expected`) |
+| **A3 — early-stop EOS** | sur un prompt court : la génération s'arrête à l'index du premier `<end_of_turn>` dans `expected` (l'oracle 49 ne s'arrête PAS à EOS, il génère `n_tokens` fixes — le critère se lit dans `expected`, pas dans la longueur de la fixture) | fixture 49 (`expected`) |
 | **Non-régression** | `gemma4_gen_long_gpu` (replay) et E1 re-PASS — les runners replay restent les oracles du banc | HLO/tokens existants |
 | **Non-vacuité** | chat template perturbé (ex. `\n` manquant) → A0 ou A1 FAIL — le gate discrimine | — |
 
