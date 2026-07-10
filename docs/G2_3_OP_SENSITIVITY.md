@@ -149,11 +149,21 @@ entropie moyenne effondrée vs A, répétition de token anormale. **Seuils : cal
 consignées ICI avant le premier run one-hot** (le `g2_envelope_metrics.npz` ne contient pas
 d'entropie — la calibration lit les memmaps) :
 
-| Seuil de sanité | Valeur |
+| Seuil de sanité | Valeur (calibrée 10 juil 2026, formules pré-enregistrées du 52) |
 |---|---|
 | NaN/Inf | 0 toléré (tout NaN/Inf ⇒ FAIL-SANITY) |
-| Entropie moyenne minimale | **À CALIBRER** |
-| Répétition argmax maximale (run de tokens identiques) | **À CALIBRER** |
+| Entropie moyenne minimale | **-0.7411** (= min(0.3079 [A], 0.3010 [B]) − 3·max(σ 0.3474, 0.3454)) |
+| Répétition argmax maximale (run de tokens identiques) | **1536** (= max(2×768, 768+8) ; max observé A/B = 768) |
+
+**Constat d'honnêteté (consigné AVANT le sweep, aucune formule retouchée)** : sur S46, les deux
+seuils de dégénérescence sont **non-mordants** — l'entropie est ≥ 0 par définition (seuil négatif
+⇒ ne peut jamais déclencher) et la répétition max tolérée (1536) dépasse les 1020 steps. Cause :
+la séquence oracle S46 est elle-même très piquée (entropie moyenne ~0.31 nat) et hautement
+répétitive (run de 768 tokens identiques dans A ET B — comportement connu de la génération longue
+greedy). La gate de sanité se réduit donc de facto à la **détection NaN/Inf** sur cette séquence ;
+les seuils calibrés sont publiés tels que produits par les formules pré-enregistrées, sans
+ajustement post-hoc. Limitation assumée du protocole, à réviser (pré-enregistrement v2) si une
+campagne future utilise une séquence moins dégénérée.
 
 Échec ⇒ verdict `FAIL-SANITY`, distinct de `SENSITIVE`, publié, et **famille exclue du combiné**
 quels que soient ses ratios.
