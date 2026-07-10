@@ -32,9 +32,15 @@ Verdicts (contrat FIGÉ, consommé par 52_g2_3_analyze.py::preflight_hlo/evaluat
     (a) nombre de modules pré-opt TEXTE différent entre run et D0 (structure de dump
         inattendue : l'appariement du module principal n'est plus fiable) ;
     (b) modules pré-opt présents mais aucun sous forme texte (.txt) — le diff de hash reste
-        concluant, le comptage non.
-  En dégradé avec differs=true, verdict="OK" : la seule preuve vérifiable (diff structurel) a
-  passé ; c'est le flag `degraded` qui porte la limitation, le 52 tranche selon mono/multi.
+        concluant, le comptage non ;
+    (c) fichier pré-opt non-UTF8/corrompu (U+FFFD au décodage — course d'écriture pendant le
+        flush XLA ?) : JAMAIS avalé en silence, un IDENTICAL/INVALID calculé sur du texte
+        remplacé serait spurieux.
+  En dégradé, verdict="OK" si differs (la seule preuve vérifiable a passé), "IDENTICAL" sinon ;
+  c'est le flag `degraded` qui porte la limitation, le 52 tranche selon mono/multi.
+  Signal NON-bloquant `main_module_ambiguous: true` (+ WARNING) : les 2 plus gros modules
+  pré-opt sont à <10 % l'un de l'autre — l'heuristique « module principal = le plus gros »
+  mérite un œil au debug, sans changer le verdict.
 
 Exit codes : 0 = rapport rendu (le verdict EST le résultat, même INVALID/IDENTICAL — c'est le
 52 qui le consigne au manifest, l'orchestrateur ne doit pas s'arrêter là-dessus) ;
@@ -85,14 +91,18 @@ def collect_before_opt(dir_s: str, what: str) -> list[Path]:
     return files
 
 
-def normalized_hash(path: Path, strip_paths: list[str]) -> str:
+def normalized_hash(path: Path, strip_paths: list[str]) -> tuple[str, bool]:
     """Hash du contenu, différences éphémères neutralisées (fichiers texte seulement — les
     non-texte, ex .pb, sont hashés bruts : pas de chemin normalisable dedans de façon fiable,
-    et ils ne portent le chemin de dump que via debug_options texte)."""
+    et ils ne portent le chemin de dump que via debug_options texte).
+    Retourne (hash, corrompu) : corrompu=True si le décodage UTF-8 a produit un U+FFFD —
+    signalé à l'appelant plutôt qu'avalé (un dump lu pendant le flush XLA donnerait sinon
+    un IDENTICAL/INVALID spurieux en silence)."""
     raw = path.read_bytes()
     if path.suffix != ".txt":
-        return hashlib.sha256(raw).hexdigest()
+        return hashlib.sha256(raw).hexdigest(), False
     text = raw.decode("utf-8", errors="replace")
+    corrupted = "�" in text
     for p in strip_paths:                     # chemins des deux dossiers de dump (debug_options)
         text = text.replace(p, "<DUMP_DIR>")
     text = RE_DUMP_FLAG.sub("--xla_dump_to=<DUMP_DIR>", text)
@@ -102,7 +112,18 @@ def normalized_hash(path: Path, strip_paths: list[str]) -> str:
     m = RE_MODULE_NAME.search(text)
     if m and (mid := re.match(r"(.+)\.\d+$", m.group(1))):
         text = re.sub(re.escape(m.group(1)) + r"(?![0-9])", mid.group(1) + ".<ID>", text)
-    return hashlib.sha256(text.encode()).hexdigest()
+    return hashlib.sha256(text.encode()).hexdigest(), corrupted
+
+
+def pick_main(txt_files: list[Path]) -> tuple[Path, bool]:
+    """Module principal = le plus gros fichier pré-opt texte (point de vérité du comptage).
+    Tie-break : tri stable sur l'ordre déjà trié de collect_before_opt → déterministe.
+    Retourne (module, ambigu) : ambigu=True si le 2e plus gros est à <10 % du 1er —
+    l'heuristique « le plus gros » mérite alors un œil (signal, pas un verdict)."""
+    ordered = sorted(txt_files, key=lambda p: p.stat().st_size, reverse=True)
+    main = ordered[0]
+    ambiguous = len(ordered) > 1 and ordered[1].stat().st_size >= 0.9 * main.stat().st_size
+    return main, ambiguous
 
 
 # ---------------------------------------------------------------- comptage des converts
@@ -155,9 +176,15 @@ def do_check(args) -> int:
     #    varier d'une compile à l'autre via le compteur module_NNNN, le CONTENU fait foi).
     strip = [str(Path(args.run_dir).resolve()), str(Path(args.d0_dir).resolve()),
              args.run_dir.rstrip("/"), args.d0_dir.rstrip("/")]
-    h_run = sorted(normalized_hash(p, strip) for p in run_files)
-    h_d0 = sorted(normalized_hash(p, strip) for p in d0_files)
-    differs = h_run != h_d0
+    corrupted: list[str] = []
+    h_run, h_d0 = [], []
+    for files, acc in ((run_files, h_run), (d0_files, h_d0)):
+        for p in files:
+            h, bad = normalized_hash(p, strip)
+            acc.append(h)
+            if bad:
+                corrupted.append(p.name)
+    differs = sorted(h_run) != sorted(h_d0)
 
     report: dict = {
         "differs_from_d0": differs,
@@ -176,7 +203,11 @@ def do_check(args) -> int:
     txt_run = [p for p in run_files if p.suffix == ".txt"]
     txt_d0 = [p for p in d0_files if p.suffix == ".txt"]
     degraded_reason = None
-    if not txt_run or not txt_d0:
+    if corrupted:
+        # Garde anti-échec-silencieux : comptage ET hash texte non fiables sur du U+FFFD.
+        degraded_reason = (f"dump non-UTF8/corrompu : {sorted(corrupted)} — course d'écriture "
+                           "pendant le dump ? comptage non fiable, diff de hash indicatif seul")
+    elif not txt_run or not txt_d0:
         degraded_reason = ("modules before_optimizations présents mais aucun sous forme texte "
                            f"(.txt) — comptage impossible, diff de hash concluant seul "
                            f"(run: {[p.name for p in run_files]}, d0: {[p.name for p in d0_files]})")
@@ -187,9 +218,18 @@ def do_check(args) -> int:
 
     counts_run = counts_d0 = None
     delta = None
+    warnings: list[str] = []
     if degraded_reason is None:
-        main_run = max(txt_run, key=lambda p: p.stat().st_size)
-        main_d0 = max(txt_d0, key=lambda p: p.stat().st_size)
+        main_run, amb_run = pick_main(txt_run)
+        main_d0, amb_d0 = pick_main(txt_d0)
+        for tag, amb, files in (("run", amb_run, txt_run), ("d0", amb_d0, txt_d0)):
+            if amb:
+                top2 = sorted(files, key=lambda p: p.stat().st_size, reverse=True)[:2]
+                warnings.append(f"WARNING: module principal ambigu côté {tag} — 2 plus gros "
+                                "à <10 % : "
+                                + ", ".join(f"{p.name} ({p.stat().st_size} o)" for p in top2))
+        if amb_run or amb_d0:
+            report["main_module_ambiguous"] = True
         counts_run, counts_d0 = count_converts(main_run), count_converts(main_d0)
         delta = counts_run["total"] - counts_d0["total"]
         report["converts_run"] = counts_run
@@ -197,15 +237,18 @@ def do_check(args) -> int:
         report["files_compared"]["run"]["main_module"] = main_run.name
         report["files_compared"]["d0"]["main_module"] = main_d0.name
 
-    # 3. Verdict — ordre §5 : identité d'abord (§5.2/vacuité structurelle), puis oracle §5.3.
-    if not differs:
+    # 3. Verdict — dégradé d'abord (une preuve non fiable ne doit pas produire un
+    #    IDENTICAL/INVALID propre en silence), puis identité (§5.2), puis oracle §5.3.
+    if degraded_reason is not None:
+        report["degraded"] = True
+        report["degraded_reason"] = degraded_reason
+        # differs → seule la preuve structurelle a passé ; le 52 tranche mono/multi.
+        # not differs → le 52 l'invalide de toute façon (differs_from_d0 false).
+        report["verdict"] = "OK" if differs else "IDENTICAL"
+    elif not differs:
         # Graphes identiques ⇒ comptes identiques par construction : delta 0 en clair.
         report["verdict"] = "IDENTICAL"
         report["convert_delta_observed"] = 0 if delta is None else delta
-    elif degraded_reason is not None:
-        report["degraded"] = True
-        report["degraded_reason"] = degraded_reason
-        report["verdict"] = "OK"  # seule la preuve structurelle a passé ; le 52 tranche mono/multi
     elif delta != expected:
         report["convert_delta_observed"] = delta
         report["verdict"] = "INVALID"
@@ -226,6 +269,8 @@ def do_check(args) -> int:
     print(f"  run : {args.run_dir} ({len(run_files)} module(s) pré-opt)")
     print(f"  d0  : {args.d0_dir} ({len(d0_files)} module(s) pré-opt)")
     print(f"  differs_from_d0 : {differs}")
+    for w in warnings:
+        print(f"  ⚠ {w}")
     if counts_run is not None:
         print(f"  converts run : {counts_run['total']} {counts_run['by_transition']} "
               f"[{counts_run['module']}]")
