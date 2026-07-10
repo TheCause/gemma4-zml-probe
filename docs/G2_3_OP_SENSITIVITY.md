@@ -274,7 +274,7 @@ run**, mesure répétée **2×**, conditions consignées au manifest. Référenc
 | Gate | Date | Verdict | Mesures clés |
 |---|---|---|---|
 | G2.3.0 (neutralité + pré-enregistrement) | 10 juil 2026 | **PASS** | HLO gold byte-identique ; D0 1020/1020 == HF ; non-régression G2.2 reproduite (0.271×/0.436×, bifurcation 96) |
-| G2.3.1 (sweep one-hot) | — | — | — |
+| G2.3.1 (sweep one-hot) | 10 juil 2026 | **PASS — 12/12 SAFE** | oracle converts 12/12 exact ; plage KL p50 : 0.0028×–0.13× B ; bitwise inter-compiles réfuté (effet stable ~2 %) |
 | G2.3.2 (combiné + stabilité + VRAM) | — | — | — |
 
 ### 9.1 G2.3.0 — Neutralité du refactor — **PASS (10 juil 2026)**
@@ -298,13 +298,46 @@ et les 3 runs rejoués sortent `SAFE` avec Δ exacts (upsert `re_run=1`).
 `qkv_proj` **SAFE** (KL p50 = 0.0104× B ; argmax **1020/1020**, aucune bifurcation) — 2 des 12
 one-hot déjà mesurés au passage de la non-régression.
 
-### 9.2 G2.3.1 — Classement de sensibilité (12 familles)
+### 9.2 G2.3.1 — Classement de sensibilité (12 familles) — **PASS (10 juil 2026)**
 
-Classé par `KL p50 vs D0` décroissant :
+**Résultat : les 12 familles sont individuellement `SAFE`** (toutes ≤ 0.14× l'enveloppe B, soit
+~7× sous le seuil SAFE et ~15× sous le critère G2.2). L'oracle anti-câblage-croisé est **12/12
+exact** (chaque delta de converts observé == prédit par la table v2). Classé par `KL p50 vs D0`
+décroissant (mismatches et bifurcation = vs A) :
 
-| Rang | Famille | KL p50 vs D0 | KL p50 vs A (ratio B) | max_abs p50 vs A (ratio B) | argmax /1020 | 1re bifurcation | Converts Δ att./obs. | Verdict |
+| Rang | Famille | KL p50 vs D0 | KL p50 vs A (ratio B) | max_abs p50 vs A (ratio B) | argmax /1020 | 1re bifurcation | Converts Δ att.=obs. | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — | — |
+| 1 | `softcap` | 1.344e-05 | 0.131× | 0.334× | 3 mism. | 161 | 2 | **SAFE** |
+| 2 | `norms` | 8.062e-06 | 0.080× | 0.296× | 0 | — | 1190 | **SAFE** |
+| 3 | `mlp` | 7.860e-06 | 0.076× | 0.272× | 1 | 96 | 70 | **SAFE** |
+| 4 | `head` | 4.947e-06 | 0.047× | 0.146× | 1 | 162 | 1 | **SAFE** |
+| 5 | `qk_scores` | 3.384e-06 | 0.030× | 0.164× | 2 | 22 | 85 | **SAFE** |
+| 6 | `rope` | 2.633e-06 | 0.026× | 0.146× | 0 | — | 104 | **SAFE** |
+| 7 | `pv_ctx` | 1.494e-06 | 0.014× | 0.111× | 0 | — | 85 | **SAFE** |
+| 8 | `ple` | 1.175e-06 | 0.011× | 0.107× | 0 | — | 71 | **SAFE** |
+| 9 | `qkv_proj` | 1.131e-06 | 0.010× | 0.104× | 0 | — | 35 | **SAFE** |
+| 10 | `kv_store` | 9.389e-07 | 0.0079× | 0.092× | 0 | — | 60 | **SAFE** |
+| 11 | `o_proj` | 9.282e-07 | 0.0089× | 0.090× | 0 | — | 35 | **SAFE** |
+| 12 | `softmax` | 3.786e-07 | 0.0028× | 0.047× | 0 | — | 140 | **SAFE** |
+
+**Lectures** (diagnostiques, scopées S46) :
+- **`softcap` est la famille la plus sensible** : 1 seul site, mais c'est la dernière op avant les
+  logits — l'arrondi les frappe sans amortissement. À l'inverse, `softmax` (35 sites) est la moins
+  sensible : des probabilités bornées [0,1] encaissent l'arrondi presque sans trace.
+- **`kv_store` quasi-gratuit** (0.0079× B, 0 mismatch) — la donnée la plus précieuse pour
+  TurboQuant : stocker le cache K/V en bf16 ne coûte presque rien en fidélité sur cette séquence.
+- Le nombre de sites ne prédit PAS la sensibilité (norms 1190 converts ≈ mlp 70 ; softmax 140 ≫
+  softcap 2 en sites mais 47× moins sensible) : c'est la **position dans le flux** qui compte.
+
+**Déterminisme (critère pré-enregistré RÉFUTÉ, publié tel quel)** : le check « logits
+bit-identiques entre deux runs de la même config » ÉCHOUE — md5 différents pour les paires
+répétées (mlp ×2, 7-familles ×2). Cause : l'autotuning XLA-GPU varie entre compilations (les
+`.txt` post-optimisation diffèrent, le `before_optimizations` est identique). **Le bit-à-bit
+n'existe pas entre deux compiles XLA-GPU** — écho direct de la leçon G2.0 (« == bit-à-bit
+n'existe pas en bf16 »). Quantification du bruit compile-à-compile : sur la paire 7-familles,
+KL p50 vs D0 = 2.6230e-5 (run 1) vs 2.6776e-5 (run 2) → **effet mesuré stable à ~2 % relatif**,
+négligeable devant les écarts inter-familles (>1 ordre de grandeur). Le classement est robuste ;
+toute comparaison fine (<5 %) entre familles voisines serait en revanche non significative.
 
 ### 9.3 G2.3.2 — Config combinée
 
