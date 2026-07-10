@@ -376,24 +376,49 @@ d'elle-même.
    via runfiles).
 6. **Compile XLA-CPU du forward 35 couches** : gourmand en RAM — un swap actif est requis sur l'hôte
    (sinon OOM-kill exit 255 au compile). `smoke.sh` vérifie et avertit.
+7. **Le traçage ZML DÉDUPLIQUE les nœuds identiques** (règle d'émission découverte en G2.3, non
+   documentée upstream) : émettre deux fois la même op sur les MÊMES opérandes/attributs produit
+   **UN seul nœud** dans le HLO `before_optimizations` — pas deux. Vérifiée sur `convert`,
+   `choose1d` et les constantes, y compris **à travers des invocations de fonction distinctes**
+   (`zml.nn.rope` appelé 40× → UN `idx.convert(f32)` émis). Cinq preuves empiriques (10 juil
+   2026, workspace 3090) :
+   - `xff.convert(bf16)` partagé par gate_proj et up_proj → 1 convert/couche au lieu de 2
+     (one-hot `mlp` : Δ70 observé, pas 105) ;
+   - `h0.convert(bf16)` partagé par q/k/v_proj → 1/couche (one-hot `qkv_proj` : Δ35, pas 65) ;
+   - les `choose1d` des 20 readers YOCO ≡ celui de leur writer (mêmes opérandes) → leurs converts
+     fusionnent (run 7-familles : Δ382 exact) ;
+   - recensement D0 réconcilié **à l'unité** : 542 converts (sans dédup on en prédirait 581) ;
+   - une dédup **inter-features** : un convert `bf16[1,1,1536]` d'opérande `%multiply` partagé
+     entre les familles norms et ple (localisée par bisection + diff de signatures HLO).
+   **Conséquences pratiques** : (a) tout oracle de comptage d'ops doit compter les nœuds ÉMIS
+   après déduplication, jamais les appels dans le code ; (b) les comptes de deux features ne
+   s'additionnent que MOINS leurs nœuds partagés nommés (cf `_interfamily_dedups` de
+   `fixtures/g2_3_expected_converts.json`) ; (c) propriété utile : une sous-expression répétée ne
+   coûte rien de plus dans le graphe. **Portée** : établie empiriquement (mécanisme présumé =
+   value-uniquing du builder MLIR, non tracé dans les sources) — à re-vérifier si le workspace
+   ZML est resynchronisé upstream. Dossier de preuve : `docs/G2_3_OP_SENSITIVITY.md` §5.3/§9 +
+   `fixtures/g2_3_expected_converts.json` `_meta`.
 
 **Gemma 4 :**
 
-7. **Scalings d'embeddings implicites** : `×√1536` (embed) et `×√256=16` (PLE) sont inclus dans les
+8. **Scalings d'embeddings implicites** : `×√1536` (embed) et `×√256=16` (PLE) sont inclus dans les
    modules Transformers mais PAS dans les poids bruts — à réappliquer explicitement.
-8. **`with_scale=False` ≠ pas de normalisation** : `v_norm` normalise V (division RMS) sans poids
+9. **`with_scale=False` ≠ pas de normalisation** : `v_norm` normalise V (division RMS) sans poids
    appris. « Pas de poids au checkpoint » ne signifie pas « pas d'op ».
-9. **Attention scaling = 1.0** (pas 1/√head_dim), pas de softcap d'attention (seulement le softcap
-   final 30), masque additif, softmax fp32.
-10. **Checkpoint multimodal** : les poids texte sont sous `model.language_model.*` ; les K/V des
+10. **Attention scaling = 1.0** (pas 1/√head_dim), pas de softcap d'attention (seulement le softcap
+    final 30), masque additif, softmax fp32.
+11. **Checkpoint multimodal** : les poids texte sont sous `model.language_model.*` ; les K/V des
     readers existent sur disque mais sont ignorés au runtime (YOCO).
 
 **Méthode :**
 
-11. **Oracle = source de vérité** : dériver chaque oracle de `modeling_gemma4.py`, jamais d'une
+12. **Oracle = source de vérité** : dériver chaque oracle de `modeling_gemma4.py`, jamais d'une
     hypothèse ré-encodée (sinon PASS trompeur par hypothèse partagée).
-12. **Comparer les logits, pas l'argmax**, pour tout contre-test de non-vacuité.
-13. **VRAM : mesurer avec `--no-prealloc`** — sinon on lit la réserve BFC, pas l'usage réel.
+13. **Comparer les logits, pas l'argmax**, pour tout contre-test de non-vacuité.
+14. **VRAM : mesurer avec `--no-prealloc`** — sinon on lit la réserve BFC, pas l'usage réel.
+15. **Pas de bit-à-bit entre deux compiles XLA-GPU** (autotuning : le `before_optimizations` est
+    stable, le post-opt non) — comparer des MÉTRIQUES, quantifier le bruit compile-à-compile
+    (~2 % sur un grand effet, jusqu'à ~16 % sur un petit — G2.3 §9.2/§9.4).
 
 ---
 
