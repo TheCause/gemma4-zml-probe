@@ -97,6 +97,11 @@ transférable (quelles ops de Gemma 4 tolèrent la basse précision — alimente
 Le tri a priori de `GPU_PORT_PLAN.md` §5.2 (normes/softmax/RoPE sensibles, gelu tolérant) est
 l'hypothèse à confirmer/infirmer.
 
+> **Supersedé** : ce croquis a été exécuté sous un protocole pré-enregistré qui **inverse le sens
+> du balayage** décrit ci-dessus (one-hot bf16 sur base f32, plutôt que tout-bf16 moins une
+> famille f32) — voir `docs/G2_3_OP_SENSITIVITY.md` §1 pour la justification. Le protocole fait foi,
+> ce croquis reste comme trace de l'intention initiale.
+
 ---
 
 ## 4. Métriques — sémantique
@@ -146,7 +151,7 @@ l'hypothèse à confirmer/infirmer.
 | G2.0 | 2026-07-04 | **PASS** (déterminisme + sanity) — enveloppe mesurée | cf §7.1 |
 | G2.1 | 2026-07-04 | **PASS** (bras C ≡ G1, prouvé io.zig + run 64/64) | cf §7.2 |
 | G2.2 | 2026-07-04 | **PASS** — ZML-bf16 2 à 5× PLUS fidèle que l'enveloppe HF | cf §7.3 |
-| G2.3 | — | non déclenché (G2.2 PASS) — reste dispo en bonus TurboQuant/alambic | — |
+| G2.3 | 2026-07-10 | **PASS** (3 gates : G2.3.0/.1/.2) — 12/12 familles SAFE, config combinée à **0.486×** l'enveloppe | cf [`docs/G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md) §9 |
 
 ### 7.1 G2.0 — enveloppe HF-bf16 mesurée (3090, run 205s+151s+42s)
 

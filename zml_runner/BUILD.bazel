@@ -458,10 +458,16 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
-# G2.2 — bras D : gemm bf16 (PrecCfg.gemm=.bf16), dump logits par step (verdict via scripts/51).
+# G2.2 : l'ex-runner gemma4_gen_long_gpu_bf16 (bras D comptime) a été SUPPRIMÉ après le PASS de
+# la non-régression G2.3.0 — sa config est réexprimée par gemma4_g23_sweep
+# "qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head" (ratios G2.2 reproduits : KL p50 0.271×,
+# max_abs p50 0.436×, bifurcation 96 — manifest g2_3, 10 juil 2026).
+
+# G2.3 — sweep sensibilité par famille : UN binaire, PrecRt par argv ("fam1,fam2" ou "none"),
+# dump logits par step + --no-prealloc (mesure VRAM kv_store). Nom 16c < quota comptime pjrt.zig.
 zig_binary(
-    name = "gemma4_gen_long_gpu_bf16",
-    main = "gemma4_gen_long_gpu_bf16.zig",
+    name = "gemma4_g23_sweep",
+    main = "gemma4_g23_sweep.zig",
     srcs = ["engine.zig", "mem_probe.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],

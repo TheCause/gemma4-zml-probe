@@ -100,6 +100,8 @@ def main() -> None:
     ap.add_argument("--prompt", required=True, help="prompt en langage naturel (rôle user)")
     ap.add_argument("--n-tokens", type=int, default=200, help="nombre de tokens à générer (défaut 200)")
     ap.add_argument("--out", default=str(ROOT / "gen_custom.safetensors"))
+    ap.add_argument("--kv-dtype", choices=["f32", "bf16"], default="f32",
+                    help="dtype d'écriture du cache K/V de la fixture (bf16 = variante kv_store G2.3)")
     args = ap.parse_args()
 
     assert WEIGHTS.exists(), WEIGHTS
@@ -185,13 +187,18 @@ def main() -> None:
             if j > p:
                 masks_full[k, 0, 0, 0, j] = MIN
 
+    # --kv-dtype bf16 (G2.3, miroir du script 46) : cache K/V écrit en bf16 — le dtype de STOCKAGE
+    # du cache ZML suit le header de la fixture (mécanisme (b), famille kv_store). L'état prefill
+    # est arrondi aussi (contrat kv_store appliqué au prefill). En f32 (défaut), .to() est un no-op
+    # → fixture standard inchangée.
+    kv_dt = torch.bfloat16 if args.kv_dtype == "bf16" else torch.float32
     tensors = {
         "embeds": embeds.contiguous(), "embptls": embptls.contiguous(),
         "cos_full": cos_full.contiguous(), "sin_full": sin_full.contiguous(),
         "positions": positions.contiguous(),
         "masks_sliding": masks_sliding.contiguous(), "masks_full": masks_full.contiguous(),
-        "cache_sl_k": cache_sl_k.contiguous(), "cache_sl_v": cache_sl_v.contiguous(),
-        "cache_fl_k": cache_fl_k.contiguous(), "cache_fl_v": cache_fl_v.contiguous(),
+        "cache_sl_k": cache_sl_k.to(kv_dt).contiguous(), "cache_sl_v": cache_sl_v.to(kv_dt).contiguous(),
+        "cache_fl_k": cache_fl_k.to(kv_dt).contiguous(), "cache_fl_v": cache_fl_v.to(kv_dt).contiguous(),
         "expected": torch.tensor(expected, dtype=torch.int32),
         "fed": torch.tensor(fed, dtype=torch.int32),
     }

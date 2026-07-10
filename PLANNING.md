@@ -2,7 +2,7 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## État 9 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
+## État 9-10 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
 
 **Le portage est complet et la claim de fidélité est solide aux deux régimes de précision.**
 
@@ -26,19 +26,28 @@
 
 ### Planning courant
 
-- [H] **PR `generation-longue` → `main`** — tout est PASS et poussé ; solde le chantier. *(en cours)*
+- [x] **PR `generation-longue` → `main`** — mergée le 9 juil (PR #3, `c4d483b`).
+- [x] **G2.3 — cartographie de sensibilité bf16 par-op** — **LES 3 GATES PASS le 10 juil**
+  (branche `g2.3-op-sensitivity`, tags `gate/G2.3.*`) : moteur `PrecRt` runtime (12 familles),
+  sweep one-hot **12/12 SAFE** (classement softcap > norms > mlp > … > softmax), config combinée
+  **12 familles SAFE (KL 0.486× l'enveloppe)**, interaction quasi-additive (1.06×), stabilité S49,
+  VRAM kv_store −17 MiB (= ½ cache). Oracle anti-câblage-croisé 12/12 exact (2 découvertes :
+  déduplication de nœuds au traçage ZML ; dédup inter-familles norms×ple nommée). Résultats :
+  `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
 - [M] **Runtime 100 % autonome** — tokenizer intégré + early-stop EOS (aujourd'hui le banc est
   validé CONTRE l'oracle HF ; limite assumée).
-- [B] **G2.3 bonus** — cartographie de sensibilité par-op (quelles ops tolèrent bf16) → alimente
-  TurboQuant / alambic.
+- [M] **Transfert G2.3 → TurboQuant / alambic** — exploiter la carto (kv_store bf16 quasi-gratuit ;
+  softcap = op la plus sensible ; config 12-familles comme régime de prod candidat).
 
 ### Garde-fous courants
 
 - **Piège workspace ZML** : patch local 1 ligne `@setEvalBranchQuota(100_000)` dans `pjrt.zig`
   (`structSize`, commenté `local patch rqz`) — **à réappliquer si le workspace ZML de la 3090 est
-  resynchronisé upstream**, sinon le build des runners à cfg comptime `.prec` casse.
+  resynchronisé upstream**. Requis dès qu'un `@typeName` de type (modèle, runner) devient assez long
+  pour dépasser le quota comptime 1000 (`indexOf` sur `@typeName`) — un piège général, pas propre à
+  une famille de runners donnée.
 - Critère « 1020/1020 » exigible en fp32 seulement — en bf16, HF lui-même ne le tient pas (G2.0) ;
   le critère bf16 est l'enveloppe chiffrée de `docs/G2_BF16_FIDELITY.md` §7.1.
 - Leçons méthodo toujours actives : argmax greedy trop robuste (comparer les LOGITS) ; un audit

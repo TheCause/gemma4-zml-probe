@@ -1,0 +1,122 @@
+{
+  "_meta": {
+    "role": "ORACLE du check anti-câblage-croisé (script 53_g2_3_hlo_check.py, spec §5.3) : delta converts HLO PRÉ-optimisation observé != attendu ⇒ run INVALID. Les familles `uncertain` sont tranchées par leur premier run one-hot et ce fichier est mis à jour (commit) AVANT la suite du sweep.",
+    "date": "2026-07-10 (v2 — re-dérivée avec la règle de déduplication, amendée AVANT le sweep)",
+    "engine_zig_commit": "1230175219e3f004a3d44ac2958b741e842dd7a8",
+    "graph": "forward (mono-graphe 35 couches) — le runner gemma4_g23_sweep compile UNIQUEMENT .forward (platform.compile(..., .forward, ...)) → head/softcap/final_norm/frontend-PLE = 1 site chacun. forwardStageGen/forwardStep/forwardStageStep ne sont PAS compilés par le sweep.",
+    "emission_rule_cse": {
+      "rule": "RÈGLE D'ÉMISSION OBSERVÉE (empirique, 10 juil 2026) : le traçage ZML/MLIR DÉDUPLIQUE les nœuds identiques — même op, mêmes opérandes, mêmes attributs → UN seul nœud émis, quelle que soit la multiplicité des sites d'appel. Le compte = converts émis APRÈS déduplication.",
+      "evidence": [
+        "1) mlp one-hot : Δ observé +70 (+70 ?→bf16, ?→f32 net 0) — xff.convert(bf16) PARTAGÉ par gate_proj et up_proj (1/couche au lieu de 2) + act-in down (1/couche) ; −105 converts f32 de poids baseline + 105 outs f32 = net 0",
+        "2) qkv_proj one-hot : Δ observé +35 (+35 ?→bf16) — h0.convert(bf16) PARTAGÉ par q/k/v_proj (1/couche)",
+        "3) run 7-familles GEMM : Δ observé +382 (+312 ?→bf16, +70 ?→f32) = somme EXACTE des deltas CSE par famille (35+85+85+35+70+71+1) — les choose1d des 20 readers se dédupliquent avec ceux des producers 13/14 (mêmes opérandes : cache final + même slot)",
+        "4) recensement D0 : 542 ?→f32 + 1 ?→u32 — réconcilié EXACTEMENT à la main : 535 converts de poids (15 producers × 17 + 20 readers × 14) + 6 globaux (embed_tokens@head, final_norm, per_layer_model_projection, per_layer_projection_norm, embeds, embptl) + 1 SEUL idx.convert(f32) (i32, nn.zig rope) pour les 40 appels slidingRope → prouve indépendamment la déduplication À TRAVERS les invocations de zml.nn.rope (sans dédup on lirait 581)"
+      ],
+      "history": "la table v1 (32bb162) comptait chaque site d'appel séparément — l'INVALID initial du run 7-familles était un FAUX POSITIF de la table (métriques saines) ; la gate anti-câblage-croisé a fonctionné comme prévu en forçant cette investigation. Les 3 runs INVALID restent au manifest comme trace."
+    },
+    "zml_sources_verified": "miroir M1 ~/dev/zml @ adee932efa875d181cfc3ec8cbc4eb822db76035 : nn.zig (rmsNorm l.93-100, rope l.270-295), tensor.zig (convert l.1050-1053, dotGeneral l.1218+1222, softmax l.1369-1380, scale l.1024). Le workspace de COMPILE est /data/rqz_workspace/zml (3090) : émissions INTERNES zml (rmsNorm/softmax/rope) non encore observées en run → familles concernées marquées uncertain avec alternatives.",
+    "counting_rules": [
+      "Le compte = converts ÉMIS dans le HLO PRÉ-optimisation (*before_optimizations*), APRÈS déduplication des nœuds identiques (règle CSE ci-dessus), en DELTA vs le recensement de D0 (baseline tout-null, fixture standard f32).",
+      "convert vers le même dtype = `return self` (tensor.zig) : ZÉRO op HLO émise.",
+      "Poids checkpoint = DÉJÀ bf16 sur device (header safetensors, G2.1) : famille GEMM active ⇒ w.convert(bf16) no-op, MAIS le w.convert(f32) de la baseline (une VRAIE op) DISPARAÎT ; les converts-out f32 des dots réapparaissent en nombre égal ⇒ GEMM à poids : delta = nombre de converts D'ENTRÉE D'ACTIVATION APRÈS DÉDUP (transitions ?→f32 nettes 0).",
+      "GEMM à 2 opérandes f32 (qk_scores, pv_ctx — cache f32 en one-hot) : ins dédupliqués (cache : readers ≡ producers 13/14) + outs f32 réels (+35, jamais dédupliqués : résultats de dots distincts).",
+      "dot exige lhs.dtype == rhs.dtype et sort AU DTYPE des opérandes (tensor.zig dotGeneral) ⇒ le convert-out d'une famille GEMM active est toujours une vraie op.",
+      "Famille norms, chaîne poids : le code émet inPrec(fam, w.convert(compute)) — le w.convert(f32) baseline RESTE émis quand la famille est active (bf16→f32→bf16 aux bornes) ⇒ delta poids = +1/site (poids tous distincts : pas de dédup).",
+      "ADDITIVITÉ SOUS CSE : l'attendu d'un run multi-familles = SOMME des deltas des familles actives, VALIDE tant qu'aucun nœud n'est partagé ENTRE familles (aucun partage inter-familles identifié à la dérivation ; vérifié empiriquement sur le run 7-familles GEMM : 382 = somme exacte). Si un mismatch multi-familles apparaît, le script 53 dégrade en differs_from_d0 et le consigne."
+    ],
+    "uncertain_resolution": "Les 3 uncertain (norms/softmax/rope) sont sortis sur leur prédiction PRINCIPALE au one-hot — oracle validé 11/11 exact au sweep par défaut, 12/12 avec kv_store (run séparé, fixture variante) (10 juil 2026). Alternatives retirées."
+  },
+  "qkv_proj": {
+    "status": "observed",
+    "sites": "65 appels (35 q_proj + 15 k_proj + 15 v_proj, producers 0-14 YOCO) → converts dédupliqués : h0.convert(bf16) PARTAGÉ par q/k/v de la même couche = 35 nœuds",
+    "delta_converts_vs_d0": 35,
+    "derivation": "by_transition : +35 ?→bf16 (h0-in, 1/couche) ; ?→f32 net 0 (−65 w.convert(f32) baseline disparus + 65 outs). OBSERVÉ one-hot : Δ35 ✓"
+  },
+  "qk_scores": {
+    "status": "derived_with_cse_rule",
+    "sites": "35 dots (qs·cache_k) → converts : 35 qs-in (distincts par couche) + 15 cache_k-in (producers 0-12 distincts = 13 ; producer 13 ≡ 16 sliding readers = 1 ; producer 14 ≡ 4 full readers = 1) + 35 outs",
+    "delta_converts_vs_d0": 85,
+    "derivation": "by_transition : +50 ?→bf16 (35 qs + 15 cache_k — les choose1d des readers ont les MÊMES opérandes que ceux des writers 13/14 : cache final + même slot → converts dédupliqués) + 35 ?→f32 (outs). Cohérent avec le run 7-familles observé (Δ382 = somme exacte) ; pas encore observé isolément",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "pv_ctx": {
+    "status": "derived_with_cse_rule",
+    "sites": "35 dots (probs·cache_v) → converts : 35 ps-in + 15 cache_v-in (même structure de dédup que qk_scores) + 35 outs",
+    "delta_converts_vs_d0": 85,
+    "derivation": "by_transition : +50 ?→bf16 + 35 ?→f32. Cohérent avec le run 7-familles observé ; pas encore observé isolément",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "o_proj": {
+    "status": "derived_with_cse_rule",
+    "sites": "35 (dot attn_m·o_proj) — attn_m distincts par couche, aucun partage",
+    "delta_converts_vs_d0": 35,
+    "derivation": "by_transition : +35 ?→bf16 (attn_m-in) ; ?→f32 net 0 (−35 poids +35 outs). Cohérent avec le run 7-familles",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "mlp": {
+    "status": "observed",
+    "sites": "105 appels (gate/up/down ×35) → converts dédupliqués : xff.convert(bf16) PARTAGÉ par gate et up (1/couche) + act-in down (1/couche) = 70 nœuds",
+    "delta_converts_vs_d0": 70,
+    "derivation": "by_transition : +70 ?→bf16 (2/couche) ; ?→f32 net 0 (−105 poids +105 outs). OBSERVÉ one-hot : Δ70 ✓"
+  },
+  "ple": {
+    "status": "derived_with_cse_rule",
+    "sites": "71 = 2×35 (per_layer_input_gate in = h2, per_layer_projection in = g — tous distincts) + 1 frontend (embeds, perLayerInputs)",
+    "delta_converts_vs_d0": 71,
+    "derivation": "by_transition : +71 ?→bf16 ; ?→f32 net 0 (−71 poids +71 outs). Aucun partage (h2/g/embeds distincts). Cohérent avec le run 7-familles. NB : rmsScaleP(per_layer_projection_norm) au frontend N'EST PAS dans la famille ple ni norms (limitation documentée, doc §3)",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "head": {
+    "status": "derived_with_cse_rule",
+    "sites": "1 (dot last_hidden·embed_tokens tied, graphe .forward — seul graphe compilé par le sweep runner)",
+    "delta_converts_vs_d0": 1,
+    "derivation": "by_transition : +1 ?→bf16 (last_hidden-in) ; ?→f32 net 0 (−1 poids +1 out). Cohérent avec le run 7-familles",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "norms": {
+    "status": "derived_with_cse_rule",
+    "sites": "241 = 176 rmsScaleDPrec (5 layernorms×35 + final_norm) + 50 rmsScaleHdPrec (q_norm 35 + k_norm 15 producers) + 15 v_norm sans poids (producers) — entrées ET poids TOUS distincts : aucune dédup attendue",
+    "delta_converts_vs_d0": 1190,
+    "derivation": "rmsScale{D,Hd}Prec : +5/site = x-in +1 (f32→bf16), poids +1 (f32→bf16 APRÈS le w.convert(f32) baseline qui reste émis), rmsNorm INTERNE +2 (nn.zig l.96 convert(.f32) + l.99 convert(x_.dtype()) — vraies ops sur entrée bf16, no-ops en baseline f32), out +1 (bf16→f32) → 226×5 = 1130 ; v_norm (pas de poids) : +4/site → 15×4 = 60. by_transition attendu : +708 ?→bf16 (241 x-in + 226 w + 241 rmsNorm-exit), +482 ?→f32 (241 rmsNorm-entry + 241 outs)",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "softmax": {
+    "status": "derived_with_cse_rule",
+    "sites": "35 (softmax attention, post-add mask) — scores distincts par couche : aucune dédup",
+    "delta_converts_vs_d0": 140,
+    "derivation": "+4/site = scores-in +1, softmax INTERNE +2 (tensor.zig l.1374 .convert(.f32) sur sub(max) + l.1375 .convert(self.dtype()) — vraies ops sur entrée bf16, no-ops en baseline), out +1 → 35×4 = 140. by_transition attendu : +70 ?→bf16, +70 ?→f32. NB : le softmax zml calcule exp/sum/div en f32 même en bf16 — contrat « bornes arrondies » respecté",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "rope": {
+    "status": "derived_with_cse_rule",
+    "sites": "manualRope (couches full 4,9,14,19,24,29,34) : 10 appels (q×7 + k×3 full producers) → x-in 10 distincts + cos-in 1 + sin-in 1 (cos_full/sin_full = pickStep hoisté AVANT la boucle : MÊME nœud pour les 10 appels → converts dédupliqués) + outs 10 = 22 ; slidingRope→zml.nn.rope (28 couches sliding) : 40 appels (q×28 + k×12 sliding producers) → x-in 40 + cos/sin internes 2 (chaîne inv_freq→outer→cos/scale IDENTIQUE pour les 40 appels : même idx=pos_s, même constante inv_freq hd=256, même theta/scaling → dédup) + outs 40 = 82",
+    "delta_converts_vs_d0": 104,
+    "derivation": "by_transition attendu : +54 ?→bf16 (50 x-in + 2 cos/sin fixture [f32, script 46] + 2 cos/sin internes [nn.zig l.286-287 convert(x.dtype())]), +50 ?→f32 (outs). Le idx.convert(.f32) interne (i32) est émis dans les DEUX cas (delta 0) — et le recensement D0 (542) prouve qu'il est dédupliqué à 1 sur les 40 appels : la dédup À TRAVERS les invocations nn.rope est un FAIT OBSERVÉ (evidence 4)",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "softcap": {
+    "status": "derived_with_cse_rule",
+    "sites": "1 (30·tanh(x/30) sur les logits, forward) — site unique, aucune dédup possible",
+    "delta_converts_vs_d0": 2,
+    "derivation": "+2 = raw-in +1 (?→bf16), out +1 (?→f32). scale() émet sa constante AU DTYPE du tensor (tensor.zig l.1024-1026 mul .scalar(val, self.dtype())) : aucun convert ; tanh idem",
+    "statut": "observé (one-hot 10 juil 2026, delta exact)"
+  },
+  "kv_store": {
+    "status": "derived_with_cse_rule",
+    "sites": "writes : 30 (15 producers × 2, inPrec sur k_new/v_new distincts — pas de dédup) ; reads : 30 (producers 0-12 : 13×2 = 26 distincts ; producer 13 ≡ 16 sliding readers : 2 ; producer 14 ≡ 4 full readers : 2 — MÊME structure de dédup que les cache-in de qk_scores/pv_ctx, validée par le run 7-familles)",
+    "delta_converts_vs_d0": 60,
+    "derivation": "writes inPrec f32→bf16 (+30) + reads .convert(compute) bf16→f32 (+30 après dédup readers→writers 13/14). by_transition attendu : +30 ?→bf16, +30 ?→f32. Baseline : zéro op à ces sites (inPrec = return x, branche non prise)",
+    "caveat_fixture": "run avec la fixture VARIANTE gen_long_kvbf16.safetensors (mécanisme b : le dtype de STOCKAGE vient du header). Le diff HLO vs D0 contient donc AUSSI le changement de dtype des 4 paramètres cache_* et des updates de scatter — le compte de converts, lui, reste +60. L'état prefill initial est arrondi bf16 (contrat appliqué au prefill). Run HORS sweep par défaut ; fixture standard f32 + kv_store actif ⇒ Cache.checkDtype REFUSE avant compile (error.KvCacheDtypeMismatch), pas de run vacuux possible."
+  },
+  "_combined_reference": {
+    "rule": "attendu d'un run multi-familles = SOMME des deltas des familles actives (additivité sous CSE : valide sans partage inter-familles, cf _meta.counting_rules)",
+    "g2_2_nonregression_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head": 382,
+    "observed": "Δ382 OBSERVÉ au run 7-familles (+312 ?→bf16, +70 ?→f32) = somme exacte des deltas CSE ✓"
+  },
+  "_interfamily_dedups": {
+    "norms+ple": {
+      "delta": -1,
+      "derivation": "Dédup inter-familles UNIQUE, localisée par bisection exhaustive (12-combiné Δ1877 vs somme 1878 ; GEMM7 seul exact ; non-GEMM5 seul exact ; GEMM7+norms+softmax −1 ; GEMM7+norms −1 ; les 7 paires norms×GEMM exactes SAUF norms+ple Δ1260 vs 1261) puis diff de signatures des converts (pair vs somme one-hots) : un convert bf16[1,1,1536] d'opérande %multiply émis une seule fois quand norms ET ple sont actives (nœud partagé par déduplication au traçage). Les ±35 reclassifications %dot→%convert observées au même diff (sandwich ple-out/norms-in au site post_per_layer_input_norm) ne changent pas le total. 10 juil 2026."
+    }
+  }
+}

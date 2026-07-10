@@ -14,7 +14,11 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 > linéaire **1020/1020 == HF**, `L1b` ring-buffer 512 + masque circulaire **1020/1020 == HF** (wrap
 > franchi), non-vacuité du fenêtrage **prouvée par les logits**, et `L2` génération **autonome 1020/1020
 > == HF** (gather→reinject host, embeddings lus en streaming). **GPU/CUDA validé** : 1020/1020 == HF à
-> **109 tok/s** (mono-graphe, sans chunking — le mur mémoire CPU disparaît). Reste : `L3` (in-graph) + bf16.
+> **109 tok/s** (mono-graphe, sans chunking — le mur mémoire CPU disparaît). bf16 fidelity PROVEN
+> (G2 PASS 4 juil ; G2.3 per-op sensitivity map PASS 10 juil — all 12 op families SAFE, combined
+> config at 0.486× the HF-bf16 envelope, see docs/G2_3_OP_SENSITIVITY.md) ; note VRAM: weights
+> already bf16 on device (G2.1), kv bf16 saves only half the cache. Still open: batching/flash-attn,
+> L3 in-graph, autonomous runtime.
 > Voir [`docs/GENERATION_LONGUE_PLAN.md`](docs/GENERATION_LONGUE_PLAN.md) et [`docs/ENGINE_LOG.md`](docs/ENGINE_LOG.md).
 
 ```
@@ -126,7 +130,10 @@ path only) · no independent perf benchmarks.
   OOM was resolved by streaming the embedding gather row-by-row from the safetensors.
 - GPU/CUDA: **validated** — `gemma4_gen_long_gpu` reproduces HF **1020/1020** at **109 tok/s** (fp32, RTX
   3090), built with `--@zml//platforms:cuda=true`. The mono-graph fits in ~22 Go VRAM, so chunking is not
-  needed on GPU. Still open: **bf16 precision** (G2, would halve VRAM) and `L3` (in-graph).
+  needed on GPU. bf16 fidelity PROVEN (G2 PASS 4 juil ; G2.3 per-op sensitivity map PASS 10 juil — all 12
+  op families SAFE, combined config at 0.486× the HF-bf16 envelope, see docs/G2_3_OP_SENSITIVITY.md) ;
+  note VRAM: weights already bf16 on device (G2.1), kv bf16 saves only half the cache. Still open:
+  batching/flash-attn, L3 in-graph, autonomous runtime.
 
 ## License & attribution
 
