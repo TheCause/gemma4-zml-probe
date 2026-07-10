@@ -6,6 +6,8 @@
 # (script 53) → analyse (script 52) → purge du dump (§8.2). Survivent à la purge : D0 (jamais
 # purgé), le manifest, les npz de métriques (écrits par le 52), les rapports HLO json, le log
 # des md5 — et le dump complet si KEEP=1 (run combiné D*, §7.2 spec).
+# TOUTE la sortie du sweep (préflights, build, runs, analyses) est auto-loggée dans
+# $DATA/logs/${RUN_PREFIX}_sweep.log (append) en plus du terminal.
 #
 # Usage (sur la VM 3090) :
 #   bash scripts/g2_3_sweep.sh [configs]
@@ -59,7 +61,7 @@ FIXTURE=${FIXTURE:-$DATA/gen_long.safetensors}
 RUN_PREFIX=${RUN_PREFIX:-g2_3}
 REF_A=${REF_A:-$DATA/g2_logits_a_f32.npy}
 KEEP=${KEEP:-0}
-MIN_FREE_GB=6   # 1 dump ≈ 1,07 Go + dump HLO texte + marge (§8.2)
+MIN_FREE_GB=${MIN_FREE_GB:-6}   # 1 dump ≈ 1,07 Go + dump HLO texte + marge (§8.2)
 
 MODEL=$DATA/weights/model.safetensors
 MANIFEST=$DATA/fixtures/g2_3_manifest.json
@@ -77,7 +79,14 @@ FAMILIES=${1:-"none qkv_proj qk_scores pv_ctx o_proj mlp ple head norms softmax 
 
 mkdir -p "$LOGS" "$DATA/fixtures"
 
+# Auto-log GLOBAL du sweep (préflights et build INCLUS) → $LOGS/${RUN_PREFIX}_sweep.log :
+# si la session SSH tombe, le diagnostic est sur disque quelle que soit l'hygiène tmux de
+# l'opérateur — sans ça, les fatal() d'avant-boucle ne partent que sur un terminal volatil.
+exec > >(tee -a "$LOGS/${RUN_PREFIX}_sweep.log") 2>&1
+
 # ---- préflights : échouer en 1 ms plutôt qu'après un build/run de plusieurs minutes
+command -v python3 >/dev/null \
+  || fatal "python3 introuvable dans le PATH — requis pour les scripts 52/53 et la lecture du manifest"
 [ -f "$MODEL" ] || fatal "checkpoint absent : $MODEL"
 [ -f "$FIXTURE" ] || fatal "fixture absente : $FIXTURE (générer côté M1 — script 46/49 — puis rsync, §8.3)"
 { [ -f "$ANALYZE" ] && [ -f "$HLOCHECK" ]; } \
@@ -118,10 +127,14 @@ echo "[g2_3_sweep] RUN_PREFIX=$RUN_PREFIX FIXTURE=$FIXTURE REF_A=$REF_A KEEP=$KE
 # invocation ; la provenance de D0 vit dans le manifest (entrée ${RUN_PREFIX}_none du 52).
 has_none=0
 # shellcheck disable=SC2086
-for f in $FAMILIES; do if [ "$f" = "none" ]; then has_none=1; fi; done
+for fam in $FAMILIES; do if [ "$fam" = "none" ]; then has_none=1; fi; done
 if [ "$has_none" -eq 0 ]; then
-  d0_sha=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("runs",{}).get(sys.argv[2],{}).get("provenance",{}).get("bin_sha",""))' \
-    "$MANIFEST" "${RUN_PREFIX}_none" 2>/dev/null || echo "")
+  # stderr capturé DANS le message d'échec : « manifest corrompu/illisible » et « entrée none
+  # absente » sont deux diagnostics aux remèdes différents — ne pas les collapser.
+  if ! d0_sha=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("runs",{}).get(sys.argv[2],{}).get("provenance",{}).get("bin_sha",""))' \
+      "$MANIFEST" "${RUN_PREFIX}_none" 2>&1); then
+    fatal "lecture du bin_sha de D0 impossible (manifest $MANIFEST corrompu/illisible ?) : $d0_sha"
+  fi
   [ -n "$d0_sha" ] || fatal "D0 (${RUN_PREFIX}_none) absent du manifest — lancer d'abord la config 'none' (référence du sweep)"
   [ "$d0_sha" = "$BIN_SHA" ] \
     || fatal "le binaire a changé depuis D0 (manifest bin_sha=$d0_sha ≠ courant $BIN_SHA) — relancer 'none' d'abord (D0 doit venir du même binaire que les runs)"
