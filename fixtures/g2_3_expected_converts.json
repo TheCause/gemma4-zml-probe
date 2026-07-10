@@ -1,0 +1,89 @@
+{
+  "_meta": {
+    "role": "ORACLE du check anti-câblage-croisé (script 53_g2_3_hlo_check.py, spec §5.3) : delta converts HLO PRÉ-optimisation observé != attendu ⇒ run INVALID. Les familles marquées `uncertain` sont tranchées par le PREMIER run one-hot et ce fichier est mis à jour (commit) AVANT le sweep complet.",
+    "date": "2026-07-10",
+    "engine_zig_commit": "1230175219e3f004a3d44ac2958b741e842dd7a8",
+    "graph": "forward (mono-graphe 35 couches) — le runner gemma4_g23_sweep compile UNIQUEMENT .forward (platform.compile(..., .forward, ...)) → head/softcap/final_norm/frontend-PLE = 1 site chacun. forwardStageGen/forwardStep/forwardStageStep ne sont PAS compilés par le sweep.",
+    "zml_sources_verified": "miroir M1 ~/dev/zml @ adee932efa875d181cfc3ec8cbc4eb822db76035 : nn.zig (rmsNorm l.93-100, rope l.270-295), tensor.zig (convert l.1050-1053, dotGeneral l.1218+1222, softmax l.1369-1380, scale l.1024). ⚠ Le workspace de COMPILE est /data/rqz_workspace/zml (3090) : si sa rev diffère du miroir, seules les émissions INTERNES zml (rmsNorm/softmax/rope) peuvent bouger → familles concernées marquées uncertain avec alternative.",
+    "counting_rules": [
+      "Le compte = converts ÉMIS dans le HLO PRÉ-optimisation (*before_optimizations*), en DELTA vs le recensement de D0 (baseline tout-null, fixture standard f32).",
+      "convert vers le même dtype = `return self` (tensor.zig) : ZÉRO op HLO émise.",
+      "Poids checkpoint = DÉJÀ bf16 sur device (dtype header safetensors, preuve G2.1) : famille GEMM active ⇒ w.convert(bf16) no-op, MAIS le w.convert(f32) de la baseline (une VRAIE op) DISPARAÎT ⇒ GEMM à poids = +2 émis (act-in, out) − 1 baseline = +1 net/site.",
+      "GEMM à 2 opérandes f32 (qk_scores, pv_ctx — cache f32 en one-hot : kv_store null + fixture standard) = +3/site (2 in + 1 out).",
+      "dot exige lhs.dtype == rhs.dtype et sort AU DTYPE des opérandes (tensor.zig dotGeneral) ⇒ le convert-out d'une famille GEMM active est toujours une vraie op.",
+      "Famille norms, chaîne poids : le code émet inPrec(fam, w.convert(compute)) — le w.convert(f32) baseline RESTE émis quand la famille est active (bf16→f32→bf16 aux bornes) ⇒ delta poids = +1/site, PAS le motif GEMM +2−1.",
+      "ADDITIVITÉ STRICTE : chaque famille re-upcaste vers compute (f32) à ses bornes de sortie ⇒ l'attendu d'un run multi-familles = SOMME des deltas des familles actives (les chaînes bf16→f32→bf16 sont émises telles quelles, cf engine.zig kv_store/qk_scores)."
+    ]
+  },
+  "qkv_proj": {
+    "sites": "65 = 35 q_proj + 15 k_proj + 15 v_proj (producers = couches 0-14 seulement, YOCO ; readers 15-34 sans k/v_proj)",
+    "delta_converts_vs_d0": 65,
+    "derivation": "GEMM à poids : +1 net/site (h0-in f32→bf16 +1, poids bf16 no-op, out bf16→f32 +1, −1 disparition du w.convert(f32) baseline) → 65×1 = 65"
+  },
+  "qk_scores": {
+    "sites": "35 (dot qs·cache_k, toutes couches — producers ET readers lisent le cache)",
+    "delta_converts_vs_d0": 105,
+    "derivation": "GEMM à 2 opérandes f32 (cache_k = f32 en one-hot : kv_store null, fixture standard ; baseline cache_k.convert(f32) = no-op) : +3/site (qs-in, cache_k-in, out) → 35×3 = 105"
+  },
+  "pv_ctx": {
+    "sites": "35 (dot probs·cache_v, toutes couches)",
+    "delta_converts_vs_d0": 105,
+    "derivation": "GEMM à 2 opérandes f32 (probs f32, cache_v f32 en one-hot) : +3/site → 35×3 = 105"
+  },
+  "o_proj": {
+    "sites": "35 (dot attn_m·o_proj)",
+    "delta_converts_vs_d0": 35,
+    "derivation": "GEMM à poids : +1 net/site (attn_m-in +1, poids no-op, out +1, −1 baseline) → 35×1 = 35"
+  },
+  "mlp": {
+    "sites": "105 = 3×35 (gate_proj, up_proj, down_proj)",
+    "delta_converts_vs_d0": 105,
+    "derivation": "GEMM à poids : +1 net/site (xff/act f32-in ; gelu et mul restent en f32 dans les DEUX cas, le dotPrec re-upcaste avant) → 105×1 = 105"
+  },
+  "ple": {
+    "sites": "71 = 2×35 (per_layer_input_gate, per_layer_projection, runLayerGen) + 1 frontend (per_layer_model_projection, perLayerInputs — 1 seul appel dans forward)",
+    "delta_converts_vs_d0": 71,
+    "derivation": "GEMM à poids : +1 net/site (h2/g/embeds tous f32-in) → 71×1 = 71. NB : rmsScaleP(per_layer_projection_norm) au frontend N'EST PAS dans la famille ple ni norms (limitation documentée, doc §3)"
+  },
+  "head": {
+    "sites": "1 (dot last_hidden·embed_tokens tied, graphe .forward — seul graphe compilé par le sweep runner)",
+    "delta_converts_vs_d0": 1,
+    "derivation": "GEMM à poids : +1 net/site (last_hidden f32-in +1, embed_tokens bf16 no-op, out +1, −1 baseline) → 1"
+  },
+  "norms": {
+    "sites": "241 = 176 rmsScaleDPrec (input/post_attention/pre_feedforward/post_feedforward/post_per_layer_input ×35 + final_norm ×1) + 50 rmsScaleHdPrec (q_norm ×35 + k_norm ×15 producers) + 15 v_norm sans poids (producers)",
+    "delta_converts_vs_d0": 1190,
+    "derivation": "rmsScale{D,Hd}Prec : +5/site = x-in +1 (f32→bf16), poids +1 (f32→bf16 APRÈS le w.convert(f32) baseline qui reste émis), rmsNorm INTERNE +2 (nn.zig l.96 convert(.f32) + l.99 convert(x_.dtype()) — vraies ops sur entrée bf16, no-ops en baseline f32), out +1 (bf16→f32) → 226×5 = 1130 ; v_norm (pas de poids) : +4/site = x-in +1, rmsNorm interne +2, out +1 → 15×4 = 60. Total 1190",
+    "uncertain": true,
+    "alternative": "si le rmsNorm du workspace 3090 n'upcaste PAS en interne (rev divergente du miroir M1) : +3/site (226 sites) + +2/site (15 v_norm) → 708. Tranché au premier run one-hot norms."
+  },
+  "softmax": {
+    "sites": "35 (softmax attention, post-add mask)",
+    "delta_converts_vs_d0": 140,
+    "derivation": "+4/site = scores-in +1 (f32→bf16), softmax INTERNE +2 (tensor.zig l.1374 .convert(.f32) sur sub(max) + l.1375 .convert(self.dtype()) — vraies ops sur entrée bf16, no-ops en baseline), out +1 (bf16→f32) → 35×4 = 140. NB : le softmax zml calcule exp/sum/div en f32 même en bf16 — le contrat reste « bornes arrondies », pas « calculé en bf16 »",
+    "uncertain": true,
+    "alternative": "si le softmax du workspace 3090 n'upcaste PAS en interne : +2/site → 70. Tranché au premier run one-hot softmax."
+  },
+  "rope": {
+    "sites": "50 = manualRope (couches full 4,9,14,19,24,29,34) : q ×7 + k ×3 (full producers 4,9,14) = 10 ; slidingRope→zml.nn.rope (28 couches sliding) : q ×28 + k ×12 (sliding producers) = 40",
+    "delta_converts_vs_d0": 200,
+    "derivation": "manualRope : +4/site = x-in +1, cos-in +1, sin-in +1 (cos_full/sin_full = f32 dans la fixture, script 46 l.191-192 → inPrec émet), out +1 → 10×4 = 40 [part CERTAINE : code engine + dtype fixture prouvés] ; slidingRope : +4/site = x-in +1, cos/sin INTERNES +2 (nn.zig l.286-287 : .convert(x.dtype()) sur cos et sin f32 — vraies ops si x bf16), out +1 → 40×4 = 160. Le idx.convert(.f32) interne (positions i32) est émis dans les DEUX cas : delta 0. Total 200",
+    "uncertain": true,
+    "alternative": "si le nn.rope du workspace 3090 n'émet pas les converts cos/sin : sliding +2/site → 40 + 80 = 120 (la part manualRope +40 est certaine). Tranché au premier run one-hot rope."
+  },
+  "softcap": {
+    "sites": "1 (30·tanh(x/30) sur les logits, forward)",
+    "delta_converts_vs_d0": 2,
+    "derivation": "+2 = raw-in +1 (f32→bf16), out +1 (bf16→f32). scale() émet sa constante AU DTYPE du tensor (tensor.zig l.1024-1026 mul .scalar(val, self.dtype())) : aucun convert ; tanh idem"
+  },
+  "kv_store": {
+    "sites": "100 = 30 writes (15 producers × 2 : inPrec sur k_new/v_new avant scatterSlices) + 70 reads (35 couches × 2 : cache_k/cache_v re-upcastés post-choose1d)",
+    "delta_converts_vs_d0": 100,
+    "derivation": "writes : inPrec(prec.kv_store, ...) f32→bf16, +30 ; reads : branche `if (prec.kv_store != null)` .convert(compute) bf16→f32, +70 (readers ET producers relisent le cache). Baseline : zéro op à ces sites (inPrec = return x, branche non prise)",
+    "caveat_fixture": "run avec la fixture VARIANTE gen_long_kvbf16.safetensors (mécanisme b : le dtype de STOCKAGE vient du header). Le diff HLO vs D0 contient donc AUSSI le changement de dtype des 4 paramètres cache_* et des updates de scatter — le compte de converts, lui, reste +100. L'état prefill initial est arrondi bf16 (contrat appliqué au prefill). Run HORS sweep par défaut ; fixture standard f32 + kv_store actif ⇒ Cache.checkDtype REFUSE avant compile (error.KvCacheDtypeMismatch), pas de run vacuux possible."
+  },
+  "_combined_reference": {
+    "rule": "attendu d'un run multi-familles = SOMME des deltas des familles actives (additivité stricte, cf _meta.counting_rules)",
+    "g2_2_nonregression_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head": 487
+  }
+}
