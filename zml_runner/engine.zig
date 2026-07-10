@@ -90,10 +90,14 @@ fn rmsScaleDPrec(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, w: zm
 }
 /// q_norm/k_norm (rmsNorm .hd + mul poids) prec-aware — même contrat que rmsScaleDPrec.
 /// fam=null : identique à `zml.nn.rmsNorm(x, .hd, eps).mul(cvt(w, compute).broad(x.shape()))`.
+/// ORDRE D'ÉMISSION (gate byte-diff HLO pré-opt) : l'inline d'origine évaluait le receiver rmsNorm
+/// AVANT le convert du poids (argument du mul) — le poids checkpoint est bf16, son convert f32 est
+/// une VRAIE op même en fam=null → `normalized` DOIT être construit avant `wi`, ne pas réordonner.
 fn rmsScaleHdPrec(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     const xi = inPrec(fam, x);
+    const normalized = zml.nn.rmsNorm(xi, .hd, RMS_EPS);
     const wi = inPrec(fam, w.convert(compute));
-    return zml.nn.rmsNorm(xi, .hd, RMS_EPS).mul(wi.broad(xi.shape())).convert(compute);
+    return normalized.mul(wi.broad(xi.shape())).convert(compute);
 }
 fn rmsScaleP(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     const n = zml.nn.rmsNorm(x, .p, RMS_EPS);
