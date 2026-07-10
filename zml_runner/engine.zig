@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const zml = @import("zml");
+const log = std.log;
 
 pub const NUM_LAYERS: usize = 35;
 pub const FIRST_KV_SHARED: usize = 15;
@@ -60,9 +61,13 @@ fn fullSlot(i: usize) i64 {
     return slot;
 }
 
-// NB : pas de `c` file-scope. Chaque fonction prec-aware déclare son propre `const c` local
-// (convert vers prec.compute ; défaut .f32 == baseline). Zig INTERDIT le shadowing d'une déclaration
-// de conteneur → un `c` file-scope entrerait en conflit avec ces locaux (correctif audit session 27).
+// NB : l'upcast prec-aware est `cvt(t, dt)` file-scope, dtype passé EXPLICITEMENT (G2.3 : prec est
+// runtime, lu de self.prec). L'ancien pattern `const c = struct { fn call... }.call` ne marchait que
+// parce que `prec` était comptime : un struct-fn Zig ne capture PAS les variables englobantes runtime.
+// Neutralité : cvt(t, .f32) sur un tensor déjà f32 = `return self` (cf tensor.zig convert) = no-op HLO.
+fn cvt(t: zml.Tensor, dt: zml.DataType) zml.Tensor {
+    return t.convert(dt);
+}
 fn rmsScaleD(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
     return zml.nn.rmsNorm(x, .d, RMS_EPS).mul(w.broad(x.shape()));
 }
@@ -247,47 +252,77 @@ pub const EngineCfg = struct {
     two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
     kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
     kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
-    prec: PrecCfg = .{}, // précision comptime (défaut .f32 = baseline bit-exact) ; Zig interdit un param par défaut → champ de cfg
 };
 
-/// Config de précision comptime (GPU). Défaut `.f32` strictement == comportement actuel (fp32 bit-exact
-/// baseline) : `c()` upcast en `prec.compute` (défaut .f32 = today) → graphe HLO byte-identique (E1/E2/L1a
-/// inchangés, preuve `diff -rq` préservée). G2 activera `.bf16` pour les GEMM (refactor à part : insérer des
-/// `.convert(prec.gemm)` aux bornes des dot, garder norm/softmax/rope/softcap en `prec.compute`).
-/// Champs `weight`/`kv` réservés (le load-dtype via createTensor n'expose pas de arg dtype ; G2 utilisera
-/// une conversion post-load). NEUTRALITÉ : tout champ non default doit rester inerte en config défaut.
-pub const PrecCfg = struct {
-    compute: zml.DataType = .f32, // cible d'upcast de c() (norm/softmax/rope/softcap et entrées GEMM actuelles)
-    gemm: ?zml.DataType = null, // G2.2 : dtype des GEMM (les 2 opérandes de chaque dot convertis, résultat re-upcasté en compute) ; null = neutre (HLO identique, convert same-dtype = no-op cf tensor.zig convert)
-    weight: ?zml.DataType = null, // réservé (dtype de load des poids) ; null = infer = dtype checkpoint (bf16, cf io.zig maybeCreateTensor : dtype du header safetensors, jamais upcasté au load)
-    kv: ?zml.DataType = null, // réservé (dtype du cache KV) ; null = infer (today : fp32 depuis la fixture)
+/// Config de précision RUNTIME (G2.3, approche B de la spec). Un champ par FAMILLE d'ops ;
+/// `null` = f32 (baseline). Portée par le modèle comme CHAMP RUNTIME (self.prec) — plus dans
+/// EngineCfg comptime : le traçage émet les converts d'après la valeur au moment du compile,
+/// le binaire est unique, le graphe diffère par run. Sémantique contractuelle (spec §4) :
+/// « bf16 » = arrondi des opérandes aux bornes de l'op, calcul interne au gré d'XLA.
+/// NEUTRALITÉ : tout-null doit émettre un graphe identique à la baseline (convert same-dtype
+/// = `return self`, cf tensor.zig).
+pub const PrecRt = struct {
+    compute: zml.DataType = .f32,
+    // familles GEMM (spec §4, 1-7)
+    qkv_proj: ?zml.DataType = null,
+    qk_scores: ?zml.DataType = null,
+    pv_ctx: ?zml.DataType = null,
+    o_proj: ?zml.DataType = null,
+    mlp: ?zml.DataType = null,
+    ple: ?zml.DataType = null,
+    head: ?zml.DataType = null,
+    // familles non-GEMM (spec §4, 8-12)
+    norms: ?zml.DataType = null,
+    softmax: ?zml.DataType = null,
+    rope: ?zml.DataType = null,
+    softcap: ?zml.DataType = null,
+    kv_store: ?zml.DataType = null,
+
+    /// Parse "fam1,fam2" (noms des champs) → PrecRt avec ces familles à .bf16. Erreur si nom inconnu.
+    pub fn fromSpecList(list: []const u8) !PrecRt {
+        var p: PrecRt = .{};
+        if (list.len == 0) return p;
+        var it = std.mem.splitScalar(u8, list, ',');
+        while (it.next()) |name| {
+            var matched = false;
+            inline for (@typeInfo(PrecRt).@"struct".fields) |f| {
+                if (comptime std.mem.eql(u8, f.name, "compute")) continue;
+                if (std.mem.eql(u8, name, f.name)) {
+                    @field(p, f.name) = .bf16;
+                    matched = true;
+                }
+            }
+            if (!matched) {
+                log.err("famille inconnue: '{s}'", .{name});
+                return error.UnknownFamily;
+            }
+        }
+        return p;
+    }
 };
 
-/// GEMM prec-aware (G2.2) : si `prec.gemm` est fixé, les DEUX opérandes sont convertis (poids bf16 :
-/// no-op ; activations f32→bf16 : arrondi = le régime de prod) et le résultat re-upcasté en
-/// `prec.compute` pour que tout l'inter-GEMM (normes, softmax, rope, softcap, résiduels) reste f32.
-/// En `gemm=null` : émission STRICTEMENT identique à `a.dot(convert(b))` d'aujourd'hui (neutralité HLO —
-/// `convert` vers le même dtype retourne `self` sans émettre d'op).
-fn dotPrec(comptime prec: PrecCfg, a: zml.Tensor, b: zml.Tensor, comptime axis: @TypeOf(.enum_literal)) zml.Tensor {
-    if (prec.gemm) |g| return a.convert(g).dot(b.convert(g), axis).convert(prec.compute);
-    return a.dot(b.convert(prec.compute), axis);
+/// GEMM prec-aware par famille (G2.3). `fam` = le champ PrecRt de la famille du site d'appel.
+/// fam=null : émission STRICTEMENT identique à `a.dot(convert(b))` d'aujourd'hui (neutralité).
+fn dotPrec(fam: ?zml.DataType, compute: zml.DataType, a: zml.Tensor, b: zml.Tensor, comptime axis: @TypeOf(.enum_literal)) zml.Tensor {
+    if (fam) |g| return a.convert(g).dot(b.convert(g), axis).convert(compute);
+    return a.dot(b.convert(compute), axis);
 }
 
 /// Forward decode d'UNE couche i en mode génération (cache threadé). Producer scatter K/V du token à
 /// (.slot, .k=pos) dans le cache empaqueté ; reader lit le slot du writer 13/14. `brick` est threadé
 /// pour le point d'extension post_v_norm (comptime-mort si la brique ne l'implémente pas). `cfg` est
 /// comptime : ses branches inactives ne sont pas émises (neutralité HLO en config défaut).
-fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, comptime prec: PrecCfg, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
-    const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call; // shadow file-scope c (prec-aware)
+/// `prec` est RUNTIME (G2.3) : la valeur au moment du traçage décide des converts émis.
+fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: PrecRt, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
     const full = isFull(i);
     const reader = isReader(i);
     const hd: i64 = if (full) HD_FULL else HD_SLIDING;
     const half: i64 = @divExact(hd, 2);
 
-    const h0 = rmsScaleD(hidden, c(layer.input_layernorm));
+    const h0 = rmsScaleD(hidden, cvt(layer.input_layernorm, prec.compute));
 
-    var q = dotPrec(prec, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
-    q = zml.nn.rmsNorm(q, .hd, RMS_EPS).mul(c(layer.q_norm).broad(q.shape()));
+    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
+    q = zml.nn.rmsNorm(q, .hd, RMS_EPS).mul(cvt(layer.q_norm, prec.compute).broad(q.shape()));
     q = if (full) manualRope(q, cos, sin, half) else slidingRope(q, pos_s);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
 
@@ -303,12 +338,12 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
             cache_v = cache.sl_v.choose1d(.slot, SLIDING_WRITER_SLOT);
         }
     } else {
-        var k = dotPrec(prec, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
-        k = zml.nn.rmsNorm(k, .hd, RMS_EPS).mul(c(layer.k_norm).broad(k.shape()));
+        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        k = zml.nn.rmsNorm(k, .hd, RMS_EPS).mul(cvt(layer.k_norm, prec.compute).broad(k.shape()));
         k = if (full) manualRope(k, cos, sin, half) else slidingRope(k, pos_s);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
-        var v = dotPrec(prec, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         v = zml.nn.rmsNorm(v, .hd, RMS_EPS);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
         // comptime-mort pour une brique sans cette méthode (ex: struct{}) → V inchangé → bit-exact decode4.
@@ -338,26 +373,26 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, compti
     }
 
     const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
-    var scores = dotPrec(prec, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
+    var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
     scores = scores.add(mask.broad(scores.shape()));
     const probs = scores.softmax(.k);
 
     const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
-    const ctx_attn = dotPrec(prec, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
+    const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
     const attn_m = ctx_attn.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
-    const attn_out = dotPrec(prec, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
+    const attn_out = dotPrec(prec.o_proj, prec.compute, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
 
-    const h1 = hidden.add(rmsScaleD(attn_out, c(layer.post_attention_layernorm)));
-    const xff = rmsScaleD(h1, c(layer.pre_feedforward_layernorm));
-    const mlp_out = dotPrec(prec, dotPrec(prec, xff, layer.gate_proj, .d).gelu().mul(dotPrec(prec, xff, layer.up_proj, .d)), layer.down_proj, .f);
-    const h2 = h1.add(rmsScaleD(mlp_out, c(layer.post_feedforward_layernorm)));
+    const h1 = hidden.add(rmsScaleD(attn_out, cvt(layer.post_attention_layernorm, prec.compute)));
+    const xff = rmsScaleD(h1, cvt(layer.pre_feedforward_layernorm, prec.compute));
+    const mlp_out = dotPrec(prec.mlp, prec.compute, dotPrec(prec.mlp, prec.compute, xff, layer.gate_proj, .d).gelu().mul(dotPrec(prec.mlp, prec.compute, xff, layer.up_proj, .d)), layer.down_proj, .f);
+    const h2 = h1.add(rmsScaleD(mlp_out, cvt(layer.post_feedforward_layernorm, prec.compute)));
 
-    var g = dotPrec(prec, h2, layer.per_layer_input_gate, .d).gelu();
+    var g = dotPrec(prec.ple, prec.compute, h2, layer.per_layer_input_gate, .d).gelu();
     g = g.mul(ple_i);
-    g = dotPrec(prec, g, layer.per_layer_projection, .p);
-    const h3 = h2.add(rmsScaleD(g, c(layer.post_per_layer_input_norm)));
+    g = dotPrec(prec.ple, prec.compute, g, layer.per_layer_projection, .p);
+    const h3 = h2.add(rmsScaleD(g, cvt(layer.post_per_layer_input_norm, prec.compute)));
 
-    return h3.mul(c(layer.layer_scalar).asScalar());
+    return h3.mul(cvt(layer.layer_scalar, prec.compute).asScalar());
 }
 
 /// Le socle : model decode générique paramétré comptime par une brique. `EngineModel(struct{})`
@@ -371,9 +406,12 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         final_norm: zml.Tensor,
         layers: []LayerW,
         brick: Brick,
+        // Précision RUNTIME (G2.3) : le runner l'écrit AVANT compile ; le traçage émet les converts
+        // d'après cette valeur. Sans Tensor → strippé de Bufferized(Self) (cf zml meta.MapRestrict),
+        // io.load ne le visite pas (précédent : brick struct{}).
+        prec: PrecRt = .{},
 
         const Self = @This();
-        const prec: PrecCfg = cfg.prec; // replié depuis cfg (Zig interdit un param par défaut) — comptime, visible des méthodes/closures
 
         /// Crée les poids (symboliques) depuis `base` (checkpoint) et assemble le model avec la brique
         /// fournie. Helper partagé par `init` (brique vide, E1) et `initBrick` (brique chargée, E2).
@@ -408,21 +446,21 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         }
 
         fn perLayerInputs(self: Self, embptl_slice: zml.Tensor, embeds: zml.Tensor) zml.Tensor {
-            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const prec = self.prec;
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
                 .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
-            const context = dotPrec(prec, embeds, self.per_layer_model_projection, .d)
+            const context = dotPrec(prec.ple, prec.compute, embeds, self.per_layer_model_projection, .d)
                 .scale(INV_SQRT_HID)
                 .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
-            const context_norm = rmsScaleP(context, c(self.per_layer_projection_norm));
+            const context_norm = rmsScaleP(context, cvt(self.per_layer_projection_norm, prec.compute));
             return context_norm.add(token_identity).scale(INV_SQRT_2);
         }
 
         /// Un pas de génération : sélectionne le step, embed+PLE, 35 couches (cache threadé) -> logits +
         /// cache grandi. Retour : {logits {b,s,voc}, sl_k, sl_v, fl_k, fl_v}.
         pub fn forward(self: Self, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const prec = self.prec;
             const step = ctrl.step;
             const embed_slice = pickStep(p.embeds, step);
             const embptl_slice = pickStep(p.embptls, step);
@@ -450,8 +488,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
-            const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-            const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
+            const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+            const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
             const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -464,7 +502,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// : 1er = hidden_out (non-last) OU logits (last) ; + cache (sl_k,sl_v,fl_k,fl_v). Le calcul est
         /// identique à `forward` op-pour-op (runLayerGen partagé) → mêmes tokens, autre exécution.
         pub fn forwardStageGen(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const prec = self.prec;
             const step = ctrl.step;
             const embptl_slice = pickStep(p.embptls, step);
             const cos = pickStep(p.cos_full, step);
@@ -490,8 +528,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             }
 
             const out_first = if (last) blk: {
-                const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-                const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
+                const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+                const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
                 break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
@@ -508,7 +546,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// Retourne {logits, sl_k, sl_v, fl_k, fl_v} (== `forward` mono, op-pour-op identique hormis la
         /// source des embeds/embptls). Permet la boucle autonome : argmax → gather host → reinject.
         pub fn forwardStep(self: Self, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const prec = self.prec;
             const step = ctrl.step;
             const cos = pickStep(p.cos_full, step);
             const sin = pickStep(p.sin_full, step);
@@ -532,8 +570,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
 
-            const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-            const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
+            const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+            const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
             const logits = raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -546,7 +584,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// borne le pic (cf GENERATION_LONGUE_CHUNKING_DESIGN). `forward`/`forwardStageGen`/`forwardStep`
         /// (E1/E2/L1a) sont INTACTS.
         pub fn forwardStageStep(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-            const c = struct { fn call(t: zml.Tensor) zml.Tensor { return t.convert(prec.compute); } }.call;
+            const prec = self.prec;
             const step = ctrl.step;
             const cos = pickStep(p.cos_full, step);
             const sin = pickStep(p.sin_full, step);
@@ -570,8 +608,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const out_first = if (last) blk: {
-                const last_hidden = rmsScaleD(hidden, c(self.final_norm));
-                const raw = dotPrec(prec, last_hidden, self.embed_tokens, .d);
+                const last_hidden = rmsScaleD(hidden, cvt(self.final_norm, prec.compute));
+                const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
                 break :blk raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };

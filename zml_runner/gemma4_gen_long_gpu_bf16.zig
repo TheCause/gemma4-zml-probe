@@ -24,11 +24,12 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024;
 // G2.2 : gemm bf16 — SEULE différence de config vs G1 (prec.compute reste .f32).
+// G2.3 : la précision n'est plus dans EngineCfg (PrecRt runtime, cf engine.zig) ; ce runner
+// sera pleinement adapté en Task 5 — en l'état il trace en défaut tout-null (== G1 fp32).
 const Model = engine.EngineModel(struct {}, .{
     .two_masks = true,
     .kmax_sliding = L_MAX,
     .kmax_full = L_MAX,
-    .prec = .{ .gemm = .bf16 },
 });
 const PackedLong = engine.Packed(true);
 
