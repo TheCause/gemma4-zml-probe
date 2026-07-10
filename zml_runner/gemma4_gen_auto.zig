@@ -4,10 +4,13 @@
 //
 // CLI : gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "..." [--max-tokens N]
 //       [--oracle fixture] [--ids-only] [--selftest-inputs f] [--selftest-gather f]
-// Cette tranche (Task 2, gate A0) implémente : parsing CLI, chargement tokenizer ZML natif,
-// rendu du chat template, encodage, préfixage BOS explicite, et le mode `--ids-only`
-// (log des ids finaux + round-trip détok, puis exit). Les autres flags sont parsés mais
-// stubbés (Task 3+ les branchera sur le moteur).
+// Task 2 (gate A0) : parsing CLI, chargement tokenizer ZML natif, rendu du chat template,
+// encodage, préfixage BOS explicite, mode `--ids-only` (log des ids finaux + round-trip détok).
+// Task 3 (cette tranche) : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`,
+// formule "proportional" copiée de la source HF), masques additifs (`maskRows`), positions,
+// et les tables host complètes {L_MAX,…} (cos_full/sin_full/masks_sliding/masks_full/positions
+// + embeds/embptls/cache zéros, cf `HostInputs`) — validées vs la fixture 49. Les buffers
+// device (Task 5) et `--selftest-gather` (Task 4) restent stubbés.
 const std = @import("std");
 const log = std.log;
 const zml = @import("zml");
@@ -18,9 +21,15 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024;
 const SLIDING_WINDOW: i64 = 512;
-const HD_F: i64 = 512; // dim cos/sin full
+const HD_F: i64 = 512; // dim cos/sin full (= config.global_head_dim, cf ropeFull)
+const HD_S: i64 = 256; // dim cache sliding (= engine.HD_SLIDING)
 const D: i64 = 1536;
 const LF: i64 = 8960;
+// Slots de cache producteurs (cf engine.zig: isFull(i)=(i+1)%5==0, FIRST_KV_SHARED=15) : parmi les
+// 15 premières couches, 3 sont "full" (4,9,14) et 12 "sliding" (les autres) — mêmes comptes que
+// SLIDING_PRODUCERS/FULL_PRODUCERS de scripts/49_gen_custom_oracle.py:41-42.
+const NUM_SLIDING_SLOTS: usize = 12;
+const NUM_FULL_SLOTS: usize = 3;
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
 const PackedLong = engine.Packed(true);
 
@@ -80,7 +89,10 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 log.err("--max-tokens attend une valeur", .{});
                 return error.MissingArgument;
             }
-            args.max_tokens = try std.fmt.parseInt(usize, process_args[i], 10);
+            args.max_tokens = std.fmt.parseInt(usize, process_args[i], 10) catch |err| {
+                log.err("--max-tokens: valeur invalide '{s}' ({s})", .{ process_args[i], @errorName(err) });
+                return err;
+            };
         } else if (std.mem.eql(u8, a, "--oracle")) {
             i += 1;
             if (i >= process_args.len) {
@@ -112,6 +124,306 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
     return args;
 }
 
+// ============================================================================================
+// Task 3 — inputs host : cos/sin RoPE full, masques additifs, positions, tables {L_MAX,…}.
+// ============================================================================================
+
+// Masques additifs f32 : 0 = visible, -floatMax = masqué (== torch.finfo(float32).min — même
+// valeur binaire : le plus grand f32 fini, négé, des deux côtés).
+const MASK_MIN: f32 = -std.math.floatMax(f32);
+
+// Coefficients RoPE "proportional" (couches full_attention) — formule COPIÉE de
+// transformers/modeling_rope_utils.py::_compute_proportional_rope_parameters (lue sur la 3090,
+// 10 juil, cf commit) :
+//   head_dim = config.global_head_dim = 512 (head_dim_key="global_head_dim" pour full_attention,
+//     modeling_gemma4.py:1098-1099) ; base = rope_theta = 1e6 ; rope_proportion =
+//     partial_rotary_factor = 0.25 ; factor = rope_parameters_dict.get("factor", 1.0) = 1.0
+//     (absent de rope_scaling.full_attention, confirmé AutoConfig) ;
+//   rope_angles = int(rope_proportion * head_dim // 2) = int(0.25*512 // 2) = int(128.0//2) = 64 ;
+//   inv_freq_rotated[i] = 1 / base**(arange(0,2*rope_angles,2)[i] / head_dim)
+//                       = 1 / base**((2*i)/head_dim)  pour i in 0..rope_angles (64 valeurs) ;
+//   nope_angles = head_dim//2 - rope_angles = 256-64 = 192 ;
+//   inv_freq = concat(inv_freq_rotated, zeros(nope_angles)) → 256 valeurs (head_dim//2) ;
+//   inv_freq /= factor (no-op, factor=1.0).
+// forward() (modeling_gemma4.py:1141-1152) : freqs[i] = inv_freq[i] * p (i in 0..256) ;
+//   emb = concat(freqs, freqs) — DUPLICATION DE LA MOITIÉ (pas d'entrelacement) → 512 valeurs ;
+//   cos = cos(emb) * attention_scaling ; sin = sin(emb) * attention_scaling
+//   (attention_scaling = 1.0 pour "proportional" — "Unused in this type of RoPE" — no-op).
+const ROPE_FULL_THETA: f32 = 1_000_000.0;
+const ROPE_FULL_HEAD_DIM: f32 = 512.0; // = HD_F
+const ROPE_FULL_ANGLES: usize = 64; // rope_angles
+const ROPE_FULL_HALF: usize = 256; // head_dim // 2 (= HD_F / 2)
+
+// cos/sin full pour la position p — formule ci-dessus (partial 0.25, proportional, theta 1e6).
+// PRÉCISION — investigation mesurée (10 juil, cf commit, détail dans le rapport de tâche) : la
+// transcription EST correcte (vérifiée valeur par valeur contre la fixture ET contre numpy), mais
+// un résidu ~3.8e-6 subsiste sur quelques (position, indice de fréquence) précis, QUELLE QUE SOIT
+// la stratégie de calcul essayée (f64 bout-en-bout arrondi seulement à la fin ; f32 via
+// `std.math.pow` ; f32 via `@exp2(exp*@log2(base))` — les trois donnent le MÊME ordre de grandeur,
+// 3.8146973e-6 EXACTEMENT = 2^-18, soit une demi-ULP f32 à l'échelle des angles ici (~32-128 rad,
+// ULP(64)=2^-17)). Root cause : `pow()`/`sin()`/`cos()` de Zig (LLVM/libm, CPU) et de PyTorch/CUDA
+// (kernel GPU) arrondissent chacun CORRECTEMENT mais PAS IDENTIQUEMENT `base**exp` (1 ULP d'écart,
+// confirmé par calcul en précision arbitraire : aucune des deux valeurs n'est "la bonne", les deux
+// sont à ~2 ULP de la valeur mathématique exacte) — un écart d'1 ULP sur l'angle, amplifié par la
+// pente de sin/cos (≤1 mais proche de 1 pour ces angles), redonne ~1 ULP × échelle ≈ 1e-6..4e-6 en
+// sortie. C'est un plancher de précision float32 inter-implémentations (même famille de piège que
+// "pas de bit-à-pas inter-compiles XLA-GPU", mémoire ZML) — PAS une erreur de formule. `std.math.pow`
+// est gardé (le plus standard, pas de bricolage ad hoc) ; le SELFTEST compare avec une tolérance
+// réaliste (cf `COS_SIN_TOL` sur le site d'appel), pas 1e-6.
+fn ropeFull(p: i64, cos_out: *[HD_F]f32, sin_out: *[HD_F]f32) void {
+    var inv_freq: [ROPE_FULL_HALF]f32 = undefined;
+    for (0..ROPE_FULL_HALF) |i| {
+        if (i < ROPE_FULL_ANGLES) {
+            const exp: f32 = @as(f32, @floatFromInt(2 * i)) / ROPE_FULL_HEAD_DIM;
+            inv_freq[i] = 1.0 / std.math.pow(f32, ROPE_FULL_THETA, exp);
+        } else {
+            inv_freq[i] = 0.0; // nope_angles : pas de rotation (angle constant nul quel que soit p)
+        }
+    }
+    const pf: f32 = @floatFromInt(p);
+    for (0..ROPE_FULL_HALF) |i| {
+        const angle: f32 = inv_freq[i] * pf;
+        const c: f32 = @cos(angle);
+        const s: f32 = @sin(angle);
+        cos_out[i] = c;
+        cos_out[i + ROPE_FULL_HALF] = c;
+        sin_out[i] = s;
+        sin_out[i + ROPE_FULL_HALF] = s;
+    }
+}
+
+// Masques additifs f32 : 0 = visible, -floatMax = masqué (== torch.finfo(float32).min).
+fn maskRows(p: i64, sliding_out: []f32, full_out: []f32) void {
+    const lo = @max(0, p - (SLIDING_WINDOW - 1));
+    for (0..@intCast(L_MAX)) |j| {
+        const ji: i64 = @intCast(j);
+        sliding_out[j] = if (ji > p or ji < lo) MASK_MIN else 0;
+        full_out[j] = if (ji > p) MASK_MIN else 0;
+    }
+}
+
+// Tables host complètes, indexées par STEP == POSITION ABSOLUE p in 0..L_MAX-1 (identité — cf
+// PLAN Task 5 : `ctrl.step` vaudra la position courante, et `pickStep(p.cos_full, step)` ira
+// chercher la ligne p). Conçues comme des slices host simples (pas de Buffer/Platform) : Task 5
+// les enveloppera avec `zml.Buffer.fromBytes` (mêmes shapes que `engine.Packed`/`engine.Cache`).
+const HostInputs = struct {
+    cos_full: []f32, // {L_MAX, HD_F}
+    sin_full: []f32, // {L_MAX, HD_F}
+    masks_sliding: []f32, // {L_MAX, L_MAX}
+    masks_full: []f32, // {L_MAX, L_MAX}
+    positions: []i32, // {L_MAX} = 0..L_MAX-1
+    embeds_zero: []u8, // {L_MAX, 1, 1, D} bf16, zéros — factice, non consommé par forwardStep
+    embptls_zero: []u8, // {L_MAX, 1, 1, LF} bf16, zéros — idem
+    cache_sl_k: []u8, // {NUM_SLIDING_SLOTS, 1, 1, L_MAX, HD_S} f32, zéros
+    cache_sl_v: []u8,
+    cache_fl_k: []u8, // {NUM_FULL_SLOTS, 1, 1, L_MAX, HD_F} f32, zéros
+    cache_fl_v: []u8,
+
+    fn init(allocator: std.mem.Allocator) !HostInputs {
+        const l_max: usize = @intCast(L_MAX);
+        const hd_f: usize = @intCast(HD_F);
+
+        const cos_full = try allocator.alloc(f32, l_max * hd_f);
+        errdefer allocator.free(cos_full);
+        const sin_full = try allocator.alloc(f32, l_max * hd_f);
+        errdefer allocator.free(sin_full);
+        const masks_sliding = try allocator.alloc(f32, l_max * l_max);
+        errdefer allocator.free(masks_sliding);
+        const masks_full = try allocator.alloc(f32, l_max * l_max);
+        errdefer allocator.free(masks_full);
+        const positions = try allocator.alloc(i32, l_max);
+        errdefer allocator.free(positions);
+
+        var p: i64 = 0;
+        while (p < L_MAX) : (p += 1) {
+            const idx: usize = @intCast(p);
+            positions[idx] = @intCast(p);
+            var cos_row: [HD_F]f32 = undefined;
+            var sin_row: [HD_F]f32 = undefined;
+            ropeFull(p, &cos_row, &sin_row);
+            @memcpy(cos_full[idx * hd_f .. (idx + 1) * hd_f], &cos_row);
+            @memcpy(sin_full[idx * hd_f .. (idx + 1) * hd_f], &sin_row);
+            maskRows(p, masks_sliding[idx * l_max .. (idx + 1) * l_max], masks_full[idx * l_max .. (idx + 1) * l_max]);
+        }
+
+        const embeds_zero = try allocator.alloc(u8, l_max * @as(usize, @intCast(D)) * 2);
+        errdefer allocator.free(embeds_zero);
+        @memset(embeds_zero, 0);
+        const embptls_zero = try allocator.alloc(u8, l_max * @as(usize, @intCast(LF)) * 2);
+        errdefer allocator.free(embptls_zero);
+        @memset(embptls_zero, 0);
+        const cache_sl_k = try allocator.alloc(u8, NUM_SLIDING_SLOTS * l_max * @as(usize, @intCast(HD_S)) * 4);
+        errdefer allocator.free(cache_sl_k);
+        @memset(cache_sl_k, 0);
+        const cache_sl_v = try allocator.alloc(u8, NUM_SLIDING_SLOTS * l_max * @as(usize, @intCast(HD_S)) * 4);
+        errdefer allocator.free(cache_sl_v);
+        @memset(cache_sl_v, 0);
+        const cache_fl_k = try allocator.alloc(u8, NUM_FULL_SLOTS * l_max * hd_f * 4);
+        errdefer allocator.free(cache_fl_k);
+        @memset(cache_fl_k, 0);
+        const cache_fl_v = try allocator.alloc(u8, NUM_FULL_SLOTS * l_max * hd_f * 4);
+        errdefer allocator.free(cache_fl_v);
+        @memset(cache_fl_v, 0);
+
+        return .{
+            .cos_full = cos_full,
+            .sin_full = sin_full,
+            .masks_sliding = masks_sliding,
+            .masks_full = masks_full,
+            .positions = positions,
+            .embeds_zero = embeds_zero,
+            .embptls_zero = embptls_zero,
+            .cache_sl_k = cache_sl_k,
+            .cache_sl_v = cache_sl_v,
+            .cache_fl_k = cache_fl_k,
+            .cache_fl_v = cache_fl_v,
+        };
+    }
+
+    fn deinit(self: *HostInputs, allocator: std.mem.Allocator) void {
+        allocator.free(self.cos_full);
+        allocator.free(self.sin_full);
+        allocator.free(self.masks_sliding);
+        allocator.free(self.masks_full);
+        allocator.free(self.positions);
+        allocator.free(self.embeds_zero);
+        allocator.free(self.embptls_zero);
+        allocator.free(self.cache_sl_k);
+        allocator.free(self.cache_sl_v);
+        allocator.free(self.cache_fl_k);
+        allocator.free(self.cache_fl_v);
+    }
+};
+
+// Lit un tenseur i32/f32 ENTIER de la fixture, host-side, SANS Platform : lecture positionnelle
+// directe dans le fichier à `tensor.offset` (octets absolus, cf gemma4_gchunk_auto.zig:220-223)
+// sur `tensor.byteSize()` octets. Évite de charger un Platform GPU pour un simple selftest host.
+fn readFixtureF32Alloc(allocator: std.mem.Allocator, io: std.Io, reg: *const zml.safetensors.TensorRegistry, file: *std.Io.File, name: []const u8) ![]f32 {
+    const t = reg.tensors.get(name) orelse {
+        log.err("tensor introuvable dans la fixture: {s}", .{name});
+        return error.MissingTensor;
+    };
+    const n: usize = @intCast(t.byteSize() / 4);
+    const out = try allocator.alloc(f32, n);
+    errdefer allocator.free(out);
+    _ = try file.readPositionalAll(io, std.mem.sliceAsBytes(out), t.offset);
+    return out;
+}
+
+fn readFixtureI32Alloc(allocator: std.mem.Allocator, io: std.Io, reg: *const zml.safetensors.TensorRegistry, file: *std.Io.File, name: []const u8) ![]i32 {
+    const t = reg.tensors.get(name) orelse {
+        log.err("tensor introuvable dans la fixture: {s}", .{name});
+        return error.MissingTensor;
+    };
+    const n: usize = @intCast(t.byteSize() / 4);
+    const out = try allocator.alloc(i32, n);
+    errdefer allocator.free(out);
+    _ = try file.readPositionalAll(io, std.mem.sliceAsBytes(out), t.offset);
+    return out;
+}
+
+// Tolérance cos/sin — PAS 1e-6 (cf note `ropeFull` : plancher mesuré ~2^-18=3.8147e-6, demi-ULP
+// f32 pour des angles ~32-128 rad, atteint quelle que soit la stratégie de calcul essayée). Fixée
+// à 1e-5 (~2.6× le plancher mesuré) : marge pour l'implémentation retenue sans masquer une VRAIE
+// régression de formule (qui produirait un écart de plusieurs ordres de grandeur, pas ~1 ULP).
+const COS_SIN_TOL: f32 = 1e-5;
+
+// --selftest-inputs <fixture> : charge la fixture 49 (gen_custom.safetensors, n_decode steps) et
+// compare, pour chaque step k, la position p = positions[k] LUE DE LA FIXTURE :
+//   - cos/sin : lignes de la table `HostInputs` à l'index p (donc `ropeFull` ET la construction
+//     de la table {L_MAX,…} sont toutes les deux exercées) vs cos_full/sin_full[k] — max_abs.
+//   - masques : idem vs masks_sliding/masks_full[k] — égalité BIT-EXACTE (valeurs ∈ {0, MASK_MIN}).
+//   - positions : continuité (positions[k] == positions[0] + k, i.e. p = seq_len + k avec
+//     seq_len = positions[0], lu de la fixture — pas besoin du manifest JSON séparé).
+fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const positions_fx = try readFixtureI32Alloc(allocator, io, &reg, &file, "positions");
+    defer allocator.free(positions_fx);
+    const cos_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "cos_full");
+    defer allocator.free(cos_fx);
+    const sin_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "sin_full");
+    defer allocator.free(sin_fx);
+    const masks_sliding_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "masks_sliding");
+    defer allocator.free(masks_sliding_fx);
+    const masks_full_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "masks_full");
+    defer allocator.free(masks_full_fx);
+
+    const n_decode: usize = positions_fx.len;
+    const hd_f: usize = @intCast(HD_F);
+    const l_max: usize = @intCast(L_MAX);
+    if (cos_fx.len != n_decode * hd_f or sin_fx.len != n_decode * hd_f) {
+        log.err("SELFTEST INPUTS : shape cos/sin inattendue (cos.len={d} sin.len={d} n_decode*HD_F={d})", .{ cos_fx.len, sin_fx.len, n_decode * hd_f });
+        return error.UnexpectedShape;
+    }
+    if (masks_sliding_fx.len != n_decode * l_max or masks_full_fx.len != n_decode * l_max) {
+        log.err("SELFTEST INPUTS : shape masques inattendue (sliding.len={d} full.len={d} n_decode*L_MAX={d})", .{ masks_sliding_fx.len, masks_full_fx.len, n_decode * l_max });
+        return error.UnexpectedShape;
+    }
+
+    var host = try HostInputs.init(allocator);
+    defer host.deinit(allocator);
+
+    var max_abs: f32 = 0;
+    var max_at: struct { k: usize, i: usize, kind: u8, host: f32, fx: f32 } = .{ .k = 0, .i = 0, .kind = 'c', .host = 0, .fx = 0 };
+    var masks_bitexact = true;
+    var positions_ok = true;
+    const seq_len = positions_fx[0];
+
+    for (0..n_decode) |k| {
+        const p = positions_fx[k];
+        if (p != seq_len + @as(i32, @intCast(k))) positions_ok = false;
+        if (p < 0 or p >= L_MAX) {
+            log.err("SELFTEST INPUTS : position hors table à step {d} (p={d})", .{ k, p });
+            return error.PositionOutOfRange;
+        }
+        const pi: usize = @intCast(p);
+
+        const cos_row = host.cos_full[pi * hd_f .. (pi + 1) * hd_f];
+        const sin_row = host.sin_full[pi * hd_f .. (pi + 1) * hd_f];
+        const cos_fx_row = cos_fx[k * hd_f .. (k + 1) * hd_f];
+        const sin_fx_row = sin_fx[k * hd_f .. (k + 1) * hd_f];
+        for (0..hd_f) |i| {
+            const dc = @abs(cos_row[i] - cos_fx_row[i]);
+            const ds = @abs(sin_row[i] - sin_fx_row[i]);
+            if (dc > max_abs) {
+                max_abs = dc;
+                max_at = .{ .k = k, .i = i, .kind = 'c', .host = cos_row[i], .fx = cos_fx_row[i] };
+            }
+            if (ds > max_abs) {
+                max_abs = ds;
+                max_at = .{ .k = k, .i = i, .kind = 's', .host = sin_row[i], .fx = sin_fx_row[i] };
+            }
+        }
+
+        const sl_row = host.masks_sliding[pi * l_max .. (pi + 1) * l_max];
+        const fl_row = host.masks_full[pi * l_max .. (pi + 1) * l_max];
+        const sl_fx_row = masks_sliding_fx[k * l_max .. (k + 1) * l_max];
+        const fl_fx_row = masks_full_fx[k * l_max .. (k + 1) * l_max];
+        for (0..l_max) |j| {
+            if (sl_row[j] != sl_fx_row[j]) masks_bitexact = false;
+            if (fl_row[j] != fl_fx_row[j]) masks_bitexact = false;
+        }
+    }
+
+    const cos_sin_ok = max_abs <= COS_SIN_TOL;
+    if (cos_sin_ok and masks_bitexact and positions_ok) {
+        log.info("SELFTEST INPUTS PASS ({d} steps, cos/sin max_abs={e}, masks bit-exact, positions ==)", .{ n_decode, max_abs });
+    } else {
+        log.err("SELFTEST INPUTS FAIL — cos/sin max_abs={e} (ok={}) masks_bitexact={} positions_ok={}", .{ max_abs, cos_sin_ok, masks_bitexact, positions_ok });
+        if (!cos_sin_ok) {
+            const p0: usize = @intCast(positions_fx[0]);
+            log.err("  1er step : p={d} cos_host[0..8]={any} cos_fx[0..8]={any}", .{ p0, host.cos_full[p0 * hd_f .. p0 * hd_f + 8], cos_fx[0..8] });
+            log.err("  1er step : sin_host[0..8]={any} sin_fx[0..8]={any}", .{ host.sin_full[p0 * hd_f .. p0 * hd_f + 8], sin_fx[0..8] });
+            log.err("  max_abs à step k={d} (p={d}) index i={d} kind={c} : host={d} fx={d}", .{ max_at.k, positions_fx[max_at.k], max_at.i, max_at.kind, max_at.host, max_at.fx });
+        }
+        return error.SelftestInputsFailed;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -120,6 +432,13 @@ pub fn main(init: std.process.Init) !void {
 
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     const args = try parseArgs(process_args);
+
+    // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
+    if (args.selftest_inputs) |fixture_path| {
+        try selftestInputs(allocator, io, fixture_path);
+        return;
+    }
+
     const prompt_text = args.prompt orelse {
         log.err("--prompt est requis\n{s}", .{usage});
         return error.MissingArgument;
@@ -144,8 +463,9 @@ pub fn main(init: std.process.Init) !void {
         log.info("ids = {any}", .{ids.items});
 
         // Round-trip détok (Step 2.4) : decode les ids APRÈS bos (= prompt_tok.items, la partie
-        // produite par l'encoder) puis re-encode ; exclure le gabarit du template n'est PAS requis
-        // (decode tout ce qui suit BOS suffit, cf PLAN Step 2.4).
+        // produite par l'encoder, gabarit de chat INCLUS — pas seulement le texte user) puis
+        // re-encode. Plus fort que le PLAN Step 2.4 (qui n'exigeait que le prompt hors template) :
+        // on assume la déviation, le round-trip couvre aussi les tokens de tour <|turn>/<turn|>.
         var decoder = try tokenizer.decoder();
         defer decoder.deinit();
         var text_rt = try decoder.decodeAlloc(allocator, ids.items[1..]);
@@ -163,13 +483,14 @@ pub fn main(init: std.process.Init) !void {
             log.info("round-trip détok : PASS (decode -> re-encode == ids)", .{});
         } else {
             log.err("round-trip détok : FAIL — got={any} want={any}", .{ reenc.items, prompt_tok.items });
+            return error.RoundTripFailed;
         }
         return;
     }
 
-    // Task 3+ : inputs host (cos/sin/masques/cache), boucle prefill-par-decode, --oracle, --max-tokens,
-    // --selftest-inputs, --selftest-gather. Pas encore câblés dans ce squelette (gate A0 seule) — le
-    // parsing ci-dessus est prêt à être branché, args.ckpt inclus (pas encore chargé, cf Task 3+).
-    log.err("génération non implémentée (Task 3+) — utiliser --ids-only pour la gate A0", .{});
+    // Task 4+ : gather embeds bruts en streaming, boucle prefill-par-decode, --oracle, --max-tokens,
+    // --selftest-gather. Pas encore câblés (Task 3 = inputs host + --selftest-inputs, gate A0 déjà
+    // livrée) — le parsing ci-dessus est prêt à être branché, args.ckpt inclus (pas encore chargé).
+    log.err("génération non implémentée (Task 4+) — utiliser --ids-only (A0) ou --selftest-inputs (Task 3)", .{});
     return error.NotImplemented;
 }
