@@ -36,6 +36,9 @@ CLI (appelé par scripts/g2_3_sweep.sh, cf plan Task 10) :
     --envelope fixtures/g2_envelope_manifest.json \
     --expected-converts fixtures/g2_3_expected_converts.json --hlo-report <json du 53> \
     --manifest fixtures/g2_3_manifest.json --bin-sha <sha> --zml-rev <rev> --repo-rev <rev>
+En mode complet, --expected-converts et --hlo-report sont OBLIGATOIRES (gate §5.3 : une preuve
+absente ne peut pas donner un verdict bucket) ; seul S49 (--ref-a none) peut les omettre.
+Contrat du rapport 53 : clés `differs_from_d0` (bool) et `convert_delta_observed` (delta vs D0).
 
 Exit codes : 0 = analyse rendue (le verdict EST le résultat, même FAIL-SANITY/VACUOUS/INVALID) ;
 2 = custody REFUSÉE (référence au md5 non conforme — régénérer, jamais réutiliser) ;
@@ -46,6 +49,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -109,6 +113,8 @@ def open_logits(path_s: str, what: str):
     path = Path(path_s)
     if not path.exists():
         sys.exit(f"[erreur] {what}: {path} absent")
+    if path.stat().st_size == 0:
+        sys.exit(f"[erreur] {what}: {path} vide (0 octet) — run crashé ?")
     if path.suffix == ".npy":
         arr = np.load(path, mmap_mode="r")
         if arr.dtype != np.float32 or arr.ndim != 2 or arr.shape[1] != VOC:
@@ -201,15 +207,24 @@ def metrics_pass(ref, run, n_steps: int, label: str) -> dict:
 
 def load_manifest(path: Path) -> dict:
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            sys.exit(f"[erreur] manifest corrompu : {path} ({e}) — restaurer depuis git "
+                     f"(`git checkout -- {path}`) ou depuis {path.with_suffix('.json.tmp')} "
+                     f"si une écriture a été interrompue")
     return {"_meta": {"source": "G2.3 manifest par run (docs/G2_3_OP_SENSITIVITY.md §4-§5)",
                       "created": now()},
             "custody": {}, "sanity_thresholds": None, "runs": {}}
 
 
 def save_manifest(path: Path, manifest: dict) -> None:
+    """Écriture ATOMIQUE (tmp + os.replace) : un crash mi-écriture ne peut pas corrompre le
+    manifest accumulé (custody + seuils + toutes les entrées de runs)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2) + "\n")
+    os.replace(tmp, path)
 
 
 def custody_check(manifest: dict, manifest_path: Path, path_s: str, role: str, prov: dict) -> str:
@@ -262,7 +277,8 @@ def upsert_run(manifest: dict, run_name: str, entry: dict, dump_md5: str) -> Non
 
 def parse_families(run_name: str, known: list[str]) -> list[str]:
     """Extrait les familles d'un run-name préfixé par l'orchestrateur (ex 'g2_3_s49_norms+mlp').
-    1er segment : suffixe famille (le + long qui matche) ; suivants : noms exacts."""
+    1er segment : suffixe famille (le + long qui matche) ; suivants : noms exacts. Dédupé,
+    ordre préservé : 'mlp+mlp' ne double-compte pas le delta attendu."""
     segs = run_name.split("+")
     cand = [f for f in known if segs[0] == f or segs[0].endswith("_" + f)]
     if not cand:
@@ -272,24 +288,52 @@ def parse_families(run_name: str, known: list[str]) -> list[str]:
     for s in segs[1:]:
         if s not in known:
             sys.exit(f"[erreur] famille inconnue '{s}' dans run-name '{run_name}'")
-        fams.append(s)
+        if s not in fams:
+            fams.append(s)
     return fams
 
 
-def evaluate_hlo(args) -> tuple[dict, bool]:
-    """Gate §5.3 : delta de converts observé (rapport du script 53) == somme des deltas attendus
-    des familles actives (fixtures/g2_3_expected_converts.json). Mismatch ⇒ INVALID."""
+def preflight_hlo(args, ref_a_none: bool) -> dict | None:
+    """Validation AMONT de la gate §5.3 — AVANT toute passe (un échec de config ne doit pas
+    coûter un cycle 3090). En mode complet, --expected-converts ET --hlo-report sont
+    OBLIGATOIRES : une preuve anti-câblage-croisé absente ne peut pas donner un verdict
+    bucket (preuve plus faible ⇏ verdict plus fort). Le chemin 'not-provided' n'est permis
+    qu'en mode S49/diagnostic (--ref-a none)."""
     if not args.expected_converts or not args.hlo_report:
-        print("  ⚠ gate anti-câblage-croisé NON évaluée (--expected-converts/--hlo-report absents)")
-        return {"status": "not-provided",
-                "note": "gate §5.3 non évaluée — hlo-report/expected-converts absents"}, False
-    exp = json.loads(Path(args.expected_converts).read_text())
+        if not ref_a_none:
+            sys.exit("[erreur] --expected-converts et --hlo-report sont OBLIGATOIRES en mode "
+                     "complet (gate §5.3) — seuls les runs S49/diagnostic (--ref-a none) "
+                     "peuvent les omettre")
+        return None
+    for opt, path_s in (("--expected-converts", args.expected_converts),
+                        ("--hlo-report", args.hlo_report)):
+        if not Path(path_s).exists():
+            sys.exit(f"[erreur] {opt}: {path_s} absent")
+    try:
+        exp = json.loads(Path(args.expected_converts).read_text())
+        rep = json.loads(Path(args.hlo_report).read_text())
+    except json.JSONDecodeError as e:
+        sys.exit(f"[erreur] json invalide (--expected-converts/--hlo-report) : {e}")
     known = [k for k in exp if not k.startswith("_")]
     fams = parse_families(args.run_name, known)
+    if "differs_from_d0" not in rep:
+        sys.exit(f"[erreur] rapport HLO {args.hlo_report}: clé 'differs_from_d0' absente — "
+                 f"pas un rapport du script 53 ?")
     expected = sum(int(exp[f]["delta_converts_vs_d0"]) for f in fams)
-    rep = json.loads(Path(args.hlo_report).read_text())
+    return {"families": fams, "expected": expected, "report": rep}
+
+
+def evaluate_hlo(args, pre: dict | None) -> tuple[dict, bool]:
+    """Gate §5.3 : delta de converts observé (rapport du script 53) == somme des deltas attendus
+    des familles actives (fixtures/g2_3_expected_converts.json). Mismatch ⇒ INVALID."""
+    if pre is None:  # permis en mode S49/diagnostic seulement (garanti par preflight_hlo)
+        print("  ⚠ gate anti-câblage-croisé NON évaluée (--expected-converts/--hlo-report "
+              "absents — permis en S49/diagnostic seul)")
+        return {"status": "not-provided",
+                "note": "gate §5.3 non évaluée — hlo-report/expected-converts absents (S49)"}, False
+    fams, expected, rep = pre["families"], pre["expected"], pre["report"]
     differs = bool(rep.get("differs_from_d0"))
-    observed = rep.get("convert_delta_observed", rep.get("convert_ops_observed"))
+    observed = rep.get("convert_delta_observed")  # contrat FIGÉ du rapport 53 : cette clé seule
     degraded = bool(rep.get("degraded")) or observed is None
     check = {"families": fams, "expected_delta": expected, "observed_delta": observed,
              "differs_from_d0": differs, "report": str(args.hlo_report),
@@ -425,15 +469,54 @@ def finish(manifest: dict, mpath: Path, args, entry: dict, dump_md5: str, npz_pa
 
 
 def do_analyze(args) -> int:
+    # ---- validations AMONT : tout échec de config/format sort ICI, avant toute passe et
+    # avant les md5 (un cycle 3090 gaspillé pour une erreur diagnosticable en 1 ms est interdit)
     for req in ("run_logits", "run_name", "ref_d0", "manifest"):
         if not getattr(args, req):
             sys.exit(f"[erreur] --{req.replace('_', '-')} requis")
     ref_a_none = (not args.ref_a) or args.ref_a.lower() == "none"
-    if not args.register_reference and not ref_a_none and not args.envelope:
-        sys.exit("[erreur] --envelope requis pour l'analyse vs A (source normative des seuils, §4)")
+    if "/" in args.run_name:
+        sys.exit(f"[erreur] run-name invalide '{args.run_name}' ('/' interdit — il nomme le npz)")
     mpath = Path(args.manifest)
     manifest = load_manifest(mpath)
     prov = {"bin_sha": args.bin_sha, "zml_rev": args.zml_rev, "repo_rev": args.repo_rev}
+
+    th = manifest.get("sanity_thresholds")
+    if not th:
+        sys.exit("[erreur] seuils de sanité absents du manifest — lancer d'abord "
+                 "`52_g2_3_analyze.py --calibrate-sanity` (protocole §5.1, AVANT le sweep)")
+
+    env = None
+    if not args.register_reference and not ref_a_none:
+        if not args.envelope:
+            sys.exit("[erreur] --envelope requis pour l'analyse vs A (source normative des seuils, §4)")
+        env_path = Path(args.envelope)
+        if not env_path.exists():
+            sys.exit(f"[erreur] --envelope: {env_path} absent")
+        try:
+            env = json.loads(env_path.read_text())
+        except json.JSONDecodeError as e:
+            sys.exit(f"[erreur] envelope corrompue : {env_path} ({e})")
+        for key in ("max_abs", "kl_a_b"):
+            if not all(q in env.get(key, {}) for q in ("p50", "p95", "max")):
+                sys.exit(f"[erreur] envelope invalide : clé '{key}' (p50/p95/max) manquante "
+                         f"dans {env_path} — pas le manifest du script 50 ?")
+
+    pre = preflight_hlo(args, ref_a_none) if not args.register_reference else None
+
+    # memmaps ouverts et validés (format, shape, steps) AVANT toute passe
+    run_path = Path(args.run_logits)
+    run = open_logits(args.run_logits, "run")
+    n_steps = run.shape[0]
+    d0 = a = None
+    if not args.register_reference:
+        d0 = open_logits(args.ref_d0, "ref D0")
+        if d0.shape[0] != n_steps:
+            sys.exit(f"[erreur] steps run ({n_steps}) != D0 ({d0.shape[0]}) — mauvaise référence ?")
+        if not ref_a_none:
+            a = open_logits(args.ref_a, "ref A")
+            if n_steps > a.shape[0]:
+                sys.exit(f"[erreur] steps run ({n_steps}) > A ({a.shape[0]})")
 
     mode = "register-reference" if args.register_reference else ("vs-D0 seul (S49)" if ref_a_none else "complet")
     print("=" * 72)
@@ -444,18 +527,9 @@ def do_analyze(args) -> int:
     if not ref_a_none:
         custody_check(manifest, mpath, args.ref_a, "ref_a", prov)
     md5_d0 = custody_check(manifest, mpath, args.ref_d0, "ref_d0", prov)
-
-    run_path = Path(args.run_logits)
-    run = open_logits(args.run_logits, "run")
-    n_steps = run.shape[0]
     same_as_d0 = run_path.resolve() == Path(args.ref_d0).resolve()
     dump_md5 = md5_d0 if same_as_d0 else md5_file(run_path)
     print(f"  run = {run_path.name} [{n_steps},{VOC}] md5={dump_md5}")
-
-    th = manifest.get("sanity_thresholds")
-    if not th:
-        sys.exit("[erreur] seuils de sanité absents du manifest — lancer d'abord "
-                 "`52_g2_3_analyze.py --calibrate-sanity` (protocole §5.1, AVANT le sweep)")
 
     entry: dict = {"type": "reference" if args.register_reference else "run",
                    "run_name": args.run_name, "run_logits": str(run_path),
@@ -496,9 +570,6 @@ def do_analyze(args) -> int:
         return finish(manifest, mpath, args, entry, dump_md5, npz_payload)
 
     # --- 3. non-vacuité (§5.2) + métriques vs D0 (classement)
-    d0 = open_logits(args.ref_d0, "ref D0")
-    if d0.shape[0] != n_steps:
-        sys.exit(f"[erreur] steps run ({n_steps}) != D0 ({d0.shape[0]}) — mauvaise référence ?")
     m0 = metrics_pass(d0, run, n_steps, "vs D0")
     npz_payload.update(max_abs_vs_d0=m0["max_abs"], kl_vs_d0=m0["kl"], match_vs_d0=m0["match"])
     entry["metrics_vs_D0"] = {"max_abs": pct(m0["max_abs"]), "kl": pct(m0["kl"]),
@@ -514,7 +585,7 @@ def do_analyze(args) -> int:
         return finish(manifest, mpath, args, entry, dump_md5, npz_payload)
 
     # --- 4. anti-câblage-croisé (§5.3)
-    hlo_check, invalid = evaluate_hlo(args)
+    hlo_check, invalid = evaluate_hlo(args, pre)
     entry["hlo_check"] = hlo_check
     if "families" in hlo_check:
         entry["families"] = hlo_check["families"]
@@ -531,15 +602,11 @@ def do_analyze(args) -> int:
         entry["verdict"] = "diagnostic-only"  # pas d'enveloppe S49 → pas de buckets (§7)
         return finish(manifest, mpath, args, entry, dump_md5, npz_payload)
 
-    a = open_logits(args.ref_a, "ref A")
-    if n_steps > a.shape[0]:
-        sys.exit(f"[erreur] steps run ({n_steps}) > A ({a.shape[0]})")
     ma = metrics_pass(a, run, n_steps, "vs A ")
     npz_payload.update(max_abs_vs_a=ma["max_abs"], kl_vs_a=ma["kl"], match_vs_a=ma["match"])
     entry["metrics_vs_A"] = {"max_abs": pct(ma["max_abs"]), "kl": pct(ma["kl"]),
                              "argmax_mismatches": ma["mismatches"],
                              "first_bifurcation_step": ma["first_bifurcation"]}
-    env = json.loads(Path(args.envelope).read_text())
     r_ma = ratios(entry["metrics_vs_A"]["max_abs"], env["max_abs"])
     r_kl = ratios(entry["metrics_vs_A"]["kl"], env["kl_a_b"])
     b_kl, b_ma = bucket(r_kl["p50"]), bucket(r_ma["p50"])
