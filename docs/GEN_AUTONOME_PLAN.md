@@ -37,6 +37,7 @@ oracles Python HF (scripts 46/49) côté validation uniquement.
 | `zml_runner/gemma4_gen_auto.zig` | LE runner autonome : CLI, tokenizer, template, inputs host, gather, boucle, gates | Créer |
 | `zml_runner/BUILD.bazel` | cible `gemma4_gen_auto` | Modifier |
 | `docs/GEN_AUTONOME_DESIGN.md` | statut des gates au fil de l'eau | Modifier |
+| `docs/DOCUMENTATION.md` | courte section usage CLI (Task 9) | Modifier |
 | `PLANNING.md` | solder l'item backlog à la fin | Modifier |
 
 Un seul fichier Zig neuf : le runner est un assemblage de patterns existants
@@ -192,6 +193,7 @@ fn renderChatTemplate(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
 }
 
 pub fn main(init: std.process.Init) !void {
+    @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
     const allocator = init.gpa;
     const io = init.io;
@@ -372,8 +374,16 @@ chunké (`forwardStageStep`) — STOP et documenter avant de pivoter.
 
 ```zig
 // ids = prompt templaté (Task 2). Phase 1 (prefill) : steps 0..ids.len-1, fed = ids[step],
-// argmax IGNORÉ sauf au dernier (il produit le 1er token généré). Phase 2 (gen) :
-// fed = argmax précédent ; stop si tok == EOT_ID ou n_gen == max_tokens.
+// argmax IGNORÉ sauf au dernier (il produit le 1er token généré = s0). Phase 2 (gen) :
+// fed = argmax précédent ; stop si tok == EOT_ID ou n_gen == limit.
+//
+// ⚠ ALIGNEMENT vs fixture 49 (vérifié scripts/49:151-160) : seq=[s0,t1,…], fed=seq[:n],
+// expected=seq[1:n+1]. Notre generated[k] == seq[k] == fed[k] (s0 INCLUS — le texte de la
+// réponse commence par s0, cf. tok.decode(fed) dans l'oracle). Donc :
+//   • A1 compare  generated[0..n] == fed[0..n]   (PAS expected — off-by-one garanti sinon)
+//   • en mode --oracle : limit = fed.len (le compte de steps vient de la FIXTURE ;
+//     neutralise à la fois l'early-stop EOS et le défaut --max-tokens=200)
+//   • hors oracle : limit = max_tokens (défaut 200), early-stop EOS actif
 var fed: i64 = ids[0];
 var step: usize = 0;
 var generated: std.ArrayList(i64) = .empty;
@@ -381,21 +391,23 @@ while (true) : (step += 1) {
     // gather(fed) → buffers embeds/embptls (Task 4) ; ctrl.step = step ;
     // exe.call ; cache swap (motif gemma4_gen_long_gpu.zig:139-168) ; tok = argmaxOf(logits)
     if (step + 1 < ids.len) { fed = ids[step + 1]; continue; }        // prefill
-    try generated.append(allocator, tok);                              // gen
-    if (tok == eot_id or generated.items.len >= max_tokens) break;
+    try generated.append(allocator, tok);                              // gen (s0 inclus)
+    if (oracle_mode) { if (generated.items.len >= fed_fixture.len) break; }
+    else if (tok == eot_id or generated.items.len >= max_tokens) break;
     if (step + 1 >= L_MAX) break; // garde L_MAX
     fed = tok;
 }
 ```
-Garde au lancement : `ids.len + max_tokens <= L_MAX` ET `ids.len < SLIDING_WINDOW`
+Garde au lancement : `ids.len + limit <= L_MAX` ET `ids.len < SLIDING_WINDOW`
 (le banc n'a jamais validé un prompt qui déborde la fenêtre — même assert que l'oracle 49).
 
 - [ ] **Step 5.3 : Gate A1 — mode `--oracle <fixture>`**
 
 `--oracle gen_custom.safetensors` : le prompt vient du manifest (ou re-passé en `--prompt`,
-avec vérif ids == prompt_ids), la comparaison porte sur `generated[0..n_decode] == expected`
-**et** l'early-stop est DÉSACTIVÉ en mode oracle (expected contient la suite après EOT ;
-on compare tout, comme l'oracle qui ne s'arrête pas).
+avec vérif ids == prompt_ids), la comparaison porte sur **`generated[0..n] == fed[0..n]`**
+(le tensor `fed` de la fixture — alignement du step 5.2 ; comparer à `expected` serait un
+off-by-one) ; la boucle court sur `fed.len` steps de génération (early-stop et
+`--max-tokens` neutralisés — l'oracle 49 ne s'arrête pas à EOT non plus).
 
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --oracle /data/gemma4-zml-probe/gen_custom.safetensors'
@@ -435,10 +447,11 @@ le tok/s (référence : 109 tok/s en replay).
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --max-tokens 48'
 ```
-Expected: le runner s'arrête de lui-même à l'EOT, à l'index relevé au step 1.3
-(`stop après K tokens, K == index_EOT+1`), et affiche le texte détokenisé (attendu :
-« Paris » et fin de tour). Critère A3 : index de stop == index du premier EOT dans
-`expected` de la fixture.
+Expected: le runner s'arrête de lui-même à l'EOT et affiche le texte détokenisé (attendu :
+« Paris » et fin de tour). **Critère A3 (alignement du step 5.2 : generated ≡ fed, s0
+inclus ; expected = décalé d'un cran)** : si le premier EOT est à l'index `i` dans
+`expected` (relevé au step 1.3), il doit apparaître à l'index `i+1` de `generated`, donc
+**stop après exactement `i+2` tokens générés** et `generated[last] == EOT`.
 
 - [ ] **Step 7.2 : Commit + tag `gate/gen-auto-a3-pass`**
 
@@ -449,8 +462,10 @@ Expected: le runner s'arrête de lui-même à l'EOT, à l'index relevé au step 
 - [ ] **Step 8.1 : Non-régression** — re-runs :
 
 ```bash
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_engine_e1 -- <fixture E1>'      # E1 4/4
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_long_gpu -- <weights> /data/gemma4-zml-probe/gen_custom.safetensors'  # replay 48/48
+# E1 : fixture /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors, tokens attendus
+# [1018,6398,25967,53121] (signature exacte de la commande : docs/ZML_MODULAR_ENGINE_PLAN.md)
+ssh ia@192.168.1.163 '... //examples/rqz:gemma4_engine_e1 -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors'  # E1 4/4
+ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_long_gpu -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/gen_custom.safetensors'  # replay 48/48
 ```
 Expected: PASS aux deux (le moteur n'a pas bougé — attendu trivial, mais exigé).
 
