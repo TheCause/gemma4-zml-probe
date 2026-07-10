@@ -112,5 +112,11 @@
     "rule": "attendu d'un run multi-familles = SOMME des deltas des familles actives (additivité sous CSE : valide sans partage inter-familles, cf _meta.counting_rules)",
     "g2_2_nonregression_qkv_proj+qk_scores+pv_ctx+o_proj+mlp+ple+head": 382,
     "observed": "Δ382 OBSERVÉ au run 7-familles (+312 ?→bf16, +70 ?→f32) = somme exacte des deltas CSE ✓"
+  },
+  "_interfamily_dedups": {
+    "norms+ple": {
+      "delta": -1,
+      "derivation": "Dédup inter-familles UNIQUE, localisée par bisection exhaustive (12-combiné Δ1877 vs somme 1878 ; GEMM7 seul exact ; non-GEMM5 seul exact ; GEMM7+norms+softmax −1 ; GEMM7+norms −1 ; les 7 paires norms×GEMM exactes SAUF norms+ple Δ1260 vs 1261) puis diff de signatures des converts (pair vs somme one-hots) : un convert bf16[1,1,1536] d'opérande %multiply émis une seule fois quand norms ET ple sont actives (nœud partagé par déduplication au traçage). Les ±35 reclassifications %dot→%convert observées au même diff (sandwich ple-out/norms-in au site post_per_layer_input_norm) ne changent pas le total. 10 juil 2026."
+    }
   }
 }

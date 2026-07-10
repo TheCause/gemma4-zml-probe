@@ -162,6 +162,13 @@ def parse_families(family_arg: str, expected_path: str) -> tuple[list[str], int,
         if f not in fams:
             fams.append(f)
     expected = sum(int(table[f]["delta_converts_vs_d0"]) for f in fams)
+    # Dédups INTER-familles nommées (découvertes empiriquement, cf _interfamily_dedups du JSON) :
+    # quand TOUTES les familles d'une clé "famA+famB" (triée) sont actives, le graphe partage un
+    # nœud convert → l'attendu se corrige du delta consigné. Sans entrée = additivité stricte.
+    for key, entry in (table.get("_interfamily_dedups") or {}).items():
+        members = key.split("+")
+        if all(m in fams for m in members):
+            expected += int(entry["delta"])
     return fams, expected, table
 
 
