@@ -109,7 +109,8 @@ ssh ia@192.168.1.163 'ls -la /data/gemma4-zml-probe/gen_custom.safetensors*'
 ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && cd /data/gemma4-zml-probe && HF_HOME=/data/hf_cache python3 scripts/49_gen_custom_oracle.py --prompt "What is the capital of France? Answer in one word." --n-tokens 48 --out /data/gemma4-zml-probe/gen_custom.safetensors'
 ```
 Expected: fixture + `gen_custom.safetensors.manifest.json` (contient `prompt_ids`, `seq_len`,
-`expected_head`). Noter `seq_len` (S_REF) et `prompt_ids`.
+`expected_head`). Noter `seq_len` (S_REF) et `prompt_ids`. Si la fixture existe mais que le
+manifest montre un AUTRE prompt ou `n_decode` ≠ 48 : régénérer (commande ci-dessus).
 
 - [ ] **Step 1.3 : Localiser l'EOS dans expected (critère A3)**
 
@@ -234,7 +235,7 @@ Puis 2e prompt de contrôle (celui de la fixture A2, step 1.4) : égalité aussi
 
 - [ ] **Step 2.4 : Round-trip détok**
 
-Ajouter au mode `--ids-only` : `decoder.decode(ids générés SANS le préfixe template)` puis
+Ajouter au mode `--ids-only` : `decoder.decode(ids du prompt hors préfixe template)` puis
 re-encode == ids (log PASS/FAIL). Run : PASS.
 
 - [ ] **Step 2.5 : Gate A0 — commit + tag**
@@ -481,7 +482,9 @@ dans le doc (pattern G2.3 : les FAIL de non-vacuité se consignent).
 ### Task 9 : Documentation + clôture
 
 - [ ] **Step 9.1** : `docs/GEN_AUTONOME_DESIGN.md` — remplir un tableau « Résultats » (gate
-par gate, mesures, date), statut spec → implémentée.
+par gate, mesures, date), statut spec → implémentée. Y noter l'alignement retenu
+`generated ≡ fed` (s0 inclus) — la table §4 de la spec disait « oracle = expected »,
+le plan a corrigé (off-by-one) ; consigner pour éviter une confusion future.
 - [ ] **Step 9.2** : `PLANNING.md` — item backlog « Runtime 100 % autonome » → [x] avec
 pointeurs (runner, tags, tok/s).
 - [ ] **Step 9.3** : `DOCUMENTATION.md` — courte section « runtime autonome » (usage CLI).
