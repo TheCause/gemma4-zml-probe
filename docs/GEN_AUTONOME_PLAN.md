@@ -291,14 +291,26 @@ sl `{12,1,1,L_MAX,256}` ×2, fl `{3,1,1,L_MAX,512}` ×2).
 - [ ] **Step 3.3 : Selftest vs fixture — mode `--selftest-inputs <fixture>`**
 
 Charge la fixture A1 (49) et compare, pour chacun de ses `n_decode` steps k (position
-`p = seq_len + k` lue de `positions[k]`) : cos/sin host vs fixture (`max_abs ≤ 1e-6`),
+`p = seq_len + k` lue de `positions[k]`) : cos/sin host vs fixture (tolérance ci-dessous),
 masques host vs fixture (**égalité bit-exacte**, valeurs ∈ {0, MASK_MIN}), positions.
+
+> **Tolérance cos/sin — réalité mesurée (10 juil), pas le `≤ 1e-6` initialement visé** : le
+> `pow()` f32 de Zig (libm) et celui de PyTorch arrondissent `theta**exp` à 1 ULP l'un de
+> l'autre sur certains `inv_freq[i]` (aucun des deux n'est « le bon », vérifié en précision
+> arbitraire). L'erreur d'angle résultante croît **linéairement en p** (Δangle ≈ 2 ULP × p ×
+> ~6e-8 ≈ 1.2e-7×p), propagée par sin/cos à pente ≤ 1 : plancher 2^-18 = 3.8e-6 aux positions
+> courtes (p ≤ 68, fixture 48) ; 6.0e-5 mesuré à p = 612 (fixture longue ; borne 2-ULP 7.3e-5,
+> cohérente). Le selftest applique donc `tol(p) = 1e-5 + 1.5e-7×p` PAR STEP (dérivation
+> complète en commentaire de `cosSinTol` dans le runner) et les DEUX fixtures doivent PASS.
 
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_custom.safetensors'
+# + fixture longue (positions jusqu'à ~1023 — couvre le régime p ≥ 512 où le masque sliding mord) :
+ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
-Expected: `SELFTEST INPUTS PASS (48 steps, cos/sin max_abs=…e-7, masks bit-exact, positions ==)`.
-Si cos/sin FAIL : la formule 3.1 est mal transcrite — diff sur les 8 premières valeurs.
+Expected (les deux runs) : `SELFTEST INPUTS PASS (N steps, cos/sin max_abs=… max_ratio=… de tol(p), masks bit-exact, positions ==)`
+avec `max_ratio ≤ 1` (le critère). Si cos/sin FAIL avec un écart de plusieurs ordres de grandeur
+au-dessus de tol(p) : la formule 3.1 est mal transcrite — diff sur les 8 premières valeurs.
 
 - [ ] **Step 3.4 : Commit**
 

@@ -155,21 +155,27 @@ const ROPE_FULL_ANGLES: usize = 64; // rope_angles
 const ROPE_FULL_HALF: usize = 256; // head_dim // 2 (= HD_F / 2)
 
 // cos/sin full pour la position p — formule ci-dessus (partial 0.25, proportional, theta 1e6).
-// PRÉCISION — investigation mesurée (10 juil, cf commit, détail dans le rapport de tâche) : la
-// transcription EST correcte (vérifiée valeur par valeur contre la fixture ET contre numpy), mais
-// un résidu ~3.8e-6 subsiste sur quelques (position, indice de fréquence) précis, QUELLE QUE SOIT
-// la stratégie de calcul essayée (f64 bout-en-bout arrondi seulement à la fin ; f32 via
-// `std.math.pow` ; f32 via `@exp2(exp*@log2(base))` — les trois donnent le MÊME ordre de grandeur,
-// 3.8146973e-6 EXACTEMENT = 2^-18, soit une demi-ULP f32 à l'échelle des angles ici (~32-128 rad,
-// ULP(64)=2^-17)). Root cause : `pow()`/`sin()`/`cos()` de Zig (LLVM/libm, CPU) et de PyTorch/CUDA
-// (kernel GPU) arrondissent chacun CORRECTEMENT mais PAS IDENTIQUEMENT `base**exp` (1 ULP d'écart,
-// confirmé par calcul en précision arbitraire : aucune des deux valeurs n'est "la bonne", les deux
-// sont à ~2 ULP de la valeur mathématique exacte) — un écart d'1 ULP sur l'angle, amplifié par la
-// pente de sin/cos (≤1 mais proche de 1 pour ces angles), redonne ~1 ULP × échelle ≈ 1e-6..4e-6 en
-// sortie. C'est un plancher de précision float32 inter-implémentations (même famille de piège que
-// "pas de bit-à-pas inter-compiles XLA-GPU", mémoire ZML) — PAS une erreur de formule. `std.math.pow`
+// PRÉCISION — investigation mesurée (10 juil, fixtures courte p≤68 ET longue p≤1023, cf commits) :
+// la transcription EST correcte (vérifiée valeur par valeur contre la fixture ET contre numpy),
+// mais un résidu subsiste sur quelques (position, indice de fréquence) précis, QUELLE QUE SOIT la
+// stratégie de calcul essayée (f64 bout-en-bout arrondi seulement à la fin ; f32 via
+// `std.math.pow` ; f32 via `@exp2(exp*@log2(base))` — même ordre de grandeur les trois fois).
+// Root cause : `pow()` de Zig (LLVM/libm, CPU) et de PyTorch arrondissent chacun CORRECTEMENT
+// mais PAS IDENTIQUEMENT `base**exp` — 1 ULP d'écart sur certains inv_freq[i] (confirmé
+// bit-à-bit : inv_freq[12]≈0.523, bits 3f05f6ee vs 3f05f6ef ; le calcul en précision arbitraire
+// montre qu'aucune des deux valeurs n'est "la bonne", les deux sont à ~2 ULP du réel).
+// AMPLIFICATION LINÉAIRE EN p (mesurée sur la fixture longue) : l'erreur d'angle vaut
+//   Δangle ≈ Δinv_freq×p + arrondi f32 du produit inv_freq×p (±ULP à l'échelle de l'angle,
+//   elle-même ∝ p puisque angle ≈ inv_freq×p) ≈ 2 ULP × p × ~6e-8 ≈ 1.2e-7 × p,
+// que sin/cos propagent à pente ≤ 1. Vérifié numériquement au pire point mesuré (k=587, p=612,
+// i=12, sin) : Δinv_freq = 1 ULP = 5.96e-8 → Δangle = 6.10e-5 (= 3.65e-5 de Δinv×p + arrondis de
+// produit opposés, ULP(320 rad) = 3.05e-5), × pente |cos|≈0.983 → 6.00e-5 observé — REPRODUIT
+// exactement par numpy f32 sur les deux angles candidats (borne 2-ULP : 7.3e-5, cohérente). Aux
+// positions courtes (p≤68) le même mécanisme donnait le plancher 2^-18 = 3.81e-6. C'est un
+// plancher de précision float32 inter-implémentations (même famille de piège que "pas de
+// bit-à-bit inter-compiles XLA-GPU", mémoire ZML) — PAS une erreur de formule. `std.math.pow`
 // est gardé (le plus standard, pas de bricolage ad hoc) ; le SELFTEST compare avec une tolérance
-// réaliste (cf `COS_SIN_TOL` sur le site d'appel), pas 1e-6.
+// DÉPENDANTE DE LA POSITION (cf `cosSinTol`), pas une constante.
 fn ropeFull(p: i64, cos_out: *[HD_F]f32, sin_out: *[HD_F]f32) void {
     var inv_freq: [ROPE_FULL_HALF]f32 = undefined;
     for (0..ROPE_FULL_HALF) |i| {
@@ -295,43 +301,47 @@ const HostInputs = struct {
     }
 };
 
-// Lit un tenseur i32/f32 ENTIER de la fixture, host-side, SANS Platform : lecture positionnelle
-// directe dans le fichier à `tensor.offset` (octets absolus, cf gemma4_gchunk_auto.zig:220-223)
-// sur `tensor.byteSize()` octets. Évite de charger un Platform GPU pour un simple selftest host.
-fn readFixtureF32Alloc(allocator: std.mem.Allocator, io: std.Io, reg: *const zml.safetensors.TensorRegistry, file: *std.Io.File, name: []const u8) ![]f32 {
+// Lit un tenseur ENTIER de la fixture, host-side, SANS Platform : lecture positionnelle directe
+// dans le fichier à `tensor.offset` (octets absolus, cf gemma4_gchunk_auto.zig:220-223) sur
+// `tensor.byteSize()` octets. Durci : dtype du header vérifié AVANT lecture (une fixture au
+// mauvais dtype serait sinon réinterprétée silencieusement), compte d'octets lus vérifié APRÈS
+// (fichier tronqué → error.ShortRead, pas des zéros silencieux).
+fn readFixtureAlloc(comptime T: type, comptime want_dtype: zml.DataType, allocator: std.mem.Allocator, io: std.Io, reg: *const zml.safetensors.TensorRegistry, file: *std.Io.File, name: []const u8) ![]T {
     const t = reg.tensors.get(name) orelse {
         log.err("tensor introuvable dans la fixture: {s}", .{name});
         return error.MissingTensor;
     };
-    const n: usize = @intCast(t.byteSize() / 4);
-    const out = try allocator.alloc(f32, n);
+    const dt = t.shape.dtype();
+    if (dt != want_dtype) {
+        log.err("{s}: dtype fixture = {s} ≠ attendu = {s}", .{ name, @tagName(dt), @tagName(want_dtype) });
+        return error.DtypeMismatch;
+    }
+    const size: usize = @intCast(t.byteSize());
+    const out = try allocator.alloc(T, size / @sizeOf(T));
     errdefer allocator.free(out);
-    _ = try file.readPositionalAll(io, std.mem.sliceAsBytes(out), t.offset);
+    const got = try file.readPositionalAll(io, std.mem.sliceAsBytes(out), t.offset);
+    if (got != size) {
+        log.err("{s}: lecture courte — {d}/{d} octets (fixture tronquée ?)", .{ name, got, size });
+        return error.ShortRead;
+    }
     return out;
 }
 
-fn readFixtureI32Alloc(allocator: std.mem.Allocator, io: std.Io, reg: *const zml.safetensors.TensorRegistry, file: *std.Io.File, name: []const u8) ![]i32 {
-    const t = reg.tensors.get(name) orelse {
-        log.err("tensor introuvable dans la fixture: {s}", .{name});
-        return error.MissingTensor;
-    };
-    const n: usize = @intCast(t.byteSize() / 4);
-    const out = try allocator.alloc(i32, n);
-    errdefer allocator.free(out);
-    _ = try file.readPositionalAll(io, std.mem.sliceAsBytes(out), t.offset);
-    return out;
+// Tolérance cos/sin DÉPENDANTE DE LA POSITION (dérivation complète : note `ropeFull`) — PAS une
+// constante : l'erreur d'angle inter-implémentations croît linéairement, Δangle ≲ 2 ULP × p ×
+// ULP(inv_freq≈0.5)=6e-8 ≈ 1.2e-7×p, propagée par sin/cos à pente ≤ 1. tol(p) = 1e-5 + 1.5e-7×p
+// couvre cette enveloppe avec marge (mesuré : 3.81e-6 @ p≤68 vs tol 2.0e-5 ; 6.00e-5 @ p=612 vs
+// tol 1.02e-4 ; borne théorique ~1.2e-4 @ p=1011 vs tol 1.6e-4) sans masquer une VRAIE régression
+// de formule (qui produirait des écarts de plusieurs ordres de grandeur, pas ~2 ULP).
+fn cosSinTol(p: i32) f32 {
+    return 1e-5 + 1.5e-7 * @as(f32, @floatFromInt(p));
 }
-
-// Tolérance cos/sin — PAS 1e-6 (cf note `ropeFull` : plancher mesuré ~2^-18=3.8147e-6, demi-ULP
-// f32 pour des angles ~32-128 rad, atteint quelle que soit la stratégie de calcul essayée). Fixée
-// à 1e-5 (~2.6× le plancher mesuré) : marge pour l'implémentation retenue sans masquer une VRAIE
-// régression de formule (qui produirait un écart de plusieurs ordres de grandeur, pas ~1 ULP).
-const COS_SIN_TOL: f32 = 1e-5;
 
 // --selftest-inputs <fixture> : charge la fixture 49 (gen_custom.safetensors, n_decode steps) et
 // compare, pour chaque step k, la position p = positions[k] LUE DE LA FIXTURE :
 //   - cos/sin : lignes de la table `HostInputs` à l'index p (donc `ropeFull` ET la construction
-//     de la table {L_MAX,…} sont toutes les deux exercées) vs cos_full/sin_full[k] — max_abs.
+//     de la table {L_MAX,…} sont toutes les deux exercées) vs cos_full/sin_full[k] — écart par
+//     step ≤ cosSinTol(p) (tolérance position-dépendante, cf dérivation sur `cosSinTol`).
 //   - masques : idem vs masks_sliding/masks_full[k] — égalité BIT-EXACTE (valeurs ∈ {0, MASK_MIN}).
 //   - positions : continuité (positions[k] == positions[0] + k, i.e. p = seq_len + k avec
 //     seq_len = positions[0], lu de la fixture — pas besoin du manifest JSON séparé).
@@ -341,15 +351,15 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
     var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
     defer file.close(io);
 
-    const positions_fx = try readFixtureI32Alloc(allocator, io, &reg, &file, "positions");
+    const positions_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "positions");
     defer allocator.free(positions_fx);
-    const cos_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "cos_full");
+    const cos_fx = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "cos_full");
     defer allocator.free(cos_fx);
-    const sin_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "sin_full");
+    const sin_fx = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "sin_full");
     defer allocator.free(sin_fx);
-    const masks_sliding_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "masks_sliding");
+    const masks_sliding_fx = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "masks_sliding");
     defer allocator.free(masks_sliding_fx);
-    const masks_full_fx = try readFixtureF32Alloc(allocator, io, &reg, &file, "masks_full");
+    const masks_full_fx = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "masks_full");
     defer allocator.free(masks_full_fx);
 
     const n_decode: usize = positions_fx.len;
@@ -368,7 +378,8 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
     defer host.deinit(allocator);
 
     var max_abs: f32 = 0;
-    var max_at: struct { k: usize, i: usize, kind: u8, host: f32, fx: f32 } = .{ .k = 0, .i = 0, .kind = 'c', .host = 0, .fx = 0 };
+    var max_ratio: f32 = 0; // max sur les steps de (écart / cosSinTol(p)) — critère de PASS : ≤ 1
+    var max_at: struct { k: usize, i: usize, kind: u8, host: f32, fx: f32, tol: f32 } = .{ .k = 0, .i = 0, .kind = 'c', .host = 0, .fx = 0, .tol = 0 };
     var masks_bitexact = true;
     var positions_ok = true;
     const seq_len = positions_fx[0];
@@ -381,6 +392,7 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
             return error.PositionOutOfRange;
         }
         const pi: usize = @intCast(p);
+        const tol = cosSinTol(p);
 
         const cos_row = host.cos_full[pi * hd_f .. (pi + 1) * hd_f];
         const sin_row = host.sin_full[pi * hd_f .. (pi + 1) * hd_f];
@@ -389,13 +401,15 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
         for (0..hd_f) |i| {
             const dc = @abs(cos_row[i] - cos_fx_row[i]);
             const ds = @abs(sin_row[i] - sin_fx_row[i]);
-            if (dc > max_abs) {
-                max_abs = dc;
-                max_at = .{ .k = k, .i = i, .kind = 'c', .host = cos_row[i], .fx = cos_fx_row[i] };
+            if (dc > max_abs) max_abs = dc;
+            if (ds > max_abs) max_abs = ds;
+            if (dc / tol > max_ratio) {
+                max_ratio = dc / tol;
+                max_at = .{ .k = k, .i = i, .kind = 'c', .host = cos_row[i], .fx = cos_fx_row[i], .tol = tol };
             }
-            if (ds > max_abs) {
-                max_abs = ds;
-                max_at = .{ .k = k, .i = i, .kind = 's', .host = sin_row[i], .fx = sin_fx_row[i] };
+            if (ds / tol > max_ratio) {
+                max_ratio = ds / tol;
+                max_at = .{ .k = k, .i = i, .kind = 's', .host = sin_row[i], .fx = sin_fx_row[i], .tol = tol };
             }
         }
 
@@ -409,16 +423,16 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
         }
     }
 
-    const cos_sin_ok = max_abs <= COS_SIN_TOL;
+    const cos_sin_ok = max_ratio <= 1.0;
     if (cos_sin_ok and masks_bitexact and positions_ok) {
-        log.info("SELFTEST INPUTS PASS ({d} steps, cos/sin max_abs={e}, masks bit-exact, positions ==)", .{ n_decode, max_abs });
+        log.info("SELFTEST INPUTS PASS ({d} steps, cos/sin max_abs={e} max_ratio={d:.3} de tol(p), masks bit-exact, positions ==)", .{ n_decode, max_abs, max_ratio });
     } else {
-        log.err("SELFTEST INPUTS FAIL — cos/sin max_abs={e} (ok={}) masks_bitexact={} positions_ok={}", .{ max_abs, cos_sin_ok, masks_bitexact, positions_ok });
+        log.err("SELFTEST INPUTS FAIL — cos/sin max_abs={e} max_ratio={d:.3} (ok={}) masks_bitexact={} positions_ok={}", .{ max_abs, max_ratio, cos_sin_ok, masks_bitexact, positions_ok });
         if (!cos_sin_ok) {
             const p0: usize = @intCast(positions_fx[0]);
             log.err("  1er step : p={d} cos_host[0..8]={any} cos_fx[0..8]={any}", .{ p0, host.cos_full[p0 * hd_f .. p0 * hd_f + 8], cos_fx[0..8] });
             log.err("  1er step : sin_host[0..8]={any} sin_fx[0..8]={any}", .{ host.sin_full[p0 * hd_f .. p0 * hd_f + 8], sin_fx[0..8] });
-            log.err("  max_abs à step k={d} (p={d}) index i={d} kind={c} : host={d} fx={d}", .{ max_at.k, positions_fx[max_at.k], max_at.i, max_at.kind, max_at.host, max_at.fx });
+            log.err("  pire ratio à step k={d} (p={d}) index i={d} kind={c} : host={d} fx={d} écart={e} tol(p)={e}", .{ max_at.k, positions_fx[max_at.k], max_at.i, max_at.kind, max_at.host, max_at.fx, @abs(max_at.host - max_at.fx), max_at.tol });
         }
         return error.SelftestInputsFailed;
     }
