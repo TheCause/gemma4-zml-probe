@@ -87,8 +87,17 @@ if [ "$REF_A" != "none" ]; then
   [ -f "$REF_A" ] || fatal "bras A absent : $REF_A (régénérer via script 50) — ou REF_A=none pour le mode S49"
   [ -f "$ENVELOPE" ] || fatal "enveloppe absente : $ENVELOPE — rsync depuis M1 (§8.3)"
 fi
-grep -q '"sanity_thresholds"' "$MANIFEST" 2>/dev/null \
-  || fatal "seuils de sanité absents de $MANIFEST — lancer d'abord \`52_g2_3_analyze.py --calibrate-sanity\` (§5.1, AVANT tout run du sweep)"
+# Une VALEUR de seuil, pas la clé seule : '"sanity_thresholds": null' (calibration avortée après
+# l'enregistrement de la custody) passerait un grep sur la clé et n'échouerait qu'au 52 — APRÈS
+# le build et le run D0 (nuit GPU perdue).
+grep -q '"entropy_mean_min"' "$MANIFEST" 2>/dev/null \
+  || fatal "seuils de sanité absents/incomplets dans $MANIFEST — lancer d'abord \`52_g2_3_analyze.py --calibrate-sanity\` (§5.1, AVANT tout run du sweep)"
+# Footgun S49 : REF_A=none avec le namespace par défaut pré-wiperait puis écraserait le dump et
+# le HLO de D0-S46 (la custody du 52 rattraperait en exit 2, mais après la nuit GPU, et D0-S46
+# serait à régénérer).
+if [ "$REF_A" = "none" ] && [ "$RUN_PREFIX" = "g2_3" ]; then
+  fatal "REF_A=none exige un RUN_PREFIX dédié (ex: RUN_PREFIX=g2_3_s49) — protection de D0-S46 (§7)"
+fi
 
 # ---- 0. build UNIQUE + provenance (§8.1)
 echo "[g2_3_sweep] $(date +%Y-%m-%dT%H:%M:%S) build unique gemma4_g23_sweep (cuda) ..."
@@ -101,6 +110,22 @@ REPO_REV=${REPO_REV:-$(git -C "$DATA" rev-parse HEAD 2>/dev/null || echo "n/a")}
 echo "[g2_3_sweep] BIN_SHA=$BIN_SHA ZML_REV=$ZML_REV REPO_REV=$REPO_REV"
 echo "[g2_3_sweep] configs: $FAMILIES"
 echo "[g2_3_sweep] RUN_PREFIX=$RUN_PREFIX FIXTURE=$FIXTURE REF_A=$REF_A KEEP=$KEEP"
+
+# Pas de mélange de binaires inter-invocations : si cette invocation NE régénère PAS D0 (pas de
+# 'none' dans les configs — re-run déterminisme, run combiné KEEP=1...), le D0 réutilisé doit
+# venir du MÊME binaire — sinon les runs nouveau-binaire seraient comparés à un D0 ancien-binaire
+# (le 53 finirait en INVALID, mais après la nuit GPU). BIN_SHA n'est une baseline QUE par
+# invocation ; la provenance de D0 vit dans le manifest (entrée ${RUN_PREFIX}_none du 52).
+has_none=0
+# shellcheck disable=SC2086
+for f in $FAMILIES; do if [ "$f" = "none" ]; then has_none=1; fi; done
+if [ "$has_none" -eq 0 ]; then
+  d0_sha=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("runs",{}).get(sys.argv[2],{}).get("provenance",{}).get("bin_sha",""))' \
+    "$MANIFEST" "${RUN_PREFIX}_none" 2>/dev/null || echo "")
+  [ -n "$d0_sha" ] || fatal "D0 (${RUN_PREFIX}_none) absent du manifest — lancer d'abord la config 'none' (référence du sweep)"
+  [ "$d0_sha" = "$BIN_SHA" ] \
+    || fatal "le binaire a changé depuis D0 (manifest bin_sha=$d0_sha ≠ courant $BIN_SHA) — relancer 'none' d'abord (D0 doit venir du même binaire que les runs)"
+fi
 
 # shellcheck disable=SC2086  # split volontaire : FAMILIES = configs séparées par des espaces
 for fam in $FAMILIES; do
