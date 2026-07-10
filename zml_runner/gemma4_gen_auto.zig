@@ -60,13 +60,15 @@ const Args = struct {
     max_tokens: ?usize = null,
     oracle_path: ?[]const u8 = null,
     ids_only: bool = false,
+    allow_cpu: bool = false,
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
 };
 
 const usage =
     "Usage: gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt \"...\" " ++
-    "[--max-tokens N] [--oracle fixture] [--ids-only] [--selftest-inputs f] [--selftest-gather f]";
+    "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
+    "[--selftest-inputs f] [--selftest-gather f]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -109,6 +111,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.oracle_path = process_args[i];
         } else if (std.mem.eql(u8, a, "--ids-only")) {
             args.ids_only = true;
+        } else if (std.mem.eql(u8, a, "--allow-cpu")) {
+            args.allow_cpu = true;
         } else if (std.mem.eql(u8, a, "--selftest-inputs")) {
             i += 1;
             if (i >= process_args.len) {
@@ -781,6 +785,9 @@ pub fn main(init: std.process.Init) !void {
             log.err("--oracle : fixture 'positions' vide", .{});
             return error.EmptyFixture;
         }
+        // Déviation assumée (longueur seule) : les prompt_ids complets ne vivent que dans le
+        // manifest sidecar JSON — positions[0]==ids.len est le check le plus fort possible sur la
+        // fixture seule ; un prompt FAUX de même longueur échouerait bruyamment au compare step 0.
         if (positions_fx[0] != @as(i32, @intCast(ids.items.len))) {
             log.err("--oracle : positions[0]={d} (seq_len fixture) != ids.len={d} (prompt rendu) — mismatch prompt/fixture", .{ positions_fx[0], ids.items.len });
             return error.OraclePromptMismatch;
@@ -821,6 +828,14 @@ pub fn main(init: std.process.Init) !void {
     };
     defer platform.deinit(allocator);
     log.info("A1 — backend = {s} (cible : cuda)", .{@tagName(platform.target)});
+    // Garde CUDA DURE (leçon de l'incident du 10 juil : le warn-and-continue a produit un run CPU
+    // silencieux — binaire buildé sans `--@zml//platforms:cuda=true` → libpjrt_cuda absent des
+    // runfiles → repli CPU discret ; un A2 ~1000 steps non surveillé y ramperait des heures).
+    // fail-fast, échappatoire explicite --allow-cpu (débogage uniquement).
+    if (platform.target != .cuda and !args.allow_cpu) {
+        log.err("backend = {s} ≠ cuda — repli CPU refusé (rebuilder/lancer avec --@zml//platforms:cuda=true, ou passer --allow-cpu pour du débogage)", .{@tagName(platform.target)});
+        return error.CudaRequired;
+    }
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.ckpt);
@@ -934,6 +949,10 @@ pub fn main(init: std.process.Init) !void {
         step_buf.deinit();
         call_args.deinit(allocator);
         call_results.deinit(allocator);
+
+        // Progression périodique (motif gemma4_gen_long_gpu.zig:158) — premier signe humain d'une
+        // anomalie pendant un run long (A2) : silence prolongé = suspect.
+        if ((step + 1) % 256 == 0) log.info("  ... step {d} ({d} générés)", .{ step + 1, generated.items.len });
 
         if (step + 1 < ids.items.len) {
             // Phase 1 (prefill) : argmax ci-dessus IGNORÉ (pas le dernier token du prompt).
