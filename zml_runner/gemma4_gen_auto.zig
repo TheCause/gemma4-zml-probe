@@ -10,11 +10,14 @@
 // "proportional" copiée de la source HF), masques additifs (`maskRows`), positions, et les
 // tables host complètes {L_MAX,…} (cos_full/sin_full/masks_sliding/masks_full/positions +
 // embeds/embptls/cache zéros, cf `HostInputs`) — validées vs la fixture 49.
-// Task 4 (cette tranche) : gather embeds BRUTS en streaming (`EmbedGather`, pattern
+// Task 4 : gather embeds BRUTS en streaming (`EmbedGather`, pattern
 // gchunk_auto.zig:137-230 adapté — offsets absolus sur le checkpoint, une ligne bf16 par token,
 // scratch réutilisé, AUCUN scaling host) + mode `--selftest-gather <fixture>` (bit-exact vs
-// embeds/embptls de la fixture A1). Les buffers device par step et la boucle autonome
-// (forwardStep) restent Task 5.
+// embeds/embptls de la fixture A1).
+// Task 5 (cette tranche, gate A1) : boucle autonome prefill-par-decode — compile mono `forwardStep`
+// (Packed/Cache symboliques à la main, Bufferized champ-à-champ depuis HostInputs), gather → device
+// per-step, argmax host, arrêt EOS/max-tokens, mode `--oracle <fixture>` (48/48 == HF, cf section
+// Task 5 plus bas). ⚠ GPU : lancer avec `--@zml//platforms:cuda=true` sinon repli CPU silencieux.
 const std = @import("std");
 const log = std.log;
 const zml = @import("zml");
@@ -631,6 +634,50 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u
     log.info("SELFTEST GATHER PASS ({d} steps, bit-exact)", .{n_decode});
 }
 
+// ============================================================================================
+// Task 5 — boucle autonome prefill-par-decode (forwardStep, buffers device per-step) : gate A1.
+// ============================================================================================
+//
+// Compile UNE FOIS le mono-graphe `forwardStep` (35 couches, embeds/embptls PASSÉS EN ARGUMENT
+// séparé — engine.zig:632-661, PAS de pickStep dessus). Packed(true)/Cache SYMBOLIQUES construits
+// À LA MAIN (pas de fixture de store pour ce runner — mêmes shapes que engine.Packed(true)/
+// engine.Cache, cf commentaires HostInputs plus haut, conçus exactement pour cet usage) :
+//   - cos_full/sin_full/masks_sliding/masks_full/positions : RÉELLEMENT consommés par forwardStep
+//     (indexés par `ctrl.step` == position absolue p, cf pickStep) — remplis depuis HostInputs.
+//   - embeds/embptls du Packed symbolique : déclarés (le type Packed(true) a 7 champs) mais JAMAIS
+//     lus par forwardStep (embeds_step/embptls_step, les 2 premiers arguments, portent le vrai
+//     token) — remplis avec les tables zéro de HostInputs, factices par construction.
+//   - Cache initial : zéro (Bufferized construit par zml.Buffer.fromBytes depuis les zéros host).
+//
+// Risque nommé (spec §5) : 1er compile GPU du mono `forwardStep` — attendu OK (gen_long_gpu compile
+// déjà le mono `.forward` op-identique sur GPU ; le "~33 Go thrash" d'engine.zig:667 était XLA-CPU
+// sur la VM 23 Go, pas GPU, cf gemma4_gen_long_gpu.zig).
+
+const Top5 = struct { idx: [5]usize, val: [5]f32 };
+
+// Argmax + top-5 en UNE passe host (diagnostic Step 5.3 : en cas de FAIL, dump des logits SANS
+// reprocess). Coût négligeable (262144 f32, insertion triée O(5) par élément) — appelée à CHAQUE
+// step (prefill inclus, cf PLAN "simplest: always compute") ; seul le résultat des steps de
+// génération est conservé (`gen_top5`, parallèle à `generated`).
+fn top5Of(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !Top5 {
+    var s = try logits_buf.toSliceAlloc(allocator, io);
+    defer s.free(allocator);
+    const v = s.items(f32);
+    var top: Top5 = .{ .idx = [_]usize{0} ** 5, .val = [_]f32{-std.math.floatMax(f32)} ** 5 };
+    for (v, 0..) |x, idx| {
+        if (x > top.val[4]) {
+            var pos: usize = 4;
+            while (pos > 0 and x > top.val[pos - 1]) : (pos -= 1) {
+                top.val[pos] = top.val[pos - 1];
+                top.idx[pos] = top.idx[pos - 1];
+            }
+            top.val[pos] = x;
+            top.idx[pos] = idx;
+        }
+    }
+    return top;
+}
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -663,6 +710,21 @@ pub fn main(init: std.process.Init) !void {
     defer tokenizer.deinit();
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
+
+    // EOT_ID — MESURÉ depuis le tokenizer (spec §3.4), JAMAIS hardcodé : encode "<turn|>" (le token
+    // de fin de tour, cf renderChatTemplate) et exige EXACTEMENT 1 id. Un compte ≠ 1 signalerait un
+    // tokenizer/template différent de celui mesuré (10 juil, id=106) — BLOCKED plutôt qu'un repli
+    // silencieux sur une valeur hardcodée.
+    var eot_tok = try encoder.encodeAlloc(allocator, "<turn|>");
+    defer eot_tok.deinit(allocator);
+    if (eot_tok.items.len != 1) {
+        log.err("EOT: '<turn|>' encode en {d} tokens (attendu 1) — ids={any}", .{ eot_tok.items.len, eot_tok.items });
+        return error.EotNotSingleToken;
+    }
+    const eot_id: u32 = eot_tok.items[0];
+    log.info("EOT_ID = {d} (mesuré depuis le tokenizer)", .{eot_id});
+    // reset() avant réutilisation : l'encoder iree est un automate à état (cf round-trip --ids-only).
+    encoder.reset();
 
     const rendered = try renderChatTemplate(arena.allocator(), prompt_text);
     var prompt_tok = try encoder.encodeAlloc(allocator, rendered);
@@ -702,10 +764,236 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Task 5+ : boucle autonome prefill-par-decode (forwardStep, device buffers per-step),
-    // --oracle, --max-tokens. Pas encore câblés (Task 3 = inputs host, Task 4 = gather streaming +
-    // --selftest-gather, gate A0 déjà livrée) — le parsing ci-dessus est prêt à être branché,
-    // args.ckpt inclus (pas encore chargé sur device).
-    log.err("génération non implémentée (Task 5+) — utiliser --ids-only (A0), --selftest-inputs (Task 3) ou --selftest-gather (Task 4)", .{});
-    return error.NotImplemented;
+    // === --oracle : lit la fixture AVANT tout (positions[0] = seq_len attendu == ids.len ; fed =
+    // la séquence de référence [s0,t1,…] à comparer à `generated`, cf note d'alignement en tête de
+    // fichier). positions[0] == ids.len parce que le 1er step de génération de l'oracle FEED s0 à la
+    // position ABSOLUE ids.len (s0 a été PRODUIT à la position ids.len-1, dernier token du prompt).
+    var oracle_ids: ?[]i32 = null;
+    defer if (oracle_ids) |fx| allocator.free(fx);
+    if (args.oracle_path) |fixture_path| {
+        var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+        defer reg.deinit();
+        var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+        defer file.close(io);
+        const positions_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "positions");
+        defer allocator.free(positions_fx);
+        if (positions_fx.len == 0) {
+            log.err("--oracle : fixture 'positions' vide", .{});
+            return error.EmptyFixture;
+        }
+        if (positions_fx[0] != @as(i32, @intCast(ids.items.len))) {
+            log.err("--oracle : positions[0]={d} (seq_len fixture) != ids.len={d} (prompt rendu) — mismatch prompt/fixture", .{ positions_fx[0], ids.items.len });
+            return error.OraclePromptMismatch;
+        }
+        const fed_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "fed");
+        if (fed_fx.len == 0) {
+            allocator.free(fed_fx);
+            log.err("--oracle : fixture 'fed' vide — un PASS à 0 step serait vacueux", .{});
+            return error.EmptyFixture;
+        }
+        oracle_ids = fed_fx;
+        log.info("--oracle : {d} steps de génération attendus (fed.len), prompt vérifié (ids.len={d} == positions[0])", .{ fed_fx.len, ids.items.len });
+    }
+
+    const max_tokens: usize = args.max_tokens orelse 200;
+    const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
+    if (oracle_ids != null and args.max_tokens != null) {
+        log.warn("--oracle actif : --max-tokens={d} ignoré (limite = fed.len = {d})", .{ args.max_tokens.?, limit });
+    }
+
+    // Garde-fous de lancement (mêmes asserts que l'oracle 49, cf scripts/49_gen_custom_oracle.py).
+    if (ids.items.len + limit > @as(usize, @intCast(L_MAX))) {
+        log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.items.len, limit, L_MAX });
+        return error.SequenceTooLong;
+    }
+    if (ids.items.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+        log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.items.len, SLIDING_WINDOW });
+        return error.PromptTooLong;
+    }
+
+    // === Step 5.1 : backend CUDA (+ repli auto) — copié gemma4_gen_long_gpu.zig:80-92 (sans
+    // --no-prealloc : "no no-prealloc needed", mémoire large marge cf PLAN) ===
+    const platform: *zml.Platform = blk: {
+        const cuda_opts: zml.platform.CreateOptions = .{ .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } } };
+        if (zml.Platform.init(allocator, io, .cuda, cuda_opts)) |p| break :blk p else |_| {}
+        log.warn("CUDA indisponible (libpjrt_cuda absent ?) — repli sur Platform.auto (probablement CPU).", .{});
+        break :blk try zml.Platform.auto(allocator, io, .{});
+    };
+    defer platform.deinit(allocator);
+    log.info("A1 — backend = {s} (cible : cuda)", .{@tagName(platform.target)});
+    const sharding = try zml.sharding.replicatedSharding(platform);
+
+    var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.ckpt);
+    var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
+    const base = store_ck.view().withPrefix("model").withPrefix("language_model");
+    const model: Model = try .init(arena.allocator(), base);
+
+    // Symboliques construits À LA MAIN (pas de fixture de store, cf tête de section) — mêmes shapes
+    // que engine.Packed(true)/engine.Cache.
+    const embeds_sym = zml.Tensor.init(.{ 1, 1, D }, .bf16).withTags(.{ .b, .s, .d });
+    const embptls_sym = zml.Tensor.init(.{ 1, 1, LF }, .bf16).withTags(.{ .b, .s, .lf });
+    const packed_sym = PackedLong{
+        .embeds = zml.Tensor.init(.{ L_MAX, 1, 1, D }, .bf16).withTags(.{ .step, .b, .s, .d }),
+        .embptls = zml.Tensor.init(.{ L_MAX, 1, 1, LF }, .bf16).withTags(.{ .step, .b, .s, .lf }),
+        .cos_full = zml.Tensor.init(.{ L_MAX, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .sin_full = zml.Tensor.init(.{ L_MAX, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .masks_sliding = zml.Tensor.init(.{ L_MAX, 1, 1, 1, L_MAX }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
+        .masks_full = zml.Tensor.init(.{ L_MAX, 1, 1, 1, L_MAX }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
+        .positions = zml.Tensor.init(.{L_MAX}, .i32).withTags(.{.step}),
+    };
+    const cache_sym = engine.Cache{
+        .sl_k = zml.Tensor.init(.{ NUM_SLIDING_SLOTS, 1, 1, L_MAX, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .sl_v = zml.Tensor.init(.{ NUM_SLIDING_SLOTS, 1, 1, L_MAX, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_k = zml.Tensor.init(.{ NUM_FULL_SLOTS, 1, 1, L_MAX, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_v = zml.Tensor.init(.{ NUM_FULL_SLOTS, 1, 1, L_MAX, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+    };
+    const ctrl_sym: engine.Ctrl = .initSymbolic();
+
+    log.info("Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...", .{});
+    const eng_buf = try model.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
+
+    var host = try HostInputs.init(allocator);
+    defer host.deinit(allocator);
+    // Bufferized(PackedLong) assemblé À LA MAIN (motif E2, gemma4_engine_e2.zig:104-111) : chaque
+    // champ = zml.Buffer.fromBytes depuis les slices host de Task 3 (mêmes shapes que packed_sym).
+    const pk_buf = zml.Bufferized(PackedLong){
+        .embeds = try zml.Buffer.fromBytes(io, platform, packed_sym.embeds.shape(), sharding, host.embeds_zero),
+        .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, host.embptls_zero),
+        .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(host.cos_full)),
+        .sin_full = try zml.Buffer.fromBytes(io, platform, packed_sym.sin_full.shape(), sharding, std.mem.sliceAsBytes(host.sin_full)),
+        .masks_sliding = try zml.Buffer.fromBytes(io, platform, packed_sym.masks_sliding.shape(), sharding, std.mem.sliceAsBytes(host.masks_sliding)),
+        .masks_full = try zml.Buffer.fromBytes(io, platform, packed_sym.masks_full.shape(), sharding, std.mem.sliceAsBytes(host.masks_full)),
+        .positions = try zml.Buffer.fromBytes(io, platform, packed_sym.positions.shape(), sharding, std.mem.sliceAsBytes(host.positions)),
+    };
+    var cache_buf = zml.Bufferized(engine.Cache){
+        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, host.cache_sl_k),
+        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, host.cache_sl_v),
+        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, host.cache_fl_k),
+        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, host.cache_fl_v),
+    };
+    store_ck.deinit();
+    reg_ck.deinit();
+    mem_probe.logMem(io, "post-load (poids + Packed/Cache sur device)");
+
+    // === Step 5.1 (suite) : compile forwardStep (risque nommé — cf tête de section) ===
+    log.info("Compiling forwardStep (mono-graphe 35 couches, 1er compile GPU du mono autonome) ...", .{});
+    const t_compile: std.Io.Timestamp = .now(io, .awake);
+    var exe = try platform.compileFn(allocator, io, Model.forwardStep, .{ model, embeds_sym, embptls_sym, packed_sym, cache_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
+    defer exe.deinit();
+    log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
+    mem_probe.logMem(io, "post-compile (go/no-go)");
+
+    // === Step 5.2 : boucle prefill-par-decode + argmax + arrêt ===
+    var gather_tbl = try EmbedGather.init(allocator, io, args.ckpt);
+    defer gather_tbl.deinit(io, allocator);
+
+    var generated: std.ArrayList(i64) = .empty;
+    defer generated.deinit(allocator);
+    var gen_top5: std.ArrayList(Top5) = .empty; // parallèle à `generated` (diagnostic FAIL, Step 5.3)
+    defer gen_top5.deinit(allocator);
+
+    log.info("Boucle autonome : {d} steps de prefill, puis génération (limite {d}{s})", .{ ids.items.len, limit, if (oracle_ids != null) " = fed.len, oracle" else " = max_tokens" });
+
+    var fed: i64 = @intCast(ids.items[0]);
+    var step: usize = 0;
+    const t0: std.Io.Timestamp = .now(io, .awake);
+    while (true) : (step += 1) {
+        // gather(fed) : 1 ligne bf16 par table (Task 4) → 2 Buffer.fromBytes device par step.
+        try gather_tbl.gather(io, fed);
+        var embeds_step_buf = try zml.Buffer.fromBytes(io, platform, embeds_sym.shape(), sharding, std.mem.sliceAsBytes(gather_tbl.emb_scratch));
+        var embptls_step_buf = try zml.Buffer.fromBytes(io, platform, embptls_sym.shape(), sharding, std.mem.sliceAsBytes(gather_tbl.eptl_scratch));
+        var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
+        const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
+
+        var call_args = try exe.args(allocator);
+        var call_results = try exe.results(allocator);
+        call_args.set(.{ eng_buf, embeds_step_buf, embptls_step_buf, pk_buf, cache_buf, ctrl_buf });
+        exe.call(call_args, &call_results);
+        var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
+            zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
+        });
+
+        // argmax + top5 : TOUJOURS calculé (cheap, cf PLAN), ignoré tant qu'on est en prefill (sauf
+        // le dernier prefill step, qui produit s0 — cf `in_gen_phase` ci-dessous).
+        const in_gen_phase = step + 1 >= ids.items.len;
+        const top5 = try top5Of(allocator, io, &r_logits);
+        const tok: i64 = @intCast(top5.idx[0]);
+        if (in_gen_phase) try gen_top5.append(allocator, top5);
+
+        // cache swap (motif gemma4_gen_long_gpu.zig:139-168) : deinit l'ancien, adopte le nouveau.
+        var old_cache = cache_buf;
+        cache_buf = zml.Bufferized(engine.Cache){ .sl_k = r_slk, .sl_v = r_slv, .fl_k = r_flk, .fl_v = r_flv };
+        old_cache.sl_k.deinit();
+        old_cache.sl_v.deinit();
+        old_cache.fl_k.deinit();
+        old_cache.fl_v.deinit();
+
+        r_logits.deinit();
+        embeds_step_buf.deinit();
+        embptls_step_buf.deinit();
+        step_buf.deinit();
+        call_args.deinit(allocator);
+        call_results.deinit(allocator);
+
+        if (step + 1 < ids.items.len) {
+            // Phase 1 (prefill) : argmax ci-dessus IGNORÉ (pas le dernier token du prompt).
+            fed = @intCast(ids.items[step + 1]);
+            continue;
+        }
+        // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
+        try generated.append(allocator, tok);
+        if (oracle_ids) |fx| {
+            if (generated.items.len >= fx.len) break;
+        } else if (tok == @as(i64, @intCast(eot_id)) or generated.items.len >= max_tokens) {
+            break;
+        }
+        if (step + 1 >= @as(usize, @intCast(L_MAX))) {
+            log.warn("garde L_MAX atteinte (step={d}) — arrêt forcé", .{step});
+            break;
+        }
+        fed = tok;
+    }
+    const elapsed = t0.untilNow(io, .awake);
+    cache_buf.sl_k.deinit();
+    cache_buf.sl_v.deinit();
+    cache_buf.fl_k.deinit();
+    cache_buf.fl_v.deinit();
+
+    const total_steps = step + 1;
+    const elapsed_ns = elapsed.toNanoseconds();
+    const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    const tok_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(total_steps)) / elapsed_s else 0;
+    log.info("A1 PERF : {d} steps ({d} prefill + {d} génération) en {d:.3}s -> {d:.1} tok/s", .{ total_steps, ids.items.len, generated.items.len, elapsed_s, tok_per_s });
+
+    // === Step 5.3 : gate A1 ===
+    if (oracle_ids) |fx| {
+        var n_match: usize = 0;
+        var first_fail: ?usize = null;
+        const n = @min(generated.items.len, fx.len);
+        for (0..n) |k| {
+            if (generated.items[k] == @as(i64, @intCast(fx[k]))) {
+                n_match += 1;
+            } else if (first_fail == null) {
+                first_fail = k;
+            }
+        }
+        const len_ok = generated.items.len == fx.len;
+        if (first_fail == null and len_ok) {
+            log.info("A1 PASS — {d}/{d} argmax-match (autonome complet, zéro input fixture)", .{ n_match, fx.len });
+        } else {
+            const ff = first_fail orelse n;
+            log.err("A1 FAIL — {d}/{d} match, 1er mismatch au step gen={d}{s}", .{ n_match, fx.len, ff, if (!len_ok) " (ou longueurs différentes)" else "" });
+            if (ff < fx.len) {
+                const got: i64 = if (ff < generated.items.len) generated.items[ff] else -1;
+                log.err("  step gen={d} : généré={d} attendu(fed)={d}", .{ ff, got, fx[ff] });
+            }
+            if (ff < gen_top5.items.len) {
+                const t5 = gen_top5.items[ff];
+                log.err("  diagnostic LOGITS (méthodo : argmax trop grossier pour diagnostiquer) — top-5 @ step gen={d} : idx={any} val={any}", .{ ff, t5.idx, t5.val });
+            }
+            return error.A1Mismatch;
+        }
+    } else {
+        log.info("A1 (mode libre, pas d'oracle) : {d} tokens générés (EOT_ID={d}, max_tokens={d})", .{ generated.items.len, eot_id, max_tokens });
+    }
 }
