@@ -6,11 +6,15 @@
 //       [--oracle fixture] [--ids-only] [--selftest-inputs f] [--selftest-gather f]
 // Task 2 (gate A0) : parsing CLI, chargement tokenizer ZML natif, rendu du chat template,
 // encodage, préfixage BOS explicite, mode `--ids-only` (log des ids finaux + round-trip détok).
-// Task 3 (cette tranche) : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`,
-// formule "proportional" copiée de la source HF), masques additifs (`maskRows`), positions,
-// et les tables host complètes {L_MAX,…} (cos_full/sin_full/masks_sliding/masks_full/positions
-// + embeds/embptls/cache zéros, cf `HostInputs`) — validées vs la fixture 49. Les buffers
-// device (Task 5) et `--selftest-gather` (Task 4) restent stubbés.
+// Task 3 : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`, formule
+// "proportional" copiée de la source HF), masques additifs (`maskRows`), positions, et les
+// tables host complètes {L_MAX,…} (cos_full/sin_full/masks_sliding/masks_full/positions +
+// embeds/embptls/cache zéros, cf `HostInputs`) — validées vs la fixture 49.
+// Task 4 (cette tranche) : gather embeds BRUTS en streaming (`EmbedGather`, pattern
+// gchunk_auto.zig:137-230 adapté — offsets absolus sur le checkpoint, une ligne bf16 par token,
+// scratch réutilisé, AUCUN scaling host) + mode `--selftest-gather <fixture>` (bit-exact vs
+// embeds/embptls de la fixture A1). Les buffers device par step et la boucle autonome
+// (forwardStep) restent Task 5.
 const std = @import("std");
 const log = std.log;
 const zml = @import("zml");
@@ -438,6 +442,162 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
     }
 }
 
+// ============================================================================================
+// Task 4 — gather embeds bruts en streaming (offsets positionnels sur le CHECKPOINT).
+// ============================================================================================
+//
+// Adapté de gemma4_gchunk_auto.zig:137-230 : au lieu de matérialiser embed_tokens (~1,6 Go) et
+// embed_tokens_per_layer (~4,7 Go) en RAM, on lit UNE ligne bf16 par token DIRECTEMENT dans le
+// fichier `model.safetensors`, à l'offset absolu `tensor.offset + tok*row_bytes` (layout
+// row-major : {voc,d} et {voc,lf}). RAW — AUCUN scaling host : les facteurs ×√1536 (embed_tokens,
+// cf `engine.zig` EMBED_SCALE/`.scale(EMBED_SCALE)`) et ×16 (embed_tokens_per_layer, PLE) sont
+// appliqués IN-GRAPH par `forwardStep` (engine.zig:644-645) — les appliquer ici causerait un
+// double-scaling silencieux (spec DESIGN §3.3).
+const EMB_KEY = "model.language_model.embed_tokens.weight";
+const EPTL_KEY = "model.language_model.embed_tokens_per_layer.weight";
+
+// Table d'embeddings en streaming : ouvre le checkpoint une fois, résout les offsets/dtypes des
+// deux tables via le registry (header seul — pas de chargement de poids), puis `gather(tok)`
+// relit une ligne de chacune dans des scratch buffers réutilisés (pas d'alloc en boucle).
+//
+// Conçu pour Task 5 : `emb_scratch`/`eptl_scratch` ([]u16) sont déjà EXACTEMENT les bits bruts
+// d'une ligne {d}/{lf} bf16 (B=S=1) — Task 5 n'aura qu'à les envelopper avec
+// `zml.Buffer.fromBytes(io, platform, shape{1,1,D|LF}.bf16, sharding, std.mem.sliceAsBytes(scratch))`
+// par step, comme gchunk_auto.zig:226-227 le fait déjà pour son propre scratch (là en []u8).
+const EmbedGather = struct {
+    file: std.Io.File,
+    emb_base_off: u64, // offset absolu (octets) du début de la table embed_tokens
+    eptl_base_off: u64, // idem embed_tokens_per_layer
+    emb_row_bytes: usize, // = D * sizeOf(bf16)
+    eptl_row_bytes: usize, // = LF * sizeOf(bf16)
+    // Scratch typés []u16 (bits bruts bf16), PAS []u8 : std.mem.eql exige la même alignement
+    // des deux côtés, et un []u8 alloué par le GPA n'est pas garanti aligné à 2 — l'allouer déjà
+    // en []u16 lève le problème à la racine (élément naturellement aligné) tout en restant
+    // directement comparable en bits aux lectures fixture (elles aussi []u16, cf readFixtureAlloc
+    // (u16, .bf16, ...)). readPositionalAll reçoit `std.mem.sliceAsBytes(...)` (u16→u8 : toujours
+    // valide, alignement plus faible).
+    emb_scratch: []u16, // {D} bf16 brut — réutilisé à chaque step
+    eptl_scratch: []u16, // {LF} bf16 brut — idem
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u8) !EmbedGather {
+        var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt_path);
+        defer reg.deinit();
+        const emb_t = reg.tensors.get(EMB_KEY) orelse {
+            log.err("tensor introuvable dans le checkpoint: {s}", .{EMB_KEY});
+            return error.MissingTensor;
+        };
+        const eptl_t = reg.tensors.get(EPTL_KEY) orelse {
+            log.err("tensor introuvable dans le checkpoint: {s}", .{EPTL_KEY});
+            return error.MissingTensor;
+        };
+        const emb_dtype = emb_t.shape.dtype();
+        const eptl_dtype = eptl_t.shape.dtype();
+        if (emb_dtype != .bf16 or eptl_dtype != .bf16) {
+            log.err("dtype embeddings inattendu (emb={s} eptl={s}, attendu bf16 les deux)", .{ @tagName(emb_dtype), @tagName(eptl_dtype) });
+            return error.DtypeMismatch;
+        }
+        const emb_row_bytes: usize = @intCast(D * @as(i64, @intCast(emb_dtype.sizeOf())));
+        const eptl_row_bytes: usize = @intCast(LF * @as(i64, @intCast(eptl_dtype.sizeOf())));
+
+        var file = try std.Io.Dir.cwd().openFile(io, ckpt_path, .{ .mode = .read_only });
+        errdefer file.close(io);
+        const emb_scratch = try allocator.alloc(u16, emb_row_bytes / 2);
+        errdefer allocator.free(emb_scratch);
+        const eptl_scratch = try allocator.alloc(u16, eptl_row_bytes / 2);
+        errdefer allocator.free(eptl_scratch);
+
+        return .{
+            .file = file,
+            .emb_base_off = emb_t.offset,
+            .eptl_base_off = eptl_t.offset,
+            .emb_row_bytes = emb_row_bytes,
+            .eptl_row_bytes = eptl_row_bytes,
+            .emb_scratch = emb_scratch,
+            .eptl_scratch = eptl_scratch,
+        };
+    }
+
+    fn deinit(self: *EmbedGather, io: std.Io, allocator: std.mem.Allocator) void {
+        allocator.free(self.emb_scratch);
+        allocator.free(self.eptl_scratch);
+        self.file.close(io);
+    }
+
+    // Lit la ligne du token `tok` dans les deux tables (read positionnel, offset absolu = base +
+    // tok*row_bytes — cf gchunk_auto.zig:220-223) — RAW, aucun scaling. Résultat dans
+    // self.emb_scratch/self.eptl_scratch (réutilisés, PAS de nouvelle alloc).
+    fn gather(self: *EmbedGather, io: std.Io, tok: i64) !void {
+        const emb_off: u64 = self.emb_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.emb_row_bytes));
+        const eptl_off: u64 = self.eptl_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.eptl_row_bytes));
+        const got_emb = try self.file.readPositionalAll(io, std.mem.sliceAsBytes(self.emb_scratch), emb_off);
+        if (got_emb != self.emb_row_bytes) {
+            log.err("gather embeds: lecture courte tok={d} — {d}/{d} octets (checkpoint tronqué ?)", .{ tok, got_emb, self.emb_row_bytes });
+            return error.ShortRead;
+        }
+        const got_eptl = try self.file.readPositionalAll(io, std.mem.sliceAsBytes(self.eptl_scratch), eptl_off);
+        if (got_eptl != self.eptl_row_bytes) {
+            log.err("gather embptls: lecture courte tok={d} — {d}/{d} octets (checkpoint tronqué ?)", .{ tok, got_eptl, self.eptl_row_bytes });
+            return error.ShortRead;
+        }
+    }
+};
+
+// --selftest-gather <fixture> : pour chaque step k de la fixture A1 (fed[k] = token FED à ce
+// step, cf 49_gen_custom_oracle.py:159/174-177), gather(fed[k]) sur le CHECKPOINT doit être
+// BIT-EXACT à embeds[k]/embptls[k] de la fixture — les deux sont la même ligne bf16 brute
+// (`emb_w[tid].to(bfloat16)` / `eptl_w[tid].view(...).to(bfloat16)`, NON re-scalée,
+// 49_gen_custom_oracle.py:176-178). Comparaison en u16 bruts (bf16 = 2 octets, pas de
+// tolérance) : c'est le SEUL garde-fou contre un scaling host accidentel tant que le gate A1
+// (bout-en-bout, Task 5) n'est pas passé — ne JAMAIS l'affaiblir en tolérance (piège relevé en
+// revue).
+fn selftestGather(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    var gather_tbl = try EmbedGather.init(allocator, io, ckpt_path);
+    defer gather_tbl.deinit(io, allocator);
+
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    // `fed` est i32 dans la fixture (cf 49_gen_custom_oracle.py:203 : torch.int32) ; le gather
+    // canonicalise en i64 (comme le sibling gchunk_auto) — cast explicite à la frontière.
+    const fed = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "fed");
+    defer allocator.free(fed);
+    const embeds_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg, &file, "embeds");
+    defer allocator.free(embeds_fx);
+    const embptls_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg, &file, "embptls");
+    defer allocator.free(embptls_fx);
+
+    const n_decode = fed.len;
+    const d: usize = @intCast(D);
+    const lf: usize = @intCast(LF);
+    if (embeds_fx.len != n_decode * d) {
+        log.err("SELFTEST GATHER : shape embeds inattendue (embeds.len={d} n_decode*D={d})", .{ embeds_fx.len, n_decode * d });
+        return error.UnexpectedShape;
+    }
+    if (embptls_fx.len != n_decode * lf) {
+        log.err("SELFTEST GATHER : shape embptls inattendue (embptls.len={d} n_decode*LF={d})", .{ embptls_fx.len, n_decode * lf });
+        return error.UnexpectedShape;
+    }
+
+    for (0..n_decode) |k| {
+        const tok: i64 = @intCast(fed[k]);
+        try gather_tbl.gather(io, tok);
+        const emb_fx_row = embeds_fx[k * d .. (k + 1) * d];
+        const eptl_fx_row = embptls_fx[k * lf .. (k + 1) * lf];
+        if (!std.mem.eql(u16, gather_tbl.emb_scratch, emb_fx_row)) {
+            log.err("SELFTEST GATHER FAIL — embeds diverge au step {d} (tok={d}) : gathered[0..4]={any} fixture[0..4]={any}", .{ k, tok, gather_tbl.emb_scratch[0..4], emb_fx_row[0..4] });
+            return error.SelftestGatherFailed;
+        }
+        if (!std.mem.eql(u16, gather_tbl.eptl_scratch, eptl_fx_row)) {
+            log.err("SELFTEST GATHER FAIL — embptls diverge au step {d} (tok={d}) : gathered[0..4]={any} fixture[0..4]={any}", .{ k, tok, gather_tbl.eptl_scratch[0..4], eptl_fx_row[0..4] });
+            return error.SelftestGatherFailed;
+        }
+    }
+
+    log.info("SELFTEST GATHER PASS ({d} steps, bit-exact)", .{n_decode});
+}
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -450,6 +610,13 @@ pub fn main(init: std.process.Init) !void {
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
+        return;
+    }
+
+    // === Task 4 : --selftest-gather — host-only (registry + reads positionnels), pas de
+    // Platform/device requis (device buffers = Task 5). args.ckpt = checkpoint, positionnel 1. ===
+    if (args.selftest_gather) |fixture_path| {
+        try selftestGather(allocator, io, args.ckpt, fixture_path);
         return;
     }
 
@@ -502,9 +669,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Task 4+ : gather embeds bruts en streaming, boucle prefill-par-decode, --oracle, --max-tokens,
-    // --selftest-gather. Pas encore câblés (Task 3 = inputs host + --selftest-inputs, gate A0 déjà
-    // livrée) — le parsing ci-dessus est prêt à être branché, args.ckpt inclus (pas encore chargé).
-    log.err("génération non implémentée (Task 4+) — utiliser --ids-only (A0) ou --selftest-inputs (Task 3)", .{});
+    // Task 5+ : boucle autonome prefill-par-decode (forwardStep, device buffers per-step),
+    // --oracle, --max-tokens. Pas encore câblés (Task 3 = inputs host, Task 4 = gather streaming +
+    // --selftest-gather, gate A0 déjà livrée) — le parsing ci-dessus est prêt à être branché,
+    // args.ckpt inclus (pas encore chargé sur device).
+    log.err("génération non implémentée (Task 5+) — utiliser --ids-only (A0), --selftest-inputs (Task 3) ou --selftest-gather (Task 4)", .{});
     return error.NotImplemented;
 }
