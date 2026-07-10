@@ -38,8 +38,12 @@
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
 - [M] **Runtime 100 % autonome** — tokenizer intégré + early-stop EOS (aujourd'hui le banc est
   validé CONTRE l'oracle HF ; limite assumée).
-- [M] **Transfert G2.3 → TurboQuant / alambic** — exploiter la carto (kv_store bf16 quasi-gratuit ;
-  softcap = op la plus sensible ; config 12-familles comme régime de prod candidat).
+- [x] **Transfert G2.3 → TurboQuant / alambic** — **FAIT le 10 juil 2026** : notes livrées aux
+  deux repos consommateurs (`turboquant/transfert_g23_zml.md` : baseline kv_store bf16, anti-cible
+  softcap, banc rejouable ~40 s/run + pointeur CLAUDE.md ;
+  `alambic/docs/decisions/2026-07-10-transfert-g23-precision-seuils.md` : régime bf16 student,
+  budget bruit teacher ~1e-4 KL p50 dans les seuils, méthode de l'enveloppe — décision Régis
+  requise avant le tag `prereg-v1`, consignée au PLANNING alambic). Cross-tasks soldées.
 
 ### Garde-fous courants
 
