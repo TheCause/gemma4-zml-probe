@@ -163,11 +163,20 @@ structurellement — adapter les noms.
   step de prefill), puis remplacer le log A1 PERF par :
 
 ```zig
-    const pf_s = <durée t0→t_prefill_end en s>;
+    // Nuance de mesure assumée : s0 est produit par le DERNIER call de prefill mais compté dans
+    // `generated` — le 1er token de gén coûte ~0 s dans la fenêtre gen_s. Négligeable dès ~48
+    // steps ; ne pas s'en étonner en comparant B0↔G3.
+    const pf_ns = t_prefill_end.since(t0).toNanoseconds(); // ou l'API Timestamp équivalente du fichier
+    const pf_s = @as(f64, @floatFromInt(pf_ns)) / std.time.ns_per_s;
+    const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.items.len)) / pf_s else 0;
     const gen_s = elapsed_s - pf_s;
     const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
-    log.info("L3 PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.items.len, pf_s, ..., generated.items.len, gen_s, gen_rate });
+    log.info("L3 PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.items.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
 ```
+
+(L'API exacte de différence de `std.Io.Timestamp` est celle déjà utilisée dans le fichier —
+`t0.untilNow(io, .awake)` pour le total ; capturer `t_prefill_end` par le même mécanisme et
+faire la soustraction en ns.)
 
 - [ ] **Step 2.8 :** `MIN_FREE_VRAM_GIB` : `10` → `16` + commentaire « provisoire L3, seuil
   final = ceil(mesuré/0.90)+1 en G3, spec L3 §3 ». Mettre à jour le commentaire d'en-tête CLI
@@ -205,12 +214,24 @@ const SgFwd = struct {
 };
 ```
 
-Corps : ouvrir le checkpoint (TensorStore), créer les 2 tenseurs (`EMB_KEY` split : la view
-withPrefix + `embed_tokens.weight` / `embed_tokens_per_layer.weight`), les matérialiser
-(`zml.io.load` sur un struct anonyme ou 2 champs), compiler `SgFwd.forward`, puis pour chaque
-step de la fixture : feeder `fed[step]`, D2H, comparer les BITS (u16) aux lignes
-`embeds`/`embptls` de la fixture via `readFixtureAlloc(u16, .bf16, ...)` (fonction existante).
+Corps : ouvrir le checkpoint (TensorStore), créer les 2 tenseurs (la view withPrefix +
+`embed_tokens.weight` / `embed_tokens_per_layer.weight`), les matérialiser (`zml.io.load` sur
+un struct à 2 champs), compiler `SgFwd.forward`, puis pour chaque step de la fixture : feeder
+`fed[step]`, D2H, comparer les BITS (u16) aux lignes `embeds`/`embptls` de la fixture via
+`readFixtureAlloc(u16, .bf16, ...)` (fonction existante).
 Log final : `SG PASS — {N} steps × 2 tables bit-exact (gather in-graph)`.
+
+**Câblage dans `main` (exigé par la spec — SG devient un mode GPU, la garde s'applique) :**
+1. **Déplacer le dispatch** `if (args.selftest_gather) |f| { … return; }` (actuellement
+   AVANT la garde VRAM, ~l.777-780) **APRÈS** la garde VRAM ET après `Platform.init` +
+   garde CUDA dure + `sharding` (~l.925). Nouvelle signature :
+   `selftestGather(allocator, io, platform, sharding, args.ckpt, fixture_path)`.
+   NB : le dispatch reste AVANT le chargement du modèle complet (SG ne charge que les 2 tables).
+2. **Corriger le commentaire de la garde VRAM** (l.846-850) : retirer `--selftest-gather` de la
+   liste des modes host-only (il n'en fait plus partie) — ne restent que `--selftest-inputs`
+   et `--ids-only`.
+3. Les sémantiques `--allow-cpu`/`--force-vram` s'appliquent à SG comme au run normal (aucun
+   cas spécial : c'est la conséquence mécanique du déplacement du dispatch).
 
 - [ ] **Step 4.2 :** deploy + build (mêmes commandes que Task 3).
 - [ ] **Step 4.3 :** run `--selftest-gather <fixture A1>` sur la 3090 → `SG PASS` attendu,
@@ -226,7 +247,8 @@ Log final : `SG PASS — {N} steps × 2 tables bit-exact (gather in-graph)`.
 - [ ] **Step 5.2 : G1v** — corrompre une copie de la fixture (changer 1 valeur de `fed`,
   script python une ligne sur la 3090, fixture copiée dans /tmp du remote) → run --oracle
   dessus : attendu **A1 FAIL** au step corrompu. Un PASS ici = compare vacueux = STOP.
-- [ ] **Step 5.3 :** archiver les sorties → `logs/l3_g1.log` (local, gitignored — référence doc).
+- [ ] **Step 5.3 :** archiver les sorties → `logs/l3_g1.log` (local ; `git check-ignore logs/`
+  doit confirmer le gitignore — convention vérifiée le 11 juil, gates VRAM).
 
 ## Task 6 : gate G2 — early-stop réel
 
@@ -258,6 +280,8 @@ Log final : `SG PASS — {N} steps × 2 tables bit-exact (gather in-graph)`.
 - [ ] **Step 8.4 : comparaison B0 → G3** : tableau (oracle 48 : X → Y tok/s ; libre FR :
   X → Y tok/s génération). Critère : **L3 ≥ B0**. Attente non bloquante ≥ 109 tok/s. Si le
   tri topK pèse visiblement (gén < B0) : appliquer le repli argMax (tête de plan) et re-mesurer.
+  Si l'écart vient du swap de cache et non du tri (spec §6 [it.2]) : spike donation OPTIONNEL,
+  décision contrôleur — ne pas l'entreprendre sans mesure qui l'incrimine.
 - [ ] **Step 8.5 : commit** (code seuil éventuel) `feat(gen-auto): G3 — seuil VRAM final mesuré ({X} GiB post-compile)`.
 
 ## Task 9 : documentation + solde + PR
