@@ -62,7 +62,7 @@ Pas de flag de réglage (YAGNI) ; la constante est déclarée avec les autres in
 | `nvidia-smi` en échec / sortie illisible | `log.warn` + on continue (outil cassé ≠ GPU occupé) |
 | `nvidia-smi` qui pend | hors scope (pas de timeout de spawn — coûteux sous l'API `Io` 0.16 pour un cas jamais observé ; Ctrl-C utilisateur) |
 | modes host-only (`--selftest-*`, `--ids-only`) | check jamais atteint (placé après leurs early-returns, cf §1) |
-| `--allow-cpu` actif | check sauté (le GPU est hors sujet) |
+| `--allow-cpu` actif | check ACTIF quand même (errata revue 11 juil : --allow-cpu ne force pas le CPU, l'init .cuda est tentée d'abord — sur machine sans GPU le best-effort couvre déjà le cas) |
 | `--force-vram` actif | check sauté avec log explicite |
 | VRAM libre ≥ seuil mais process présents | on continue silencieusement (seul le seuil décide) |
 

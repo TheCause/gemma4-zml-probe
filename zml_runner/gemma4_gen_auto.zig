@@ -844,11 +844,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // === Garde VRAM (docs/VRAM_CHECK_DESIGN.md) — avant tout travail GPU. Les modes host-only
-    // (--selftest-inputs/--selftest-gather/--ids-only) ont déjà early-return au-dessus ; en
-    // --allow-cpu le GPU est hors sujet. ===
+    // (--selftest-inputs/--selftest-gather/--ids-only) ont déjà early-return au-dessus. Tourne
+    // AUSSI en --allow-cpu : ce flag ne force pas le CPU (l'init .cuda est tentée d'abord,
+    // --allow-cpu ne tolère que le repli) — sur machine sans GPU, nvidia-smi absent → warn +
+    // continue, donc pas de blocage à tort. Seul --force-vram saute la garde. ===
     if (args.force_vram) {
         log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
-    } else if (!args.allow_cpu) {
+    } else {
         try checkVram(allocator, io);
     }
 
