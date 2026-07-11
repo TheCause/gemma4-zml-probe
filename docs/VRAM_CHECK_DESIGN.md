@@ -24,7 +24,7 @@ requis, il sort en `error.GpuBusy` avec un message qui :
 
 Nouveau flag `--force-vram` pour outrepasser en connaissance de cause.
 
-Exemple de sortie attendue :
+Exemple de sortie attendue (illustratif — les chiffres réels mesurés sont au §6) :
 
 ```
 $ gemma4_gen_auto --prompt "..."
