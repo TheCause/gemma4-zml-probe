@@ -58,13 +58,13 @@
 
 ### Garde-fous courants
 
-- **Contention VRAM 3090 (vécu 11 juil)** : Hermès (Ollama `gemma4:31b`, ~22/24 Go) partage la
+- **Contention VRAM 3090 (vécu 11 juil)** : un service Ollama local (~22/24 Go) peut occuper la
   carte — **vérifier `nvidia-smi --query-compute-apps` avant tout run GPU**. Symptôme si oublié :
   OOM dès la matérialisation (`CreateBuffersForAsyncHostToDevice … 6.00MiB`) suivi d'un crash
   `General protection exception` dans `io.zig deinit` — ce crash est un bug d'error-path UPSTREAM
   ZML (double-free post-OOM), pas notre code ; l'OOM est la vraie erreur. Libération réversible :
-  `ollama stop gemma4:31b` (keep_alive recharge à la demande côté Hermès).
-- **Piège `deploy_to_3090.sh`** : exige `ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz`
+  `ollama stop <modèle>` (keep_alive recharge à la demande côté service).
+- **Piège `deploy_to_3090.sh`** : exige `ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz`
   en env — les défauts sont des placeholders (`user@gpu-host`) → échec de résolution DNS ; avec la
   sortie redirigée, le deploy rate SILENCIEUSEMENT et on teste l'ancien binaire (vécu en
   non-vacuité, 11 juil).

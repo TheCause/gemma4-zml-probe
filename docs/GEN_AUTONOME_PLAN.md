@@ -18,7 +18,7 @@ oracles Python HF (scripts 46/49) côté validation uniquement.
 
 **Contexte d'exécution (tous les runs GPU) :**
 - Éditer sur M1 (`~/dev/gemma4-zml-probe/zml_runner/`), déployer : `zml_runner/deploy_to_3090.sh`.
-- Builder/runner sur la 3090 : `ssh ia@192.168.1.163` puis
+- Builder/runner sur la 3090 : `ssh user@gpu-host` puis
   `cd /data/rqz_workspace/zml && ./bazel.sh run //examples/rqz:<cible> -- <args>`.
 - Checkpoint : `/data/gemma4-zml-probe/weights/model.safetensors`. Venv oracle :
   `/data/venvs/gemma4-probe` (`source /data/venvs/gemma4-probe/bin/activate`).
@@ -53,7 +53,7 @@ Un seul fichier Zig neuf : le runner est un assemblage de patterns existants
 - [ ] **Step 0.1 : Localiser tokenizer.json sur la 3090**
 
 ```bash
-ssh ia@192.168.1.163 'ls /data/hf_cache/hub/models--google--gemma-4-E2B-it/snapshots/*/tokenizer.json'
+ssh user@gpu-host 'ls /data/hf_cache/hub/models--google--gemma-4-E2B-it/snapshots/*/tokenizer.json'
 ```
 Expected: un chemin existant (noté `$TOKJSON` ci-dessous). S'il est absent :
 `ls /data/hf_cache/hub/models--google--gemma-4-E2B-it/snapshots/*/` et chercher
@@ -63,7 +63,7 @@ Expected: un chemin existant (noté `$TOKJSON` ci-dessous). S'il est absent :
 - [ ] **Step 0.2 : Le module tokenizer ZML parse-t-il le tokenizer Gemma ?**
 
 ```bash
-ssh ia@192.168.1.163 'cd /data/rqz_workspace/zml && ./bazel.sh run //zml/tokenizer -- --tokenizer=$TOKJSON --prompt="What is the capital of France? Answer in one word."'
+ssh user@gpu-host 'cd /data/rqz_workspace/zml && ./bazel.sh run //zml/tokenizer -- --tokenizer=$TOKJSON --prompt="What is the capital of France? Answer in one word."'
 ```
 Expected: log `✅ Loaded tokenizer` + une liste d'ids. **FAIL = STOP** : remonter à Régis
 (le design §3.1 fait de ce parse un prérequis ; alternative à discuter, pas à improviser).
@@ -71,7 +71,7 @@ Expected: log `✅ Loaded tokenizer` + une liste d'ids. **FAIL = STOP** : remont
 - [ ] **Step 0.3 : Comparer à l'encodage HF du même texte brut (sans template)**
 
 ```bash
-ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python3 -c "
+ssh user@gpu-host 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python3 -c "
 from transformers import AutoTokenizer
 t = AutoTokenizer.from_pretrained(\"google/gemma-4-E2B-it\")
 print(t(\"What is the capital of France? Answer in one word.\", add_special_tokens=False).input_ids)
@@ -91,7 +91,7 @@ remonter à Régis.
 - [ ] **Step 1.1 : Dumper le rendu TEXTE du chat template (source de vérité pour le Zig)**
 
 ```bash
-ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python3 -c "
+ssh user@gpu-host 'source /data/venvs/gemma4-probe/bin/activate && HF_HOME=/data/hf_cache python3 -c "
 from transformers import AutoTokenizer
 t = AutoTokenizer.from_pretrained(\"google/gemma-4-E2B-it\")
 s = t.apply_chat_template([{\"role\":\"user\",\"content\":\"PROMPT_ICI\"}], add_generation_prompt=True, tokenize=False)
@@ -104,9 +104,9 @@ le repr() comme vérité**, ne rien supposer). La consigner en commentaire du ru
 - [ ] **Step 1.2 : Fixture A1/A3 (courte, 48 tokens) — vérifier ou régénérer**
 
 ```bash
-ssh ia@192.168.1.163 'ls -la /data/gemma4-zml-probe/gen_custom.safetensors*'
+ssh user@gpu-host 'ls -la /data/gemma4-zml-probe/gen_custom.safetensors*'
 # si absente :
-ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && cd /data/gemma4-zml-probe && HF_HOME=/data/hf_cache python3 scripts/49_gen_custom_oracle.py --prompt "What is the capital of France? Answer in one word." --n-tokens 48 --out /data/gemma4-zml-probe/gen_custom.safetensors'
+ssh user@gpu-host 'source /data/venvs/gemma4-probe/bin/activate && cd /data/gemma4-zml-probe && HF_HOME=/data/hf_cache python3 scripts/49_gen_custom_oracle.py --prompt "What is the capital of France? Answer in one word." --n-tokens 48 --out /data/gemma4-zml-probe/gen_custom.safetensors'
 ```
 Expected: fixture + `gen_custom.safetensors.manifest.json` (contient `prompt_ids`, `seq_len`,
 `expected_head`). Noter `seq_len` (S_REF) et `prompt_ids`. Si la fixture existe mais que le
@@ -115,7 +115,7 @@ manifest montre un AUTRE prompt ou `n_decode` ≠ 48 : régénérer (commande ci
 - [ ] **Step 1.3 : Localiser l'EOS dans expected (critère A3)**
 
 ```bash
-ssh ia@192.168.1.163 'source /data/venvs/gemma4-probe/bin/activate && python3 -c "
+ssh user@gpu-host 'source /data/venvs/gemma4-probe/bin/activate && python3 -c "
 from safetensors import safe_open
 f = safe_open(\"/data/gemma4-zml-probe/gen_custom.safetensors\", \"pt\")
 exp = f.get_tensor(\"expected\").tolist()
@@ -131,7 +131,7 @@ et noter son index EOT. A3 a besoin d'UNE fixture dont `expected` contient l'EOT
 
 ```bash
 # 1er run pour lire seq_len (l'assert du script borne) :
-ssh ia@192.168.1.163 '... python3 scripts/49_gen_custom_oracle.py --prompt "Tell me the story of the number zero, from its invention to modern mathematics." --n-tokens 1000 --out /data/gemma4-zml-probe/gen_auto_long.safetensors'
+ssh user@gpu-host '... python3 scripts/49_gen_custom_oracle.py --prompt "Tell me the story of the number zero, from its invention to modern mathematics." --n-tokens 1000 --out /data/gemma4-zml-probe/gen_auto_long.safetensors'
 # lire "→ N tokens" dans la sortie ; si seq_len=S, relancer avec --n-tokens $((1024-S)) pour le max exact
 ```
 Expected: fixture longue, `n_decode ≥ 1000` (critère A2 = N/N sur CE N). ~10 min GPU
@@ -227,12 +227,12 @@ pub fn main(init: std.process.Init) !void {
 
 ```bash
 ~/dev/gemma4-zml-probe/zml_runner/deploy_to_3090.sh
-ssh ia@192.168.1.163 'cd /data/rqz_workspace/zml && ./bazel.sh run //examples/rqz:gemma4_gen_auto -- /data/gemma4-zml-probe/weights/model.safetensors $TOKJSON --prompt "What is the capital of France? Answer in one word." --ids-only'
+ssh user@gpu-host 'cd /data/rqz_workspace/zml && ./bazel.sh run //examples/rqz:gemma4_gen_auto -- /data/gemma4-zml-probe/weights/model.safetensors $TOKJSON --prompt "What is the capital of France? Answer in one word." --ids-only'
 ```
 Expected: liste d'ids. Comparer à `prompt_ids` du manifest de la fixture A1 (step 1.2) :
 
 ```bash
-ssh ia@192.168.1.163 'python3 -c "import json; print(json.load(open(\"/data/gemma4-zml-probe/gen_custom.safetensors.manifest.json\"))[\"prompt_ids\"])"'
+ssh user@gpu-host 'python3 -c "import json; print(json.load(open(\"/data/gemma4-zml-probe/gen_custom.safetensors.manifest.json\"))[\"prompt_ids\"])"'
 ```
 **Itérer sur BOS/template jusqu'à égalité EXACTE** (c'est attendu : 1-2 ajustements).
 Puis 2e prompt de contrôle (celui de la fixture A2, step 1.4) : égalité aussi.
@@ -259,7 +259,7 @@ git tag gate/gen-auto-a0-pass
 - [ ] **Step 3.1 : Lire la formule EXACTE du rotary full dans la source HF (3090)**
 
 ```bash
-ssh ia@192.168.1.163 'grep -n -B2 -A40 "class Gemma4TextRotaryEmbedding" /data/venvs/gemma4-probe/lib/python3*/site-packages/transformers/models/gemma4/modeling_gemma4.py'
+ssh user@gpu-host 'grep -n -B2 -A40 "class Gemma4TextRotaryEmbedding" /data/venvs/gemma4-probe/lib/python3*/site-packages/transformers/models/gemma4/modeling_gemma4.py'
 ```
 Consigner : `rope_theta` full (attendu 1e6), `partial_rotary_factor` (attendu 0.25),
 `rope_scaling` "proportional" (le facteur exact), la construction d'`inv_freq`, l'ordre
@@ -304,9 +304,9 @@ masques host vs fixture (**égalité bit-exacte**, valeurs ∈ {0, MASK_MIN}), p
 > complète en commentaire de `cosSinTol` dans le runner) et les DEUX fixtures doivent PASS.
 
 ```bash
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_custom.safetensors'
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_custom.safetensors'
 # + fixture longue (positions jusqu'à ~1023 — couvre le régime p ≥ 512 où le masque sliding mord) :
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_auto_long.safetensors'
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
 Expected (les deux runs) : `SELFTEST INPUTS PASS (N steps, cos/sin max_abs=… max_ratio=… de tol(p), masks bit-exact, positions ==)`
 avec `max_ratio ≤ 1` (le critère). Si cos/sin FAIL avec un écart de plusieurs ordres de grandeur
@@ -427,7 +427,7 @@ off-by-one) ; la boucle court sur `fed.len` steps de génération (early-stop et
 `--max-tokens` neutralisés — l'oracle 49 ne s'arrête pas à EOT non plus).
 
 ```bash
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --oracle /data/gemma4-zml-probe/gen_custom.safetensors'
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --oracle /data/gemma4-zml-probe/gen_custom.safetensors'
 ```
 Expected: `A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)` (~1 s de
 boucle). **Si FAIL : diagnostic au niveau LOGITS** (dumper les logits du 1er step divergent,
@@ -448,7 +448,7 @@ git tag gate/gen-auto-a1-pass
 - [ ] **Step 6.1 : Run long**
 
 ```bash
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "<prompt exact du step 1.4>" --oracle /data/gemma4-zml-probe/gen_auto_long.safetensors'
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "<prompt exact du step 1.4>" --oracle /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
 Expected: `A2 PASS — N/N argmax-match` (N = 999 : fixture générée au plafond structurel
 exact, seq_len 25 + 999 = L_MAX — mieux que le « ≥ 1000 » nominal ; ~10 s de génération +
@@ -463,7 +463,7 @@ prefill). Reporter le tok/s (référence : 109 tok/s en replay).
 - [ ] **Step 7.1 : Run autonome SANS oracle (early-stop actif)**
 
 ```bash
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --max-tokens 48'
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "What is the capital of France? Answer in one word." --max-tokens 48'
 ```
 Expected: le runner s'arrête de lui-même à l'EOT et affiche le texte détokenisé (attendu :
 « Paris » et fin de tour). **Critère A3 (alignement du step 5.2 : generated ≡ fed, s0
@@ -482,8 +482,8 @@ inclus ; expected = décalé d'un cran)** : si le premier EOT est à l'index `i`
 ```bash
 # E1 : fixture /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors, tokens attendus
 # [1018,6398,25967,53121] (signature exacte de la commande : docs/ZML_MODULAR_ENGINE_PLAN.md)
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_engine_e1 -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors'  # E1 4/4
-ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_long_gpu -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/gen_custom.safetensors'  # replay 48/48
+ssh user@gpu-host '... //examples/rqz:gemma4_engine_e1 -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/fixtures/p5_7_8_gen.safetensors'  # E1 4/4
+ssh user@gpu-host '... //examples/rqz:gemma4_gen_long_gpu -- /data/gemma4-zml-probe/weights/model.safetensors /data/gemma4-zml-probe/gen_custom.safetensors'  # replay 48/48
 ```
 Expected: PASS aux deux (le moteur n'a pas bougé — attendu trivial, mais exigé).
 

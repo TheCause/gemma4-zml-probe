@@ -89,9 +89,9 @@ cd /data/rqz_workspace/zml && ./bazel.sh run --@zml//platforms:cuda=true \
 
 ⚠ Le flag `--@zml//platforms:cuda=true` est OBLIGATOIRE (sinon repli CPU silencieux —
 désormais refusé en dur par `error.CudaRequired`, échappatoire `--allow-cpu` débogage).
-⚠ **Vérifier la VRAM avant de lancer** : la 3090 est partagée avec Hermès (Ollama
-`gemma4:31b`, ~22 Go). Si occupée : OOM dès la matérialisation (+ crash d'error-path
-upstream ZML, cosmétique). Libérer : `ollama stop gemma4:31b` (réversible — rechargé à la
+⚠ **Vérifier la VRAM avant de lancer** : le GPU peut être occupé par un autre service
+local (ex. Ollama, ~22 Go). Si occupé : OOM dès la matérialisation (+ crash d'error-path
+upstream ZML, cosmétique). Libérer : `ollama stop <modèle>` (réversible — rechargé à la
 demande).
 
 **Validation réelle (11 juil 2026)** : prompt libre en français hors de toute fixture

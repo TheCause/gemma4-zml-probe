@@ -15,7 +15,7 @@
 | A3 early-stop EOS | **PASS** (tag `gate/gen-auto-a3-pass`) | Free-run : stop après exactement **i+2 = 2 tokens** (EOT à l'index 0 d'`expected`), dernier = EOT ; EOT strippé avant détok ; **stdout : `réponse : "Paris"`** — pipeline texte→texte complet |
 | Non-régression | **PASS** (11 juil) | E1 4/4 (`[1018,6398,25967,53121]` == decode4 == HF) ; replay GPU 48/48 — le moteur n'a pas bougé d'un octet |
 | Non-vacuité | **PASS** (11 juil) | Template perturbé (`\n` après `user` retiré) → ids `{2,105,2364,3689,…}` (20 ids, le 107 disparaît) ≠ référence `{2,105,2364,107,…}` (21 ids) — le gate A0 discrimine ; restauration vérifiée (ids == référence, round-trip PASS, tree propre) |
-| Validation réelle (post-merge) | **PASS** (11 juil, Régis) | Prompt libre FR hors fixtures → 110 tokens, early-stop EOT naturel, réponse correcte stdout, 54,5 tok/s (prefill inclus). Incident opérationnel : OOM VRAM (Hermès/Ollama 22/24 Go) → garde-fou contention documenté au PLANNING |
+| Validation réelle (post-merge) | **PASS** (11 juil, Régis) | Prompt libre FR hors fixtures → 110 tokens, early-stop EOT naturel, réponse correcte stdout, 54,5 tok/s (prefill inclus). Incident opérationnel : OOM VRAM (GPU occupé par un service Ollama local, 22/24 Go) → garde-fou contention documenté au PLANNING |
 
 **Piège découvert (coût réel : 1 run tué en thrash)** : sans le flag de build
 `--@zml//platforms:cuda=true`, `bazel run` ET l'exécution directe du binaire retombent en
@@ -141,6 +141,6 @@ batching/flash-attention ; L3 in-graph.
   (prompt custom + chat template), `scripts/48_detokenize.py` (détok + round-trip, rendu
   optionnel par ce chantier).
 - Tokenizer ZML : `zml/tokenizer/main.zig` (workspace 3090), usage `examples/llm/main.zig:123-175`.
-- Contexte 3090 : `ssh ia@192.168.1.163`, workspace `/data/rqz_workspace/zml/examples/rqz/`,
+- Contexte 3090 : `ssh user@gpu-host`, workspace `/data/rqz_workspace/zml/examples/rqz/`,
   checkpoint `/data/gemma4-zml-probe/weights/model.safetensors`, deploy `zml_runner/deploy_to_3090.sh`,
   build `./bazel.sh` (piège : cible au nom court ; patch local `@setEvalBranchQuota` pjrt.zig).
