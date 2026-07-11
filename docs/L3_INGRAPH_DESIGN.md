@@ -104,6 +104,42 @@ design :
 | **G3 — bench après + mesure VRAM** | mêmes mesures que B0 + `mem_probe` post-load/post-compile → seuil final de la garde [it.1] | fidélité PASS + **L3 ≥ boucle actuelle** en tok/s de génération ; attente (non bloquante) ≥ 109 tok/s (replay) |
 | **VG — garde VRAM re-run** | V1/V3 de `VRAM_CHECK_DESIGN.md` avec le seuil final | mêmes critères |
 
+### Résultats (11-12 juil 2026, 3090)
+
+| Gate | État initial / mesure | Verdict | Chiffres |
+|---|---|---|---|
+| **B0 (avant)** | binaire `vram-check` (pré-L3) | référence | oracle 48 → 91,4 tok/s global (69 steps, compile 16,7 s) ; libre FR → 57,1 tok/s global (113 steps). Sur cet ancien binaire, prefill et génération coûtent pareil par step (pas de mesure séparée) |
+| **SG** | 48 steps × 2 tables (gather in-graph vs fixture A1) | **PASS** | bit-exact |
+| **G1** | fixture `gen_custom`, 48 steps | **PASS** | 48/48 == HF ; L3 PERF : prefill 21 steps 71,5 tok/s ; génération 48 tokens **113,1 tok/s** ; compile 17,7 s |
+| **G1v** | fixture corrompue (`fed[10]` 1→2) | **PASS** | A1 FAIL exactement au step gen=10, exit 1 (compare non-vacueux) |
+| **G2** | « Paris » (2 tokens) + prompt libre FR | **PASS** | early-stop 90 tokens EOT, gén **110,3 tok/s** |
+| **G2b** | fixture longue (999 steps), critère différentiel | **PASS différentiel** | bifurcation au step gen=**960** (marge top1−top2 0,0034) vs replay publié **590** (marge 0,006) → L3 ≥ replay, +370 steps. Gén 111,3 tok/s sur 999 tokens |
+| **G3/VRAM** | run long, `preallocate=false` temporaire | mesure | pic réel **16 658 MiB ≈ 16,27 GiB** → seuil final `MIN_FREE_VRAM_GIB = 20` (ceil(16,27/0,90)+1), commit `75ee030`. Perf sans prealloc : gén 111,4 tok/s (identique) |
+| **VG** | V1 Ollama 22 588 MiB / V3 GPU libre | **PASS** | V1 : `GPU occupé — VRAM libre 1.7 GiB < 20 GiB requis`, GpuBusy propre ; V3 : garde silencieuse, « Paris », exit 0 |
+
+**Critère perf global** : gén L3 110-113 tok/s ≥ replay 109 ≥ B0 → **PASS**, aucun repli (argMax
+seul / donation) déclenché.
+
+Notes :
+
+(a) **Amendement de méthode VRAM** : `mem_probe` (loggué à chaque run) mesure la RSS host, pas la
+VRAM device — et en régime `preallocate=true` (BFC `memory_fraction 0.90`), `nvidia-smi` ne montre
+que la réserve (0,90 × libre à l'init), jamais l'usage réel. La mesure fiable du pic G3 exige donc
+un run temporaire avec `preallocate=false` (cf règle méthode déjà capitalisée §8 « VRAM : mesurer
+avec `--no-prealloc` », `DOCUMENTATION.md` piège 14) ; c'est ce run qui a produit le chiffre
+16 658 MiB retenu pour le seuil final.
+
+(b) **Non-déterminisme inter-compiles sur G2b** : un second run (compile différente, effectué dans
+la fenêtre de mesure VRAM sans prealloc) a bifurqué au step gen=590 au lieu de 960 — écho direct du
+constat déjà documenté au repo (« pas de bit-à-bit entre deux compiles XLA-GPU », `DOCUMENTATION.md`
+piège 15) : l'autotuning XLA-GPU n'est pas reproductible bit-à-bit d'une compilation à l'autre. Le
+critère différentiel « bifurcation ≥ replay 590 » **tient dans les deux cas** (960 ≥ 590 et 590 ≥
+590) — la conclusion PASS de G2b n'est pas fragile à ce non-déterminisme.
+
+(c) **Logs** : `logs/l3_g1.log`, `l3_g1v.log`, `l3_g2.log`, `l3_g2b.log`, `l3_g3_vram.log`,
+`l3_vg_v1.log`, `l3_vg_v3.log` — locaux, `logs/` est gitignored dans ce repo (convention déjà en
+usage pour les gates VRAM, cf `VRAM_CHECK_DESIGN.md` §6) ; la doc porte les résultats, pas les logs.
+
 ## 6. Non-objectifs (explicites)
 
 - **Donation des buffers de cache** [it.2] : hors scope — le churn du swap (~38 Mo/step

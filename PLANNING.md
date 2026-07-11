@@ -35,7 +35,15 @@
   déduplication de nœuds au traçage ZML ; dédup inter-familles norms×ple nommée). Résultats :
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
-- [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
+- [x] **L3 in-graph** — **LIVRÉ 12 juil 2026** (branche `l3-ingraph`, spec/plan
+  `docs/L3_INGRAPH_DESIGN.md`/`docs/L3_INGRAPH_PLAN.md`) : forward token→token, gather
+  embeddings + `topK` désormais **dans le graphe** (`StepTok`/`Tabs`), le host ne thread plus
+  qu'un scalaire u32 par step, `engine.zig` intact d'un octet. Gates SG/G1/G1v/G2/G2b/G3/VG
+  **PASS** : génération **110-113 tok/s** ≥ replay 109 ≥ B0 pré-L3 (91,4/57,1 tok/s) ; G2b
+  différentiel — bifurcation longue au step 960 ≥ replay 590 (non-déterminisme inter-compiles
+  XLA-GPU déjà documenté, critère tenu dans les deux cas) ; VRAM pic mesuré 16,27 GiB (16 658
+  MiB) → seuil de garde porté à **20 GiB** (`VRAM_CHECK_DESIGN.md` errata L3). Tag
+  `gate/l3-ingraph-pass`.
 - [x] **Check VRAM au lancement de `gemma4_gen_auto`** — **LIVRÉ 11 juil 2026** (branche
   `vram-check`, spec `docs/VRAM_CHECK_DESIGN.md`, gates V1-V3 PASS, tag `gate/vram-check-pass`) :
   garde intégrée `error.GpuBusy` si VRAM libre < 10 GiB (process occupants listés, suggestion
@@ -68,7 +76,10 @@
   ZML (double-free post-OOM), pas notre code ; l'OOM est la vraie erreur. Libération réversible :
   `ollama stop <modèle>` (keep_alive recharge à la demande côté service). Depuis le 11 juil,
   `gemma4_gen_auto` intègre cette vérification (garde `error.GpuBusy`, cf item [x] check VRAM) —
-  le réflexe `nvidia-smi` manuel reste NÉCESSAIRE pour tous les autres runners GPU.
+  le réflexe `nvidia-smi` manuel reste NÉCESSAIRE pour tous les autres runners GPU. **Depuis L3
+  (12 juil)** : le seuil de garde de `gemma4_gen_auto` est désormais **20 GiB** (pic mesuré
+  16,27 GiB post-L3, table `embed_tokens_per_layer` en résidence device — cf item [x] L3 in-graph
+  et `VRAM_CHECK_DESIGN.md` errata).
 - **Piège `deploy_to_3090.sh`** : exige `ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz`
   en env — les défauts sont des placeholders (`user@gpu-host`) → échec de résolution DNS ; avec la
   sortie redirigée, le deploy rate SILENCIEUSEMENT et on teste l'ancien binaire (vécu en
