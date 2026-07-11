@@ -11,8 +11,10 @@
 
 ## 1. Comportement
 
-En début de `main`, juste après le parsing des args et **avant tout travail** (tokenizer, poids,
-`Platform.init`), le binaire interroge `nvidia-smi`. Si la VRAM libre du GPU 0 est sous le seuil
+Le binaire interroge `nvidia-smi` **avant tout travail GPU** (poids, `Platform.init`) mais
+**après** les branches host-only qui font early-return sans jamais toucher le GPU
+(`--selftest-inputs`, `--selftest-gather`, `--ids-only`) — la garde ne doit pas bloquer un mode
+qui n'a pas besoin de la carte. Si la VRAM libre du GPU 0 est sous le seuil
 requis, il sort en `error.GpuBusy` avec un message qui :
 
 - chiffre l'écart : `VRAM libre X GiB < Y GiB requis` ;
@@ -47,15 +49,19 @@ indépendamment du spawn.
 ## 3. Seuil
 
 Constante `MIN_FREE_VRAM_GIB = 10`, commentée : mesure G2.1 = **8,5 GiB réels** pour ce modèle
-(poids déjà bf16 sur device, cf `docs/G2_BF16_FIDELITY.md`) + marge. Pas de flag de réglage
-(YAGNI) ; la constante est déclarée avec les autres invariants du runner.
+(poids déjà bf16 sur device, cf `docs/G2_BF16_FIDELITY.md`). Le commentaire doit chiffrer la marge
+honnêtement : le binaire initialise CUDA avec BFC `memory_fraction 0.90, preallocate=true`, donc à
+10 GiB libres la réserve utilisable est ~9 GiB → marge réelle ~0,5 GiB au-dessus des 8,5 mesurés.
+Pas de flag de réglage (YAGNI) ; la constante est déclarée avec les autres invariants du runner.
 
 ## 4. Cas limites — garde best-effort, jamais bloquante à tort
 
 | Cas | Comportement |
 |---|---|
 | `nvidia-smi` introuvable | `log.warn` + on continue (machine sans GPU ; l'OOM réel reste le filet) |
-| `nvidia-smi` en échec / sortie illisible / timeout | `log.warn` + on continue (outil cassé ≠ GPU occupé) |
+| `nvidia-smi` en échec / sortie illisible | `log.warn` + on continue (outil cassé ≠ GPU occupé) |
+| `nvidia-smi` qui pend | hors scope (pas de timeout de spawn — coûteux sous l'API `Io` 0.16 pour un cas jamais observé ; Ctrl-C utilisateur) |
+| modes host-only (`--selftest-*`, `--ids-only`) | check jamais atteint (placé après leurs early-returns, cf §1) |
 | `--allow-cpu` actif | check sauté (le GPU est hors sujet) |
 | `--force-vram` actif | check sauté avec log explicite |
 | VRAM libre ≥ seuil mais process présents | on continue silencieusement (seul le seuil décide) |
