@@ -1,8 +1,24 @@
-# Runtime autonome — Design (spec approuvée)
+# Runtime autonome — Design (spec approuvée — IMPLÉMENTÉE, 4 gates rendus)
 
-> **Statut** : spec validée par Régis le 10 juil 2026 (brainstorming 4 sections, 4/4 OK).
+> **Statut** : spec validée par Régis le 10 juil 2026 (brainstorming 4 sections, 4/4 OK) ;
+> **implémentée les 10-11 juil** (branche `gen-autonome`, exécution subagent-driven).
 > **But** : un binaire ZML texte→texte SANS oracle HF à l'usage — le banc, lui, reste validé
 > CONTRE HF (les gates ci-dessous). Ferme l'item backlog « Runtime 100 % autonome ».
+
+## Résultats (10-11 juil 2026)
+
+| Gate | Verdict | Mesures clés |
+|---|---|---|
+| A0 tokenizer+template | **PASS** (tag `gate/gen-auto-a0-pass`) | ids == HF bit-exact sur 2 prompts ; round-trip détok ; ⚠ tokens de tour RÉELS `<|turn>`/105, `<turn|>`/106 (pas start/end_of_turn) ; EOT extrait = 106 (piège : lookup `<end_of_turn>` → `<unk>` silencieux) |
+| A1 prefill-par-decode | **PASS** (tag `gate/gen-auto-a1-pass`) | **48/48 == HF, autonome complet, zéro input fixture** ; backend cuda, compile mono forwardStep GPU 16.7-17.4 s (risque nommé : non matérialisé), 75-94 tok/s |
+| A2 bout-en-bout long | **critère pré-enregistré N/N : FAIL — requalifié PASS au critère différentiel (décision Régis 10 juil)** | Autonome : 916/999, 1re bifurcation step gen 590 (pos 615), marge top1-top2 **0.006** (15.1260 vs 15.1197). **Contrôle replay (inputs HF exacts) : MÊME bifurcation step 589, mêmes tokens (12266 vs 25680), 997/999** (le replay se resynchronise par steps forcés ; l'autonome propage). Lecture : l'autonomie n'ajoute AUCUNE dégradation mesurable (590 steps parfaits ≥ replay) ; c'est ZML-fp32 vs HF-fp32-CUDA qui ne tient pas le N/N sur séquence à marges fines — le 1020/1020 de S46 était une propriété de S46. **Critère requalifié : A2-diff = « autonome ≥ replay sur la même fixture » → PASS (590 ≥ 589)** ; le FAIL du critère original est publié ici même (null-result, pattern G2.0 : mesurer ce que la référence s'autorise) |
+| A3 early-stop EOS | **PASS** (tag `gate/gen-auto-a3-pass`) | Free-run : stop après exactement **i+2 = 2 tokens** (EOT à l'index 0 d'`expected`), dernier = EOT ; EOT strippé avant détok ; **stdout : `réponse : "Paris"`** — pipeline texte→texte complet |
+
+**Piège découvert (coût réel : 1 run tué en thrash)** : sans le flag de build
+`--@zml//platforms:cuda=true`, `bazel run` ET l'exécution directe du binaire retombent en
+**CPU silencieux** (libpjrt_cuda absente des runfiles) → compile/boucle XLA-CPU du mono =
+mur mémoire. Mitigé en dur : `error.CudaRequired` sauf `--allow-cpu` (débogage), ligne de
+log `backend = …` obligatoire. Cf ENGINE_LOG.md § Validation GPU 28 juin (cause racine).
 
 ## 1. But et périmètre (décisions de cadrage)
 
