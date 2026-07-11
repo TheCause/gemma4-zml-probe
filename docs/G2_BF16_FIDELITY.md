@@ -197,6 +197,12 @@ sur ce chemin, les embptls per-step viennent de la fixture — + caches f32 + tr
 converts + workspace XLA). Corollaires : le gain VRAM attendu de « G2 bf16 » n'existe pas (poids
 déjà bf16) ; et **le banc gen-long GPU tiendrait sur une carte 12 Go**.
 
+> ⚠ **Caveat post-L3 (12 juil 2026)** : ce « banc 12 Go » ne vaut que pour les runners qui n'ont
+> PAS `embed_tokens_per_layer` résident device (ex. `gemma4_gen_long_gpu`, qui lit les embptls
+> depuis la fixture). Depuis L3 in-graph, `gemma4_gen_auto` charge cette table en VRAM pour le
+> gather in-graph (spec `L3_INGRAPH_DESIGN.md`) — pic mesuré **~16,3 Go**, seuil de garde relevé
+> à 20 GiB (cf `VRAM_CHECK_DESIGN.md` errata L3).
+
 ### 7.3 G2.2 — ZML gemm=bf16 : PASS, 2 à 5× SOUS l'enveloppe HF
 
 Design D1 : `PrecCfg.gemm=.bf16` — les 2 opérandes de chaque dot convertis bf16, résultat

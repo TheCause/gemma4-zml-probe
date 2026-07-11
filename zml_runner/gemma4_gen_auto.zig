@@ -1,23 +1,33 @@
-// Runtime AUTONOME texte→texte (spec docs/GEN_AUTONOME_DESIGN.md).
-// Gates : A0 tokenizer+template ; A1 prefill-par-decode 48/48 ; A2 long N/N ; A3 early-stop EOS.
-// Le moteur engine.zig est INTACT — entrée compilée : forwardStep (embeds host token-dépendants).
+// Runtime AUTONOME texte→texte (spec docs/GEN_AUTONOME_DESIGN.md) — L3 in-graph (spec
+// docs/L3_INGRAPH_DESIGN.md, plan docs/L3_INGRAPH_PLAN.md) : le forward devient token_in →
+// token_out, gather embeddings + topK IN-GRAPH (`StepTok` plus bas) — le host ne thread plus
+// qu'un scalaire u32 par step.
+// Gates historiques : A0 tokenizer+template ; A1 prefill-par-decode 48/48 ; A2 long N/N ;
+// A3 early-stop EOS. Gates L3 (G1/G1v/G2/G2b/G3) : cf docs/L3_INGRAPH_PLAN.md.
+// Le moteur engine.zig est INTACT — entrée compilée : `StepTok.forward`, qui compose le gather
+// (embed_tokens déjà device via lm_head tied + table `Tabs.eptl`) + `Model.forwardStep` (INCHANGÉ)
+// + `topK`.
 //
 // CLI : gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "..." [--max-tokens N]
-//       [--oracle fixture] [--ids-only] [--force-vram] [--selftest-inputs f] [--selftest-gather f]
+//       [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram] [--selftest-inputs f]
+//       [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 // Task 2 (gate A0) : parsing CLI, chargement tokenizer ZML natif, rendu du chat template,
 // encodage, préfixage BOS explicite, mode `--ids-only` (log des ids finaux + round-trip détok).
 // Task 3 : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`, formule
 // "proportional" copiée de la source HF), masques additifs (`maskRows`), positions, et les
 // tables host complètes {L_MAX,…} (cos_full/sin_full/masks_sliding/masks_full/positions +
 // embeds/embptls/cache zéros, cf `HostInputs`) — validées vs la fixture 49.
-// Task 4 : gather embeds BRUTS en streaming (`EmbedGather`, pattern
-// gchunk_auto.zig:137-230 adapté — offsets absolus sur le checkpoint, une ligne bf16 par token,
-// scratch réutilisé, AUCUN scaling host) + mode `--selftest-gather <fixture>` (bit-exact vs
-// embeds/embptls de la fixture A1).
-// Task 5 (cette tranche, gate A1) : boucle autonome prefill-par-decode — compile mono `forwardStep`
-// (Packed/Cache symboliques à la main, Bufferized champ-à-champ depuis HostInputs), gather → device
-// per-step, argmax host, arrêt EOS/max-tokens, mode `--oracle <fixture>` (48/48 == HF, cf section
-// Task 5 plus bas). ⚠ GPU : lancer avec `--@zml//platforms:cuda=true` sinon repli CPU silencieux.
+// Task 4 (HISTORIQUE, remplacée par L3) : gather embeds BRUTS en streaming host (`EmbedGather`,
+// SUPPRIMÉ) — le gather vit désormais IN-GRAPH (`StepTok`, table `Tabs` + `Model.embed_tokens`).
+// `--selftest-gather` : RÉÉCRIT au gather in-graph (Task 4 du plan L3, `SgFwd`/`SgTabs`) — mode
+// GPU désormais (garde VRAM applicable, dispatché dans `main` après `Platform.init`/sharding,
+// cf `selftestGather`).
+// Task 5 (gate A1, historique) → L3 (cette tranche) : boucle autonome prefill-par-decode —
+// compile mono `StepTok.forward` (Tabs + Packed/Cache symboliques à la main, Bufferized
+// champ-à-champ depuis HostInputs) ; le host ne feed plus qu'un token u32 par step (topK in-graph
+// fournit next_tok + top5 diagnostic, plus de gather/Buffer.fromBytes embeds/embptls côté host).
+// Mode `--oracle <fixture>` (48/48 == HF, cf section Step 5.3 plus bas). ⚠ GPU : lancer avec
+// `--@zml//platforms:cuda=true` sinon repli CPU silencieux.
 const std = @import("std");
 const log = std.log;
 const zml = @import("zml");
@@ -70,7 +80,7 @@ const usage =
     "Usage: gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt \"...\" " ++
     "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
     "[--force-vram] " ++
-    "[--selftest-inputs f] [--selftest-gather f]";
+    "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -454,131 +464,54 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
 }
 
 // ============================================================================================
-// Task 4 — gather embeds bruts en streaming (offsets positionnels sur le CHECKPOINT).
+// L3 — table `Tabs` (spec docs/L3_INGRAPH_DESIGN.md §2.1) : embed_tokens_per_layer, chargée en
+// VRAM par le même TensorStore/zml.io que le reste du modèle. `embed_tokens` est DÉJÀ
+// device-résident dans `Model` (lm_head tied, engine.zig:487/507) : le gather du `StepTok`
+// plus bas le réutilise, ZÉRO Go ajouté par cette table-ci — `Tabs.eptl` (~4,7 Go bf16) est la
+// SEULE table ajoutée au device. `EmbedGather` (Task 4 historique : gather HOST en streaming
+// direct sur le fichier checkpoint) est SUPPRIMÉ intégralement — le gather vit désormais dans le
+// graphe compilé (`StepTok.forward`).
 // ============================================================================================
-//
-// Adapté de gemma4_gchunk_auto.zig:137-230 : au lieu de matérialiser embed_tokens (~1,6 Go) et
-// embed_tokens_per_layer (~4,7 Go) en RAM, on lit UNE ligne bf16 par token DIRECTEMENT dans le
-// fichier `model.safetensors`, à l'offset absolu `tensor.offset + tok*row_bytes` (layout
-// row-major : {voc,d} et {voc,lf}). RAW — AUCUN scaling host : les facteurs ×√1536 (embed_tokens,
-// cf `engine.zig` EMBED_SCALE/`.scale(EMBED_SCALE)`) et ×16 (embed_tokens_per_layer, PLE) sont
-// appliqués IN-GRAPH par `forwardStep` (engine.zig:644-645) — les appliquer ici causerait un
-// double-scaling silencieux (spec DESIGN §3.3).
-const EMB_KEY = "model.language_model.embed_tokens.weight";
-const EPTL_KEY = "model.language_model.embed_tokens_per_layer.weight";
+const EMB_KEY = "model.language_model.embed_tokens.weight"; // utilisé par SgTabs (clé ABSOLUE, root view)
+const EPTL_KEY = "model.language_model.embed_tokens_per_layer.weight"; // idem
 
-// Table d'embeddings en streaming : ouvre le checkpoint une fois, résout les offsets/dtypes des
-// deux tables via le registry (header seul — pas de chargement de poids), puis `gather(tok)`
-// relit une ligne de chacune dans des scratch buffers réutilisés (pas d'alloc en boucle).
-//
-// Conçu pour Task 5 : `emb_scratch`/`eptl_scratch` ([]u16) sont déjà EXACTEMENT les bits bruts
-// d'une ligne {d}/{lf} bf16 (B=S=1) — Task 5 n'aura qu'à les envelopper avec
-// `zml.Buffer.fromBytes(io, platform, shape{1,1,D|LF}.bf16, sharding, std.mem.sliceAsBytes(scratch))`
-// par step, comme gchunk_auto.zig:226-227 le fait déjà pour son propre scratch (là en []u8).
-const EmbedGather = struct {
-    file: std.Io.File,
-    emb_base_off: u64, // offset absolu (octets) du début de la table embed_tokens
-    eptl_base_off: u64, // idem embed_tokens_per_layer
-    emb_row_bytes: usize, // = D * sizeOf(bf16)
-    eptl_row_bytes: usize, // = LF * sizeOf(bf16)
-    num_rows: i64, // = vocab, DÉRIVÉ du header (byteSize/row_bytes) — borne du bounds-check de gather
-    // Scratch typés []u16 (bits bruts bf16), PAS []u8 : reformer un []u16 depuis des octets bruts
-    // exige un pointeur aligné à 2, ce qu'un []u8 alloué par le GPA ne garantit pas — l'allouer
-    // directement en []u16 lève le problème à la racine (élément naturellement aligné) tout en
-    // restant directement comparable en bits aux lectures fixture (elles aussi []u16, cf
-    // readFixtureAlloc(u16, .bf16, ...)). readPositionalAll reçoit `std.mem.sliceAsBytes(...)`
-    // (u16→u8 : toujours valide, alignement plus faible).
-    emb_scratch: []u16, // {D} bf16 brut — réutilisé à chaque step
-    eptl_scratch: []u16, // {LF} bf16 brut — idem
+// Table L3 (spec docs/L3_INGRAPH_DESIGN.md §2.1) : SEULE table ajoutée au device —
+// embed_tokens est déjà résident dans Model (lm_head tied, engine.zig:487), le gather le
+// réutilise. Nom court OBLIGATOIRE (piège quota comptime @typeName, cf spec §2).
+const Tabs = struct {
+    eptl: zml.Tensor, // {voc,lf} bf16 BRUT (scaling ×16 déjà dans forwardStep)
 
-    fn init(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u8) !EmbedGather {
-        var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt_path);
-        defer reg.deinit();
-        const emb_t = reg.tensors.get(EMB_KEY) orelse {
-            log.err("tensor introuvable dans le checkpoint: {s}", .{EMB_KEY});
-            return error.MissingTensor;
-        };
-        const eptl_t = reg.tensors.get(EPTL_KEY) orelse {
-            log.err("tensor introuvable dans le checkpoint: {s}", .{EPTL_KEY});
-            return error.MissingTensor;
-        };
-        const emb_dtype = emb_t.shape.dtype();
-        const eptl_dtype = eptl_t.shape.dtype();
-        if (emb_dtype != .bf16 or eptl_dtype != .bf16) {
-            log.err("dtype embeddings inattendu (emb={s} eptl={s}, attendu bf16 les deux)", .{ @tagName(emb_dtype), @tagName(eptl_dtype) });
-            return error.DtypeMismatch;
-        }
-        const emb_row_bytes: usize = @intCast(D * @as(i64, @intCast(emb_dtype.sizeOf())));
-        const eptl_row_bytes: usize = @intCast(LF * @as(i64, @intCast(eptl_dtype.sizeOf())));
+    fn init(base: zml.io.TensorStore.View) Tabs {
+        return .{ .eptl = base.createTensor("embed_tokens_per_layer.weight", .{ .voc, .lf }, null) };
+    }
+    fn load(self: *const Tabs, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Tabs) {
+        return zml.io.load(Tabs, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
+    }
+};
 
-        // Géométrie des tables VALIDÉE contre le header : byteSize doit être un multiple exact de
-        // row_bytes (sinon D/LF hardcodés ≠ shape réelle du checkpoint), et les deux comptes de
-        // lignes doivent coïncider (même vocab). Garde-fou de revue : sans cette dérivation, un
-        // checkpoint à la géométrie inattendue produirait des lignes décalées silencieusement.
-        const emb_bytes: u64 = emb_t.byteSize();
-        const eptl_bytes: u64 = eptl_t.byteSize();
-        if (emb_bytes % @as(u64, emb_row_bytes) != 0 or eptl_bytes % @as(u64, eptl_row_bytes) != 0) {
-            log.err("géométrie table invalide : emb {d} % {d} = {d}, eptl {d} % {d} = {d} (D/LF hardcodés ≠ checkpoint ?)", .{ emb_bytes, emb_row_bytes, emb_bytes % @as(u64, emb_row_bytes), eptl_bytes, eptl_row_bytes, eptl_bytes % @as(u64, eptl_row_bytes) });
-            return error.BadTableGeometry;
-        }
-        const emb_rows: u64 = emb_bytes / @as(u64, emb_row_bytes);
-        const eptl_rows: u64 = eptl_bytes / @as(u64, eptl_row_bytes);
-        if (emb_rows != eptl_rows) {
-            log.err("géométrie table invalide : emb {d} lignes ≠ eptl {d} lignes (vocab incohérent)", .{ emb_rows, eptl_rows });
-            return error.BadTableGeometry;
-        }
-        log.info("EmbedGather : {d} lignes/table (vocab), emb {d} o/ligne, eptl {d} o/ligne", .{ emb_rows, emb_row_bytes, eptl_row_bytes });
+// SG (spec [it.4], plan L3_INGRAPH_PLAN.md Task 4) : struct à 2 champs, MÊME pattern que `Tabs`,
+// dédié au mini-graphe gather-only du selftest — indépendant de `Model`/`Tabs` (pas de forward
+// complet). Clés ABSOLUES (EMB_KEY/EPTL_KEY) via une root view (pas de withPrefix ici).
+const SgTabs = struct {
+    emb: zml.Tensor, // {voc,d} bf16 BRUT (embed_tokens)
+    eptl: zml.Tensor, // {voc,lf} bf16 BRUT (embed_tokens_per_layer)
 
-        var file = try std.Io.Dir.cwd().openFile(io, ckpt_path, .{ .mode = .read_only });
-        errdefer file.close(io);
-        const emb_scratch = try allocator.alloc(u16, emb_row_bytes / 2);
-        errdefer allocator.free(emb_scratch);
-        const eptl_scratch = try allocator.alloc(u16, eptl_row_bytes / 2);
-        errdefer allocator.free(eptl_scratch);
-
+    fn init(base: zml.io.TensorStore.View) SgTabs {
         return .{
-            .file = file,
-            .emb_base_off = emb_t.offset,
-            .eptl_base_off = eptl_t.offset,
-            .emb_row_bytes = emb_row_bytes,
-            .eptl_row_bytes = eptl_row_bytes,
-            .num_rows = @intCast(emb_rows),
-            .emb_scratch = emb_scratch,
-            .eptl_scratch = eptl_scratch,
+            .emb = base.createTensor(EMB_KEY, .{ .voc, .d }, null),
+            .eptl = base.createTensor(EPTL_KEY, .{ .voc, .lf }, null),
         };
     }
-
-    fn deinit(self: *EmbedGather, io: std.Io, allocator: std.mem.Allocator) void {
-        allocator.free(self.emb_scratch);
-        allocator.free(self.eptl_scratch);
-        self.file.close(io);
+    fn load(self: *const SgTabs, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(SgTabs) {
+        return zml.io.load(SgTabs, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
     }
+};
 
-    // Lit la ligne du token `tok` dans les deux tables (read positionnel, offset absolu = base +
-    // tok*row_bytes — cf gchunk_auto.zig:220-223) — RAW, aucun scaling. Résultat dans
-    // self.emb_scratch/self.eptl_scratch (réutilisés, PAS de nouvelle alloc).
-    fn gather(self: *EmbedGather, io: std.Io, tok: i64) !void {
-        // Bounds-check EXPLICITE (revue) : tok ≥ vocab tomberait dans le tenseur SUIVANT du
-        // checkpoint — la lecture réussirait (pas de ShortRead) et une ligne plausible mais
-        // FAUSSE partirait dans le forward = divergence silencieuse, exactement la classe
-        // d'erreur que la méthodo de ce repo existe pour empêcher. tok < 0 ne panique qu'en
-        // ReleaseSafe (mode de build non épinglé) → check explicite obligatoire.
-        if (tok < 0 or tok >= self.num_rows) {
-            log.err("gather: token hors table — tok={d}, bornes [0, {d})", .{ tok, self.num_rows });
-            return error.TokenOutOfRange;
-        }
-        const emb_off: u64 = self.emb_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.emb_row_bytes));
-        const eptl_off: u64 = self.eptl_base_off + @as(u64, @intCast(tok)) * @as(u64, @intCast(self.eptl_row_bytes));
-        const got_emb = try self.file.readPositionalAll(io, std.mem.sliceAsBytes(self.emb_scratch), emb_off);
-        if (got_emb != self.emb_row_bytes) {
-            log.err("gather embeds: lecture courte tok={d} — {d}/{d} octets (checkpoint tronqué ?)", .{ tok, got_emb, self.emb_row_bytes });
-            return error.ShortRead;
-        }
-        const got_eptl = try self.file.readPositionalAll(io, std.mem.sliceAsBytes(self.eptl_scratch), eptl_off);
-        if (got_eptl != self.eptl_row_bytes) {
-            log.err("gather embptls: lecture courte tok={d} — {d}/{d} octets (checkpoint tronqué ?)", .{ tok, got_eptl, self.eptl_row_bytes });
-            return error.ShortRead;
-        }
+// SG (spec [it.4]) : mini-graphe gather-only — mêmes primitives que `StepTok` (gather + GatherOpts
+// `.{}` OBLIGATOIRE, cf StepTok plus bas), sans forwardStep/topK (pas besoin du modèle complet).
+const SgFwd = struct {
+    pub fn forward(emb: zml.Tensor, eptl: zml.Tensor, tok: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        return .{ emb.gather(.{ .voc = tok }, .{}), eptl.gather(.{ .voc = tok }, .{}) };
     }
 };
 
@@ -590,101 +523,142 @@ const EmbedGather = struct {
 // tolérance) : c'est le SEUL garde-fou contre un scaling host accidentel tant que le gate A1
 // (bout-en-bout, Task 5) n'est pas passé — ne JAMAIS l'affaiblir en tolérance (piège relevé en
 // revue).
-fn selftestGather(allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u8, fixture_path: []const u8) !void {
-    var gather_tbl = try EmbedGather.init(allocator, io, ckpt_path);
-    defer gather_tbl.deinit(io, allocator);
+// L3 [it.4] : ce mode est désormais GPU (mini-graphe compilé `SgFwd.forward`) — la garde VRAM
+// s'applique (câblage dans `main`, dispatché après Platform.init/garde CUDA/sharding). Charge
+// SEULEMENT les 2 tables emb/eptl (SgTabs) via TensorStore, PAS le `Model` complet.
+fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    // Fixture d'abord (host-only, rapide) : fail-fast si la fixture est cassée, avant tout travail
+    // GPU (registry + tenseurs, mêmes helpers que --selftest-inputs/--oracle).
+    var reg_fx: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg_fx.deinit();
+    var file_fx = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file_fx.close(io);
 
-    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
-    defer reg.deinit();
-    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
-    defer file.close(io);
-
-    // `fed` est i32 dans la fixture (cf 49_gen_custom_oracle.py:203 : torch.int32) ; le gather
-    // canonicalise en i64 (comme le sibling gchunk_auto) — cast explicite à la frontière.
-    const fed = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "fed");
-    defer allocator.free(fed);
-    const embeds_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg, &file, "embeds");
+    const fed_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg_fx, &file_fx, "fed");
+    defer allocator.free(fed_fx);
+    const embeds_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg_fx, &file_fx, "embeds");
     defer allocator.free(embeds_fx);
-    const embptls_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg, &file, "embptls");
+    const embptls_fx = try readFixtureAlloc(u16, .bf16, allocator, io, &reg_fx, &file_fx, "embptls");
     defer allocator.free(embptls_fx);
 
-    const n_decode = fed.len;
-    if (n_decode == 0) {
-        log.err("SELFTEST GATHER : fixture vide (fed.len=0) — un PASS à 0 step serait vacueux", .{});
+    const n: usize = fed_fx.len;
+    if (n == 0) {
+        log.err("--selftest-gather : fixture 'fed' vide — un PASS à 0 step serait vacueux", .{});
         return error.EmptyFixture;
     }
-    const d: usize = @intCast(D);
-    const lf: usize = @intCast(LF);
-    if (embeds_fx.len != n_decode * d) {
-        log.err("SELFTEST GATHER : shape embeds inattendue (embeds.len={d} n_decode*D={d})", .{ embeds_fx.len, n_decode * d });
-        return error.UnexpectedShape;
-    }
-    if (embptls_fx.len != n_decode * lf) {
-        log.err("SELFTEST GATHER : shape embptls inattendue (embptls.len={d} n_decode*LF={d})", .{ embptls_fx.len, n_decode * lf });
+    const d_u: usize = @intCast(D);
+    const lf_u: usize = @intCast(LF);
+    if (embeds_fx.len != n * d_u or embptls_fx.len != n * lf_u) {
+        log.err("SG : shape fixture inattendue (embeds.len={d} embptls.len={d}, attendu {d}x{d}={d} / {d}x{d}={d})", .{ embeds_fx.len, embptls_fx.len, n, d_u, n * d_u, n, lf_u, n * lf_u });
         return error.UnexpectedShape;
     }
 
-    for (0..n_decode) |k| {
-        const tok: i64 = @intCast(fed[k]);
-        try gather_tbl.gather(io, tok);
-        const emb_fx_row = embeds_fx[k * d .. (k + 1) * d];
-        const eptl_fx_row = embptls_fx[k * lf .. (k + 1) * lf];
-        if (!std.mem.eql(u16, gather_tbl.emb_scratch, emb_fx_row)) {
-            log.err("SELFTEST GATHER FAIL — embeds diverge au step {d} (tok={d}) : gathered[0..4]={any} fixture[0..4]={any}", .{ k, tok, gather_tbl.emb_scratch[0..4], emb_fx_row[0..4] });
-            return error.SelftestGatherFailed;
+    // Checkpoint : SEULES les 2 tables (emb+eptl) — pas de Model.init (plan Step 4.1 : "Model PAS
+    // nécessaire"). Root view (pas de withPrefix) : EMB_KEY/EPTL_KEY sont déjà les clés absolues.
+    var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, ckpt_path);
+    defer reg_ck.deinit();
+    var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
+    defer store_ck.deinit();
+    const base = store_ck.view();
+
+    const sg_tabs: SgTabs = .init(base);
+    const sg_buf = try sg_tabs.load(allocator, io, platform, &store_ck, &.{sharding});
+
+    const tok_sym = zml.Tensor.init(.{ 1, 1 }, .u32).withTags(.{ .b, .s });
+    var exe = try platform.compileFn(allocator, io, SgFwd.forward, .{ sg_tabs.emb, sg_tabs.eptl, tok_sym }, .{ .shardings = &.{sharding} });
+    defer exe.deinit();
+
+    var first_fail: ?struct { step: usize, table: []const u8, idx: usize, host: u16, fx: u16 } = null;
+
+    for (0..n) |k| {
+        // Bits du token PRÉSERVÉS (pas @intCast) : un `fed` négatif dans une fixture corrompue
+        // (cf G1v) ne doit jamais déclencher un piège d'intCast — reinterprétation brute, le
+        // gather XLA (ou le mismatch qui suit) qualifiera l'anomalie, pas un crash de cast.
+        var tok_host = [1]u32{@bitCast(fed_fx[k])};
+        var tok_buf = try zml.Buffer.fromBytes(io, platform, tok_sym.shape(), sharding, std.mem.sliceAsBytes(&tok_host));
+
+        var call_args = try exe.args(allocator);
+        var call_results = try exe.results(allocator);
+        call_args.set(.{ sg_buf.emb, sg_buf.eptl, tok_buf });
+        exe.call(call_args, &call_results);
+        var r_emb, var r_eptl = call_results.get(struct { zml.Buffer, zml.Buffer });
+
+        var emb_s = try r_emb.toSliceAlloc(allocator, io);
+        defer emb_s.free(allocator);
+        var eptl_s = try r_eptl.toSliceAlloc(allocator, io);
+        defer eptl_s.free(allocator);
+        const emb_bits = emb_s.items(u16);
+        const eptl_bits = eptl_s.items(u16);
+        // Garde longueur = shape ET dtype d'un coup (même standard que l'assert i32 du chemin
+        // réel) : un gather upcasté bf16→f32 doublerait len et produirait un « mismatch »
+        // trompeur au lieu d'une erreur qualifiée.
+        if (emb_bits.len != d_u or eptl_bits.len != lf_u) {
+            log.err("SG : longueurs D2H inattendues (emb={d}≠{d}, eptl={d}≠{d}) — dtype/shape du gather a dérivé ?", .{ emb_bits.len, d_u, eptl_bits.len, lf_u });
+            return error.UnexpectedShape;
         }
-        if (!std.mem.eql(u16, gather_tbl.eptl_scratch, eptl_fx_row)) {
-            log.err("SELFTEST GATHER FAIL — embptls diverge au step {d} (tok={d}) : gathered[0..4]={any} fixture[0..4]={any}", .{ k, tok, gather_tbl.eptl_scratch[0..4], eptl_fx_row[0..4] });
-            return error.SelftestGatherFailed;
+
+        const emb_fx_row = embeds_fx[k * d_u .. (k + 1) * d_u];
+        const eptl_fx_row = embptls_fx[k * lf_u .. (k + 1) * lf_u];
+
+        if (first_fail == null) {
+            for (0..d_u) |i| {
+                if (emb_bits[i] != emb_fx_row[i]) {
+                    first_fail = .{ .step = k, .table = "embeds", .idx = i, .host = emb_bits[i], .fx = emb_fx_row[i] };
+                    break;
+                }
+            }
         }
+        if (first_fail == null) {
+            for (0..lf_u) |i| {
+                if (eptl_bits[i] != eptl_fx_row[i]) {
+                    first_fail = .{ .step = k, .table = "embptls", .idx = i, .host = eptl_bits[i], .fx = eptl_fx_row[i] };
+                    break;
+                }
+            }
+        }
+
+        r_emb.deinit();
+        r_eptl.deinit();
+        tok_buf.deinit();
+        call_args.deinit(allocator);
+        call_results.deinit(allocator);
+
+        if (first_fail != null) break; // 1ère divergence suffit au diagnostic — pas la peine de continuer
     }
 
-    log.info("SELFTEST GATHER PASS ({d} steps, bit-exact)", .{n_decode});
+    if (first_fail) |ff| {
+        log.err("SG FAIL — step={d} (fed={d}) table={s} 1ère divergence idx={d} : host=0x{x} fixture=0x{x}", .{ ff.step, fed_fx[ff.step], ff.table, ff.idx, ff.host, ff.fx });
+        return error.SgGatherMismatch;
+    }
+    log.info("SG PASS — {d} steps × 2 tables bit-exact (gather in-graph)", .{n});
 }
 
 // ============================================================================================
-// Task 5 — boucle autonome prefill-par-decode (forwardStep, buffers device per-step) : gate A1.
+// L3 — boucle autonome prefill-par-decode (StepTok = gather + forwardStep + topK IN-GRAPH,
+// buffers device per-step) : gates G1/G2/G2b (spec docs/L3_INGRAPH_DESIGN.md).
 // ============================================================================================
 //
-// Compile UNE FOIS le mono-graphe `forwardStep` (35 couches, embeds/embptls PASSÉS EN ARGUMENT
-// séparé — engine.zig:632-661, PAS de pickStep dessus). Packed(true)/Cache SYMBOLIQUES construits
-// À LA MAIN (pas de fixture de store pour ce runner — mêmes shapes que engine.Packed(true)/
-// engine.Cache, cf commentaires HostInputs plus haut, conçus exactement pour cet usage) :
+// Compile UNE FOIS le mono-graphe `StepTok.forward`, qui compose : gather (`model.embed_tokens` +
+// `tabs.eptl`, cf `Tabs` plus haut) → `Model.forwardStep` (35 couches, INCHANGÉ, engine.zig:632-661)
+// → `topK(.voc, 5)`. Packed(true)/Cache SYMBOLIQUES construits À LA MAIN (pas de fixture de store
+// pour ce runner — mêmes shapes que engine.Packed(true)/engine.Cache, cf commentaires HostInputs
+// plus haut, conçus exactement pour cet usage) :
 //   - cos_full/sin_full/masks_sliding/masks_full/positions : RÉELLEMENT consommés par forwardStep
 //     (indexés par `ctrl.step` == position absolue p, cf pickStep) — remplis depuis HostInputs.
 //   - embeds/embptls du Packed symbolique : déclarés (le type Packed(true) a 7 champs) mais JAMAIS
-//     lus par forwardStep (embeds_step/embptls_step, les 2 premiers arguments, portent le vrai
-//     token) — remplis avec les tables zéro de HostInputs, factices par construction.
+//     lus par forwardStep (le vrai token vient désormais du gather `StepTok`, pas de `p`) —
+//     remplis avec les tables zéro de HostInputs, factices par construction.
 //   - Cache initial : zéro (Bufferized construit par zml.Buffer.fromBytes depuis les zéros host).
 //
-// Risque nommé (spec §5) : 1er compile GPU du mono `forwardStep` — attendu OK (gen_long_gpu compile
-// déjà le mono `.forward` op-identique sur GPU ; le "~33 Go thrash" d'engine.zig:667 était XLA-CPU
-// sur la VM 23 Go, pas GPU, cf gemma4_gen_long_gpu.zig).
+// Risque nommé (spec §5) : 1er compile GPU du mono `StepTok.forward` (gather+forwardStep+topK) —
+// attendu OK (gen_long_gpu compile déjà le mono `.forward` op-identique sur GPU ; le "~33 Go
+// thrash" d'engine.zig:667 était XLA-CPU sur la VM 23 Go, pas GPU, cf gemma4_gen_long_gpu.zig).
 
+// Top5 : idx/val remplis DEPUIS LE DEVICE (topK in-graph, `StepTok` plus bas) — plus de scan host
+// (`top5Of` SUPPRIMÉ, Task 4 historique). top1 = next token ; top5 entier = diagnostic --oracle
+// (spec docs/L3_INGRAPH_DESIGN.md §4, vigilance ties d'argmax). Struct inchangée : même usage par
+// le reste de la boucle (`gen_top5`, diagnostic FAIL Step 5.3).
 const Top5 = struct { idx: [5]usize, val: [5]f32 };
-
-// Argmax + top-5 en UNE passe host (diagnostic Step 5.3 : en cas de FAIL, dump des logits SANS
-// reprocess). Coût négligeable (262144 f32, insertion triée O(5) par élément) — appelée à CHAQUE
-// step (prefill inclus, cf PLAN "simplest: always compute") ; seul le résultat des steps de
-// génération est conservé (`gen_top5`, parallèle à `generated`).
-fn top5Of(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !Top5 {
-    var s = try logits_buf.toSliceAlloc(allocator, io);
-    defer s.free(allocator);
-    const v = s.items(f32);
-    var top: Top5 = .{ .idx = [_]usize{0} ** 5, .val = [_]f32{-std.math.floatMax(f32)} ** 5 };
-    for (v, 0..) |x, idx| {
-        if (x > top.val[4]) {
-            var pos: usize = 4;
-            while (pos > 0 and x > top.val[pos - 1]) : (pos -= 1) {
-                top.val[pos] = top.val[pos - 1];
-                top.idx[pos] = top.idx[pos - 1];
-            }
-            top.val[pos] = x;
-            top.idx[pos] = idx;
-        }
-    }
-    return top;
-}
 
 // ============================================================================================
 // Garde VRAM au lancement (docs/VRAM_CHECK_DESIGN.md) — incident du 11 juil 2026 : Ollama à
@@ -694,11 +668,15 @@ fn top5Of(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !To
 // filet) ; seul « VRAM libre < seuil » mesuré avec succès fait échouer le lancement.
 // ============================================================================================
 
-// Seuil requis : mesure G2.1 = 8,5 GiB réels pour ce modèle (poids déjà bf16 on-device,
-// cf docs/G2_BF16_FIDELITY.md). Marge honnête : le binaire initialise CUDA avec BFC
-// `memory_fraction 0.90` → à 10 GiB libres, réserve utilisable ≈ 9 GiB, soit ~0,5 GiB
-// au-dessus des 8,5 mesurés (pas 1,5). Pas de flag de réglage (YAGNI).
-const MIN_FREE_VRAM_GIB: u64 = 10;
+// Seuil requis — G3 (Step 8, amendement méthode) : `mem_probe` (ci-dessous, "post-load"/
+// "post-compile") loggue de la RSS HOST, pas de la VRAM device — et `nvidia-smi` pendant un run
+// normal ne montre que la RÉSERVE BFC préallouée (`0.90 × VRAM libre au lancement`), pas le
+// besoin réel. Mesure réelle faite en désactivant temporairement `preallocate` (BFC alloue à la
+// demande) et en échantillonnant `nvidia-smi --query-compute-apps` pendant tout le run (compile
+// + prefill + génération 999 steps, fixture A2) : pic observé = 16658 MiB ≈ 16,27 GiB. Seuil
+// final = ceil(pic_GiB / 0.90) + 1 = ceil(16,27 / 0,90) + 1 = ceil(18,08) + 1 = 20 GiB — couvre
+// la réserve BFC réelle (0.90×) avec 1 GiB de marge. Pas de flag de réglage (YAGNI).
+const MIN_FREE_VRAM_GIB: u64 = 20;
 
 // Parse `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` : première ligne =
 // GPU 0 (VM mono-GPU), entier en MiB. null = sortie illisible (l'appelant warn + continue).
@@ -757,6 +735,25 @@ fn checkVram(gpa: std.mem.Allocator, io: std.Io) !void {
     return error.GpuBusy;
 }
 
+// L3 (spec docs/L3_INGRAPH_DESIGN.md §2) : compose gather in-graph + forwardStep (engine INTACT)
+// + topK. top1 du topK == argmax (tri descendant `sort`, cf tensor.zig:3096) ; top5 = diagnostic
+// --oracle. Nom court OBLIGATOIRE (piège quota comptime @typeName sur pjrt.zig structSize, cf
+// tête de fichier + spec §2 [it.5]).
+const StepTok = struct {
+    pub fn forward(model: Model, tabs: Tabs, tok: zml.Tensor, p: PackedLong, cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        const e = model.embed_tokens.gather(.{ .voc = tok }, .{}); // {b,s,d} bf16 brut
+        const el = tabs.eptl.gather(.{ .voc = tok }, .{}); // {b,s,lf} bf16 brut
+        const logits, const slk, const slv, const flk, const flv = model.forwardStep(e, el, p, cache, ctrl);
+        // Forme struct à un champ EXIGÉE par `Tensor.topK` (cf zml/nn.zig:1558, seul site d'appel
+        // réel dans les sources ZML : `logits.topK(.{ .voc = .voc }, k, .{})`, PAS `.topK(.voc, k,
+        // .{})` — un enum literal seul ne matche ni la branche .int ni la branche .struct de
+        // `topK` (tensor.zig:3098) et ferait échouer la compilation ; corrigé ici vs le libellé du
+        // plan L3_INGRAPH_PLAN.md Step 2.3, cf revue Step 2.9).
+        const t5 = logits.topK(.{ .voc = .voc }, 5, .{});
+        return .{ t5.values, t5.indices, slk, slv, flk, flv };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -769,13 +766,6 @@ pub fn main(init: std.process.Init) !void {
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
-        return;
-    }
-
-    // === Task 4 : --selftest-gather — host-only (registry + reads positionnels), pas de
-    // Platform/device requis (device buffers = Task 5). args.ckpt = checkpoint, positionnel 1. ===
-    if (args.selftest_gather) |fixture_path| {
-        try selftestGather(allocator, io, args.ckpt, fixture_path);
         return;
     }
 
@@ -844,8 +834,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // === Garde VRAM (docs/VRAM_CHECK_DESIGN.md) — avant tout travail GPU. Les modes host-only
-    // (--selftest-inputs/--selftest-gather/--ids-only) ont déjà early-return au-dessus. Tourne
-    // AUSSI en --allow-cpu : ce flag ne force pas le CPU (l'init .cuda est tentée d'abord,
+    // (--selftest-inputs/--ids-only) ont déjà early-return au-dessus. `--selftest-gather` N'EST
+    // PLUS host-only depuis L3 (spec [it.4]) : il compile un mini-graphe GPU (`SgFwd`) et passe
+    // désormais PAR cette garde, comme le run normal (dispatché plus bas, après Platform.init).
+    // Tourne AUSSI en --allow-cpu : ce flag ne force pas le CPU (l'init .cuda est tentée d'abord,
     // --allow-cpu ne tolère que le repli) — sur machine sans GPU, nvidia-smi absent → warn +
     // continue, donc pas de blocage à tort. Seul --force-vram saute la garde. ===
     if (args.force_vram) {
@@ -924,6 +916,17 @@ pub fn main(init: std.process.Init) !void {
     }
     const sharding = try zml.sharding.replicatedSharding(platform);
 
+    // === Task 4 (plan L3) : --selftest-gather — mode GPU désormais (gather in-graph, spec
+    // docs/L3_INGRAPH_DESIGN.md §5 SG) : dispatché ICI, APRÈS la garde VRAM + Platform.init +
+    // garde CUDA dure + sharding, AVANT le chargement du modèle complet (SG ne charge que les 2
+    // tables emb/eptl via SgTabs, pas `Model`). Conséquence mécanique du déplacement : ce point est
+    // en aval du check --prompt (cf `prompt_text` plus haut) — un --prompt factice est donc REQUIS (cf `usage`), et
+    // --allow-cpu/--force-vram s'appliquent à SG exactement comme au run normal (aucun cas spécial).
+    if (args.selftest_gather) |fixture_path| {
+        try selftestGather(allocator, io, platform, sharding, args.ckpt, fixture_path);
+        return;
+    }
+
     var reg_ck: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.ckpt);
     var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
     const base = store_ck.view().withPrefix("model").withPrefix("language_model");
@@ -931,8 +934,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Symboliques construits À LA MAIN (pas de fixture de store, cf tête de section) — mêmes shapes
     // que engine.Packed(true)/engine.Cache.
-    const embeds_sym = zml.Tensor.init(.{ 1, 1, D }, .bf16).withTags(.{ .b, .s, .d });
-    const embptls_sym = zml.Tensor.init(.{ 1, 1, LF }, .bf16).withTags(.{ .b, .s, .lf });
+    const tok_sym = zml.Tensor.init(.{ 1, 1 }, .u32).withTags(.{ .b, .s });
+    // Repli si le gather rank-2 ne compile pas (P5.4 n'a validé que des ids 1-D) : `tok_sym` en
+    // `{ .s }` shape `[1]`, puis dans StepTok.forward : `.gather(.{ .voc = tok }).reshape(.{ 1, 1, D }).withTags(.{ .b, .s, .d })` (reshape layout-preserving + re-tag, piège ZML #1 connu) — idem `el` avec LF.
+    // Repli dtype : si le gather exige des indices i32, passer tok_sym/host en `.i32` (le vocab < 2^31, cast sans perte).
+    // ⚠ Si le dtype/shape des indices change ICI, changer AUSSI le tok_sym de selftestGather (SG) —
+    // sinon SG resterait vert en validant autre chose que ce que le runtime fait.
     const packed_sym = PackedLong{
         .embeds = zml.Tensor.init(.{ L_MAX, 1, 1, D }, .bf16).withTags(.{ .step, .b, .s, .d }),
         .embptls = zml.Tensor.init(.{ L_MAX, 1, 1, LF }, .bf16).withTags(.{ .step, .b, .s, .lf }),
@@ -952,6 +959,11 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...", .{});
     const eng_buf = try model.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
+
+    // L3 (spec docs/L3_INGRAPH_DESIGN.md §2.1) : SEULE table ajoutée au device (embed_tokens_per_layer,
+    // ~4,7 Go bf16) — même TensorStore/`base` que Model.init, chargée AVANT store_ck.deinit() plus bas.
+    const tabs: Tabs = .init(base); // même view withPrefix que Model.init
+    const tabs_buf = try tabs.load(arena.allocator(), io, platform, &store_ck, &.{sharding});
 
     var host = try HostInputs.init(allocator);
     defer host.deinit(allocator);
@@ -976,18 +988,15 @@ pub fn main(init: std.process.Init) !void {
     reg_ck.deinit();
     mem_probe.logMem(io, "post-load (poids + Packed/Cache sur device)");
 
-    // === Step 5.1 (suite) : compile forwardStep (risque nommé — cf tête de section) ===
-    log.info("Compiling forwardStep (mono-graphe 35 couches, 1er compile GPU du mono autonome) ...", .{});
+    // === Step 5.1 (suite) : compile StepTok.forward (risque nommé — cf tête de section) ===
+    log.info("Compiling StepTok.forward (gather+forwardStep+topK, mono-graphe 35 couches, 1er compile GPU du mono autonome L3) ...", .{});
     const t_compile: std.Io.Timestamp = .now(io, .awake);
-    var exe = try platform.compileFn(allocator, io, Model.forwardStep, .{ model, embeds_sym, embptls_sym, packed_sym, cache_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
+    var exe = try platform.compileFn(allocator, io, StepTok.forward, .{ model, tabs, tok_sym, packed_sym, cache_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
     log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
     mem_probe.logMem(io, "post-compile (go/no-go)");
 
-    // === Step 5.2 : boucle prefill-par-decode + argmax + arrêt ===
-    var gather_tbl = try EmbedGather.init(allocator, io, args.ckpt);
-    defer gather_tbl.deinit(io, allocator);
-
+    // === Step 5.2 → L3 : boucle prefill-par-decode + topK in-graph + arrêt ===
     var generated: std.ArrayList(i64) = .empty;
     defer generated.deinit(allocator);
     var gen_top5: std.ArrayList(Top5) = .empty; // parallèle à `generated` (diagnostic FAIL, Step 5.3)
@@ -1002,27 +1011,60 @@ pub fn main(init: std.process.Init) !void {
 
     var fed: i64 = @intCast(ids.items[0]);
     var step: usize = 0;
+    // Bounds-check (fix revue) : lu UNE FOIS avant la boucle — reprend l'invariant de feu
+    // `EmbedGather` : XLA `gather` CLAMPE silencieusement les indices hors-borne (une divergence
+    // de logits plausible mais fausse, pas un crash) et `@intCast(fed)` ci-dessous vers u32 est UB
+    // en ReleaseFast si `fed` sort de la plage. Portée : couvre le chemin `fed` (host→device) ;
+    // `t5i` issu de topK/arange est ≥ 0 par construction (pas re-borné au cast usize).
+    const vocab = model.embed_tokens.dim(.voc);
     const t0: std.Io.Timestamp = .now(io, .awake);
+    // Step 2.7 (spec [it.6]) : capturé au dernier step de prefill (cf plus bas), initialisé à t0
+    // par sûreté (jamais réellement lu à cette valeur — le prefill compte toujours ≥1 step).
+    var t_prefill_end: std.Io.Timestamp = t0;
     while (true) : (step += 1) {
-        // gather(fed) : 1 ligne bf16 par table (Task 4) → 2 Buffer.fromBytes device par step.
-        try gather_tbl.gather(io, fed);
-        var embeds_step_buf = try zml.Buffer.fromBytes(io, platform, embeds_sym.shape(), sharding, std.mem.sliceAsBytes(gather_tbl.emb_scratch));
-        var embptls_step_buf = try zml.Buffer.fromBytes(io, platform, embptls_sym.shape(), sharding, std.mem.sliceAsBytes(gather_tbl.eptl_scratch));
+        // L3 (spec §2.2) : le host ne thread plus qu'un scalaire u32 (le token à feeder) — gather
+        // + forwardStep + topK composés IN-GRAPH par StepTok (plus de Buffer.fromBytes embeds/
+        // embptls host, plus de EmbedGather).
+        if (fed < 0 or fed >= vocab) {
+            log.err("token hors vocab: {d} (vocab={d})", .{ fed, vocab });
+            return error.TokenOutOfRange;
+        }
+        var tok_host = [1]u32{@intCast(fed)};
+        var tok_buf = try zml.Buffer.fromBytes(io, platform, tok_sym.shape(), sharding, std.mem.sliceAsBytes(&tok_host));
         var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
 
         var call_args = try exe.args(allocator);
         var call_results = try exe.results(allocator);
-        call_args.set(.{ eng_buf, embeds_step_buf, embptls_step_buf, pk_buf, cache_buf, ctrl_buf });
+        call_args.set(.{ eng_buf, tabs_buf, tok_buf, pk_buf, cache_buf, ctrl_buf });
         exe.call(call_args, &call_results);
-        var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
-            zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
+        var r_t5v, var r_t5i, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
+            zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
         });
 
-        // argmax + top5 : TOUJOURS calculé (cheap, cf PLAN), ignoré tant qu'on est en prefill (sauf
+        // top5 : TOUJOURS calculé in-graph (cheap, cf PLAN), ignoré tant qu'on est en prefill (sauf
         // le dernier prefill step, qui produit s0 — cf `in_gen_phase` ci-dessous).
         const in_gen_phase = step + 1 >= ids.items.len;
-        const top5 = try top5Of(allocator, io, &r_logits);
+
+        // Top5 depuis le device (~48 octets D2H) — top1 = next token (spec §2, §4 ties d'argmax).
+        var t5v_s = try r_t5v.toSliceAlloc(allocator, io);
+        defer t5v_s.free(allocator);
+        var t5i_s = try r_t5i.toSliceAlloc(allocator, io);
+        defer t5i_s.free(allocator);
+        // dtype confirmé : `topK` délègue à `sort` (tensor.zig:3096), dont les indices sont
+        // produits par `Tensor.arange(…, .i32)` (tensor.zig:2977) — vérifié À CHAQUE step (coût
+        // nul : compare d'enum) plutôt que supposé silencieusement.
+        if (t5i_s.dtype() != .i32) {
+            log.err("t5.indices : dtype={s} ≠ i32 attendu (topK/sort, tensor.zig:2977)", .{@tagName(t5i_s.dtype())});
+            return error.UnexpectedDtype;
+        }
+        const t5i = t5i_s.items(i32);
+        const t5v = t5v_s.items(f32);
+        var top5: Top5 = undefined;
+        for (0..5) |j| {
+            top5.idx[j] = @intCast(t5i[j]);
+            top5.val[j] = t5v[j];
+        }
         const tok: i64 = @intCast(top5.idx[0]);
         if (in_gen_phase) try gen_top5.append(allocator, top5);
 
@@ -1034,9 +1076,9 @@ pub fn main(init: std.process.Init) !void {
         old_cache.fl_k.deinit();
         old_cache.fl_v.deinit();
 
-        r_logits.deinit();
-        embeds_step_buf.deinit();
-        embptls_step_buf.deinit();
+        r_t5v.deinit();
+        r_t5i.deinit();
+        tok_buf.deinit();
         step_buf.deinit();
         call_args.deinit(allocator);
         call_results.deinit(allocator);
@@ -1044,6 +1086,9 @@ pub fn main(init: std.process.Init) !void {
         // Progression périodique (motif gemma4_gen_long_gpu.zig:158) — premier signe humain d'une
         // anomalie pendant un run long (A2) : silence prolongé = suspect.
         if ((step + 1) % 256 == 0) log.info("  ... step {d} ({d} générés)", .{ step + 1, generated.items.len });
+
+        // Step 2.7 : fin du DERNIER step de prefill (nuance de mesure, cf log L3 PERF plus bas).
+        if (step + 1 == ids.items.len) t_prefill_end = .now(io, .awake);
 
         if (step + 1 < ids.items.len) {
             // Phase 1 (prefill) : argmax ci-dessus IGNORÉ (pas le dernier token du prompt).
@@ -1072,16 +1117,37 @@ pub fn main(init: std.process.Init) !void {
         fed = tok;
     }
     const elapsed = t0.untilNow(io, .awake);
+    // Step 2.7 (spec [it.6], fix revue) : `gen_elapsed` échantillonné ICI, IMMÉDIATEMENT après
+    // `elapsed` — AVANT les 4 deinit de cache ci-dessous. Si on le capturait après, leur coût
+    // (libération device, potentiellement non négligeable) polluerait la fenêtre gen_s et
+    // fausserait le tok/s de génération à la marge. Les deux `.untilNow` sont ainsi resamplés à
+    // quelques ns d'écart l'un de l'autre (back-to-back, aucun travail entre les deux) —
+    // négligeable à cette échelle.
+    const gen_elapsed = t_prefill_end.untilNow(io, .awake);
     cache_buf.sl_k.deinit();
     cache_buf.sl_v.deinit();
     cache_buf.fl_k.deinit();
     cache_buf.fl_v.deinit();
 
-    const total_steps = step + 1;
     const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
-    const tok_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(total_steps)) / elapsed_s else 0;
-    log.info("A1 PERF : {d} steps ({d} prefill + {d} génération) en {d:.3}s -> {d:.1} tok/s", .{ total_steps, ids.items.len, generated.items.len, elapsed_s, tok_per_s });
+
+    // Step 2.7 (spec [it.6]) : perf prefill/génération séparées.
+    // Nuance de mesure assumée : s0 est produit par le DERNIER call de prefill mais compté dans
+    // `generated` — le 1er token de gén coûte ~0 s dans la fenêtre gen_s. Négligeable dès ~48
+    // steps ; ne pas s'en étonner en comparant B0↔G3.
+    // API : `.untilNow` (seul mécanisme de mesure déjà utilisé/validé dans ce fichier, cf t0/
+    // t_compile ci-dessus) appliqué à `t_prefill_end` donne DIRECTEMENT la durée écoulée depuis la
+    // fin du prefill jusqu'à MAINTENANT (== gen_s) ; pf_s se déduit par soustraction. Choix
+    // délibéré vs le libellé `.since()` du plan L3_INGRAPH_PLAN.md Step 2.7 : aucune méthode de
+    // différence entre deux Timestamp PASSÉS n'est visible dans les sources locales (build
+    // distant, non vérifiable ici) — on reste sur l'API prouvée plutôt que de parier sur un nom
+    // de méthode non confirmé (cf revue Step 2.9).
+    const gen_s = @as(f64, @floatFromInt(gen_elapsed.toNanoseconds())) / std.time.ns_per_s;
+    const pf_s = elapsed_s - gen_s;
+    const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.items.len)) / pf_s else 0;
+    const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
+    log.info("L3 PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.items.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
 
     // === Step 5.3 : gate A1 ===
     if (oracle_ids) |fx| {

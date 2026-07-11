@@ -91,21 +91,36 @@ cd /data/rqz_workspace/zml && ./bazel.sh run --@zml//platforms:cuda=true \
 désormais refusé en dur par `error.CudaRequired`, échappatoire `--allow-cpu` débogage).
 ⚠ **VRAM** : le GPU peut être occupé par un autre service local (ex. Ollama, ~22 Go).
 `gemma4_gen_auto` refuse alors de démarrer : garde intégrée au lancement (`error.GpuBusy`
-si VRAM libre < 10 GiB, process occupants listés, cf `docs/VRAM_CHECK_DESIGN.md` —
-gates V1-V3 PASS 11 juil 2026, tag `gate/vram-check-pass`), échappatoire `--force-vram`.
+si VRAM libre < **20 GiB** — seuil relevé post-L3, cf plus bas — process occupants listés,
+cf `docs/VRAM_CHECK_DESIGN.md`), échappatoire `--force-vram`.
 La garde tourne aussi en `--allow-cpu` (ce flag ne force pas le CPU, l'init `.cuda` est
 tentée d'abord). Libérer : `ollama ps` puis `ollama stop <modèle>` (réversible — rechargé
 à la demande). Garde best-effort (nvidia-smi absent/cassé → warn + continue) et propre à
 `gemma4_gen_auto` — pour les AUTRES runners GPU, vérifier à la main.
 
+**L3 in-graph (livré 12 juil 2026, branche `l3-ingraph`, spec `L3_INGRAPH_DESIGN.md`)** — le
+forward devient token → token : gather des embeddings (`embed_tokens` déjà device, table
+`embed_tokens_per_layer` ajoutée via `TensorStore`) et `topK` (next token + top5 diagnostic)
+sont désormais **dans le graphe compilé** — le host ne thread plus qu'un scalaire u32 par
+step (au lieu des 2 lectures d'embeddings + D2H des logits complets de l'ancienne boucle).
+`engine.zig` reste intact d'un octet. Perf mesurée séparément par phase : prefill ~71,5 tok/s
+(gate G1, 21 steps), génération **~110-113 tok/s** (≥ 109 tok/s replay, ≥ B0 pré-L3), compile
+~17 s. VRAM : le
+gather in-graph ajoute la table `embed_tokens_per_layer` en résidence device → pic mesuré
+**~16,3 Go** (16 658 MiB), d'où la garde relevée à **20 GiB** (détail des gates : cf
+`L3_INGRAPH_DESIGN.md` § Résultats). `--selftest-gather` bascule en mode **GPU** (mini-graphe
+compilé, la garde VRAM s'y applique désormais) — il requiert un `--prompt` factice pour passer
+la validation d'arguments.
+
 **Validation réelle (11 juil 2026)** : prompt libre en français hors de toute fixture
 (« Explique-moi la fenêtre glissante d'attention en trois phrases ») → 110 tokens,
-early-stop EOT naturel, réponse correcte sur stdout, 54,5 tok/s moyenne prefill inclus.
-Validation : A1 48/48 == HF autonome complet ; A2 différentiel (autonome ≥ replay, même
-bifurcation de marge fine au step ~590 — le N/N n'est pas une propriété garantie de toute
-séquence, cf `GEN_AUTONOME_DESIGN.md` § Résultats) ; A3 early-stop EOS + « Paris » sur
-stdout. Modes de banc : `--oracle <fixture>` (comparaison à `fed`), `--ids-only`,
-`--selftest-inputs`, `--selftest-gather`.
+early-stop EOT naturel, réponse correcte sur stdout, 54,5 tok/s moyenne prefill inclus
+(mesure pré-L3 ; post-L3 la génération seule atteint ~110 tok/s, cf ci-dessus). Validation :
+A1 48/48 == HF autonome complet ; A2 différentiel (autonome ≥ replay, même bifurcation de
+marge fine au step ~590 — le N/N n'est pas une propriété garantie de toute séquence, cf
+`GEN_AUTONOME_DESIGN.md` § Résultats) ; A3 early-stop EOS + « Paris » sur stdout. Modes de
+banc : `--oracle <fixture>` (comparaison à `fed`), `--ids-only`, `--selftest-inputs`,
+`--selftest-gather` (mode GPU depuis L3, cf plus haut).
 
 ### 2.3 Fidélité en bf16 (chantier G2, PASS 4 juillet 2026)
 
@@ -466,7 +481,8 @@ d'elle-même.
 **Backlog** (ordre du planning courant, cf [`../PLANNING.md`](../PLANNING.md)) :
 
 1. Batching / flash-attention (perf GPU au-delà du mono-séquence).
-2. L3 in-graph (boucle de décode dans le graphe, réduire les 7 syncs host/step du CPU).
+2. ~~L3 in-graph (boucle de décode dans le graphe, réduire les 7 syncs host/step du CPU)~~ —
+   **fait 12 juil 2026** (cf [`L3_INGRAPH_DESIGN.md`](L3_INGRAPH_DESIGN.md) § Résultats).
 3. Runtime 100 % autonome (tokenizer intégré + early-stop EOS).
 4. ~~G2.3 bonus : cartographie de sensibilité bf16 par-op~~ — **PASS 10 juil 2026**
    (cf [`G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md)) : 12/12 familles SAFE, config combinée
