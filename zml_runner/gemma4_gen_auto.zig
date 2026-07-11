@@ -612,8 +612,8 @@ fn checkVram(gpa: std.mem.Allocator, io: std.Io) !void {
 // tête de fichier + spec §2 [it.5]).
 const StepTok = struct {
     pub fn forward(model: Model, tabs: Tabs, tok: zml.Tensor, p: PackedLong, cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-        const e = model.embed_tokens.gather(.{ .voc = tok }); // {b,s,d} bf16 brut
-        const el = tabs.eptl.gather(.{ .voc = tok }); // {b,s,lf} bf16 brut
+        const e = model.embed_tokens.gather(.{ .voc = tok }, .{}); // {b,s,d} bf16 brut
+        const el = tabs.eptl.gather(.{ .voc = tok }, .{}); // {b,s,lf} bf16 brut
         const logits, const slk, const slv, const flk, const flv = model.forwardStep(e, el, p, cache, ctrl);
         // Forme struct à un champ EXIGÉE par `Tensor.topK` (cf zml/nn.zig:1558, seul site d'appel
         // réel dans les sources ZML : `logits.topK(.{ .voc = .voc }, k, .{})`, PAS `.topK(.voc, k,
