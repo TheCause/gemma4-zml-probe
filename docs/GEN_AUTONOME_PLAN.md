@@ -509,10 +509,14 @@ pointeurs (runner, tags, tok/s).
 
 ---
 
-## Récap gates
+## Récap gates — TOUS RENDUS (10-11 juil 2026, verdicts détaillés : DESIGN § Résultats)
 
-- [ ] A0 : ids ZML == HF (2 prompts) + round-trip — tag `gate/gen-auto-a0-pass`
-- [ ] A1 : 48/48 == HF autonome complet — tag `gate/gen-auto-a1-pass`
-- [ ] A2 : N/N (≥1000) == HF — tag `gate/gen-auto-a2-pass`
-- [ ] A3 : early-stop à l'index EOT d'expected — tag `gate/gen-auto-a3-pass`
-- [ ] Non-régression E1 + replay ; non-vacuité template (FAIL documenté)
+- [x] A0 : ids ZML == HF (2 prompts) + round-trip — tag `gate/gen-auto-a0-pass`
+- [x] A1 : 48/48 == HF autonome complet — tag `gate/gen-auto-a1-pass`
+- [x] A2 : critère N/N pré-enregistré **FAIL publié** (bifurcation marge 0.006, le contrôle
+  replay bifurque au même point) → requalifié **PASS différentiel** « autonome ≥ replay »
+  (décision Régis) — tag réel `gate/gen-auto-a2-diff-pass` (pas `a2-pass`). NB : le
+  « 590 ≥ 589 » compare deux indexations décalées d'un cran (autonome s0-inclus vs replay
+  s0-exclus) — normalisé, c'est le MÊME point de bifurcation, le ≥ tient par égalité.
+- [x] A3 : early-stop à l'index EOT d'expected (+2, s0 inclus) — tag `gate/gen-auto-a3-pass`
+- [x] Non-régression E1 + replay ; non-vacuité template (FAIL de perturbation documenté)
