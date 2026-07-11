@@ -234,8 +234,11 @@ Log final : `SG PASS — {N} steps × 2 tables bit-exact (gather in-graph)`.
    cas spécial : c'est la conséquence mécanique du déplacement du dispatch).
 
 - [ ] **Step 4.2 :** deploy + build (mêmes commandes que Task 3).
-- [ ] **Step 4.3 :** run `--selftest-gather <fixture A1>` sur la 3090 → `SG PASS` attendu,
-  bit-exact. FAIL = STOP, diagnostiquer avant les gates suivants.
+- [ ] **Step 4.3 :** run `--prompt "sg" --selftest-gather <fixture A1>` sur la 3090 → `SG PASS`
+  attendu, bit-exact. ⚠ Le `--prompt` factice est REQUIS : post-déplacement, le dispatch SG est
+  en aval du `args.prompt orelse error.MissingArgument` (l.782) — choix assumé (zéro code
+  spécial), à documenter dans la constante `usage` (`--selftest-gather f (requiert un --prompt
+  factice)`). FAIL = STOP, diagnostiquer avant les gates suivants.
 - [ ] **Step 4.4 : commit** `feat(gen-auto): SG — selftest-gather converti au gather in-graph (bit-exact vs fixture A1)`.
 
 ## Task 5 : gates G1 (fidélité courte) + G1v (non-vacuité)
