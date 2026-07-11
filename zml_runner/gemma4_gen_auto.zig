@@ -9,7 +9,8 @@
 // + `topK`.
 //
 // CLI : gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "..." [--max-tokens N]
-//       [--oracle fixture] [--ids-only] [--force-vram] [--selftest-inputs f] [--selftest-gather f]
+//       [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram] [--selftest-inputs f]
+//       [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 // Task 2 (gate A0) : parsing CLI, chargement tokenizer ZML natif, rendu du chat template,
 // encodage, préfixage BOS explicite, mode `--ids-only` (log des ids finaux + round-trip détok).
 // Task 3 : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`, formule
@@ -588,6 +589,13 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         defer eptl_s.free(allocator);
         const emb_bits = emb_s.items(u16);
         const eptl_bits = eptl_s.items(u16);
+        // Garde longueur = shape ET dtype d'un coup (même standard que l'assert i32 du chemin
+        // réel) : un gather upcasté bf16→f32 doublerait len et produirait un « mismatch »
+        // trompeur au lieu d'une erreur qualifiée.
+        if (emb_bits.len != d_u or eptl_bits.len != lf_u) {
+            log.err("SG : longueurs D2H inattendues (emb={d}≠{d}, eptl={d}≠{d}) — dtype/shape du gather a dérivé ?", .{ emb_bits.len, d_u, eptl_bits.len, lf_u });
+            return error.UnexpectedShape;
+        }
 
         const emb_fx_row = embeds_fx[k * d_u .. (k + 1) * d_u];
         const eptl_fx_row = embptls_fx[k * lf_u .. (k + 1) * lf_u];
@@ -910,7 +918,7 @@ pub fn main(init: std.process.Init) !void {
     // docs/L3_INGRAPH_DESIGN.md §5 SG) : dispatché ICI, APRÈS la garde VRAM + Platform.init +
     // garde CUDA dure + sharding, AVANT le chargement du modèle complet (SG ne charge que les 2
     // tables emb/eptl via SgTabs, pas `Model`). Conséquence mécanique du déplacement : ce point est
-    // en aval du check --prompt (l.~769) — un --prompt factice est donc REQUIS (cf `usage`), et
+    // en aval du check --prompt (cf `prompt_text` plus haut) — un --prompt factice est donc REQUIS (cf `usage`), et
     // --allow-cpu/--force-vram s'appliquent à SG exactement comme au run normal (aucun cas spécial).
     if (args.selftest_gather) |fixture_path| {
         try selftestGather(allocator, io, platform, sharding, args.ckpt, fixture_path);
@@ -928,6 +936,8 @@ pub fn main(init: std.process.Init) !void {
     // Repli si le gather rank-2 ne compile pas (P5.4 n'a validé que des ids 1-D) : `tok_sym` en
     // `{ .s }` shape `[1]`, puis dans StepTok.forward : `.gather(.{ .voc = tok }).reshape(.{ 1, 1, D }).withTags(.{ .b, .s, .d })` (reshape layout-preserving + re-tag, piège ZML #1 connu) — idem `el` avec LF.
     // Repli dtype : si le gather exige des indices i32, passer tok_sym/host en `.i32` (le vocab < 2^31, cast sans perte).
+    // ⚠ Si le dtype/shape des indices change ICI, changer AUSSI le tok_sym de selftestGather (SG) —
+    // sinon SG resterait vert en validant autre chose que ce que le runtime fait.
     const packed_sym = PackedLong{
         .embeds = zml.Tensor.init(.{ L_MAX, 1, 1, D }, .bf16).withTags(.{ .step, .b, .s, .d }),
         .embptls = zml.Tensor.init(.{ L_MAX, 1, 1, LF }, .bf16).withTags(.{ .step, .b, .s, .lf }),
@@ -1000,10 +1010,10 @@ pub fn main(init: std.process.Init) !void {
     var fed: i64 = @intCast(ids.items[0]);
     var step: usize = 0;
     // Bounds-check (fix revue) : lu UNE FOIS avant la boucle — reprend l'invariant de feu
-    // `EmbedGather` (checkVram-adjacent, piège relevé en revue) : XLA `gather` CLAMPE
-    // silencieusement les indices hors-borne (une divergence de logits plausible mais fausse,
-    // pas un crash) et `@intCast(fed)` ci-dessous vers u32 est UB en ReleaseFast si `fed` sort de
-    // la plage — les deux modes de défaillance sont silencieux sans ce garde-fou explicite.
+    // `EmbedGather` : XLA `gather` CLAMPE silencieusement les indices hors-borne (une divergence
+    // de logits plausible mais fausse, pas un crash) et `@intCast(fed)` ci-dessous vers u32 est UB
+    // en ReleaseFast si `fed` sort de la plage. Portée : couvre le chemin `fed` (host→device) ;
+    // `t5i` issu de topK/arange est ≥ 0 par construction (pas re-borné au cast usize).
     const vocab = model.embed_tokens.dim(.voc);
     const t0: std.Io.Timestamp = .now(io, .awake);
     // Step 2.7 (spec [it.6]) : capturé au dernier step de prefill (cf plus bas), initialisé à t0
@@ -1040,8 +1050,8 @@ pub fn main(init: std.process.Init) !void {
         var t5i_s = try r_t5i.toSliceAlloc(allocator, io);
         defer t5i_s.free(allocator);
         // dtype confirmé : `topK` délègue à `sort` (tensor.zig:3096), dont les indices sont
-        // produits par `Tensor.arange(…, .i32)` (tensor.zig:2977) — vérifié une fois au runtime
-        // (pas de coût mesurable) plutôt que supposé silencieusement.
+        // produits par `Tensor.arange(…, .i32)` (tensor.zig:2977) — vérifié À CHAQUE step (coût
+        // nul : compare d'enum) plutôt que supposé silencieusement.
         if (t5i_s.dtype() != .i32) {
             log.err("t5.indices : dtype={s} ≠ i32 attendu (topK/sort, tensor.zig:2977)", .{@tagName(t5i_s.dtype())});
             return error.UnexpectedDtype;
