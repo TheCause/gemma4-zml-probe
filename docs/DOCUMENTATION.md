@@ -89,10 +89,14 @@ cd /data/rqz_workspace/zml && ./bazel.sh run --@zml//platforms:cuda=true \
 
 ⚠ Le flag `--@zml//platforms:cuda=true` est OBLIGATOIRE (sinon repli CPU silencieux —
 désormais refusé en dur par `error.CudaRequired`, échappatoire `--allow-cpu` débogage).
-⚠ **Vérifier la VRAM avant de lancer** : le GPU peut être occupé par un autre service
-local (ex. Ollama, ~22 Go). Si occupé : OOM dès la matérialisation (+ crash d'error-path
-upstream ZML, cosmétique). Libérer : `ollama stop <modèle>` (réversible — rechargé à la
-demande).
+⚠ **VRAM** : le GPU peut être occupé par un autre service local (ex. Ollama, ~22 Go).
+`gemma4_gen_auto` refuse alors de démarrer : garde intégrée au lancement (`error.GpuBusy`
+si VRAM libre < 10 GiB, process occupants listés, cf `docs/VRAM_CHECK_DESIGN.md` —
+gates V1-V3 PASS 11 juil 2026, tag `gate/vram-check-pass`), échappatoire `--force-vram`.
+La garde tourne aussi en `--allow-cpu` (ce flag ne force pas le CPU, l'init `.cuda` est
+tentée d'abord). Libérer : `ollama ps` puis `ollama stop <modèle>` (réversible — rechargé
+à la demande). Garde best-effort (nvidia-smi absent/cassé → warn + continue) et propre à
+`gemma4_gen_auto` — pour les AUTRES runners GPU, vérifier à la main.
 
 **Validation réelle (11 juil 2026)** : prompt libre en français hors de toute fixture
 (« Explique-moi la fenêtre glissante d'attention en trois phrases ») → 110 tokens,

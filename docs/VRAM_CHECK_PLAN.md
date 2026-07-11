@@ -235,13 +235,15 @@ Attendu : warn
   Attendu : la garde passe SILENCIEUSEMENT (aucune ligne VRAM), génération normale, early-stop
   EOT, « Paris » sur stdout (référence : DOCUMENTATION.md §2.2). Archiver → `logs/vram_check_v3.log`.
 
-- [ ] **Step 5.3 : commit logs + tag**
+- [ ] **Step 5.3 : consigner + tag** — amendement en cours d'exécution : `logs/` est ENTIÈREMENT
+  gitignored dans ce repo (aucun log de gate n'a jamais été tracké — les logs restent locaux, la
+  doc porte les résultats). Donc : PAS de `git add logs/…` ; ajouter une section « Résultats
+  (11 juil 2026) » à `docs/VRAM_CHECK_DESIGN.md` §6 (une ligne par gate : état initial mesuré,
+  verdict, référence du log local), committée avec la doc en Task 6. Le tag reste :
 
 ```bash
 cd ~/dev/gemma4-zml-probe
-git add logs/vram_check_v1.log logs/vram_check_v2.log logs/vram_check_v3.log
-git commit -m "test(gen-auto): gates V1-V3 garde VRAM PASS sur 3090 (mord/échappatoire/non-régression)"
-git tag gate/vram-check-pass
+git tag gate/vram-check-pass   # après le commit doc de la Task 6
 ```
 
 ## Task 6 : documentation + solde PLANNING

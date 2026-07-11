@@ -82,6 +82,15 @@ sortie concaténée.
 | **V2 — échappatoire** | idem + `--force-vram` | check sauté (l'OOM assumé peut suivre, c'est le contrat) |
 | **V3 — non-régression** | GPU libre | génération normale, sortie identique à avant (check neutre) |
 
+**Résultats (11 juil 2026, 3090)** — exécution subagent-driven, logs locaux (`logs/` est
+gitignored dans ce repo — les logs de gates restent hors git, la doc porte les résultats) :
+
+| Gate | État initial mesuré | Verdict |
+|---|---|---|
+| V1 | Ollama résident (llama-server, 22 588 MiB), 1 780 MiB libres | **PASS** — `GPU occupé — VRAM libre 1.7 GiB < 10 GiB requis`, process listé, suggestion `ollama ps`/`ollama stop`, exit `error.GpuBusy` propre, zéro OOM / zéro crash — `logs/vram_check_v1.log` |
+| V2 | idem + `--force-vram` | **PASS** — warn « garde VRAM sautée », backend cuda atteint, OOM assumé (36 MiB à la matérialisation) + crash error-path upstream connu (cosmétique), exit 134 — `logs/vram_check_v2.log` |
+| V3 | GPU libéré (24 373 MiB libres) | **PASS** — garde totalement silencieuse, « Paris », early-stop EOT, 51,0 tok/s, exit 0 — `logs/vram_check_v3.log` |
+
 Test Zig du parsing CSV si la toolchain Bazel du repo le permet sans cérémonie, sinon couvert par
 V1-V3.
 

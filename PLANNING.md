@@ -36,9 +36,12 @@
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
-- [B] **Check VRAM au lancement de `gemma4_gen_auto`** — message explicite « GPU occupé par
-  <process>, libérer d'abord (ollama stop …) » au lieu de l'OOM cryptique + crash error-path
-  upstream (cf garde-fou contention, vécu 11 juil).
+- [x] **Check VRAM au lancement de `gemma4_gen_auto`** — **LIVRÉ 11 juil 2026** (branche
+  `vram-check`, spec `docs/VRAM_CHECK_DESIGN.md`, gates V1-V3 PASS, tag `gate/vram-check-pass`) :
+  garde intégrée `error.GpuBusy` si VRAM libre < 10 GiB (process occupants listés, suggestion
+  `ollama stop`), échappatoire `--force-vram`, best-effort (nvidia-smi absent → warn+continue).
+  Errata de revue : la garde tourne AUSSI en `--allow-cpu` (le flag ne force pas le CPU, l'init
+  `.cuda` est tentée d'abord). Ne couvre QUE gen_auto — autres runners GPU : vérifier à la main.
 - [x] **Runtime 100 % autonome** — **LIVRÉ 10-11 juil 2026** (branche `gen-autonome`,
   spec `docs/GEN_AUTONOME_DESIGN.md`, plan `docs/GEN_AUTONOME_PLAN.md`) : binaire
   `gemma4_gen_auto` texte→texte (tokenizer ZML natif, chat template Zig, prefill-par-decode,
@@ -63,7 +66,9 @@
   OOM dès la matérialisation (`CreateBuffersForAsyncHostToDevice … 6.00MiB`) suivi d'un crash
   `General protection exception` dans `io.zig deinit` — ce crash est un bug d'error-path UPSTREAM
   ZML (double-free post-OOM), pas notre code ; l'OOM est la vraie erreur. Libération réversible :
-  `ollama stop <modèle>` (keep_alive recharge à la demande côté service).
+  `ollama stop <modèle>` (keep_alive recharge à la demande côté service). Depuis le 11 juil,
+  `gemma4_gen_auto` intègre cette vérification (garde `error.GpuBusy`, cf item [x] check VRAM) —
+  le réflexe `nvidia-smi` manuel reste NÉCESSAIRE pour tous les autres runners GPU.
 - **Piège `deploy_to_3090.sh`** : exige `ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz`
   en env — les défauts sont des placeholders (`user@gpu-host`) → échec de résolution DNS ; avec la
   sortie redirigée, le deploy rate SILENCIEUSEMENT et on teste l'ancien binaire (vécu en
