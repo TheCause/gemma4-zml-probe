@@ -3,7 +3,7 @@
 // Le moteur engine.zig est INTACT — entrée compilée : forwardStep (embeds host token-dépendants).
 //
 // CLI : gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt "..." [--max-tokens N]
-//       [--oracle fixture] [--ids-only] [--selftest-inputs f] [--selftest-gather f]
+//       [--oracle fixture] [--ids-only] [--force-vram] [--selftest-inputs f] [--selftest-gather f]
 // Task 2 (gate A0) : parsing CLI, chargement tokenizer ZML natif, rendu du chat template,
 // encodage, préfixage BOS explicite, mode `--ids-only` (log des ids finaux + round-trip détok).
 // Task 3 : mode `--selftest-inputs <fixture>` — cos/sin RoPE full (`ropeFull`, formule
@@ -63,11 +63,13 @@ const Args = struct {
     allow_cpu: bool = false,
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
+    force_vram: bool = false,
 };
 
 const usage =
     "Usage: gemma4_gen_auto <model.safetensors> <tokenizer.json> --prompt \"...\" " ++
     "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
+    "[--force-vram] " ++
     "[--selftest-inputs f] [--selftest-gather f]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
@@ -113,6 +115,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.ids_only = true;
         } else if (std.mem.eql(u8, a, "--allow-cpu")) {
             args.allow_cpu = true;
+        } else if (std.mem.eql(u8, a, "--force-vram")) {
+            args.force_vram = true;
         } else if (std.mem.eql(u8, a, "--selftest-inputs")) {
             i += 1;
             if (i >= process_args.len) {
@@ -682,6 +686,77 @@ fn top5Of(allocator: std.mem.Allocator, io: std.Io, logits_buf: *zml.Buffer) !To
     return top;
 }
 
+// ============================================================================================
+// Garde VRAM au lancement (docs/VRAM_CHECK_DESIGN.md) — incident du 11 juil 2026 : Ollama à
+// ~22/24 Go → OOM dès la matérialisation + crash `io.zig deinit` (double-free post-OOM, bug
+// d'error-path UPSTREAM ZML, cosmétique — l'OOM est la vraie erreur). Best-effort : la garde ne
+// bloque JAMAIS à tort — nvidia-smi absent/cassé/illisible → warn + continue (l'OOM reste le
+// filet) ; seul « VRAM libre < seuil » mesuré avec succès fait échouer le lancement.
+// ============================================================================================
+
+// Seuil requis : mesure G2.1 = 8,5 GiB réels pour ce modèle (poids déjà bf16 on-device,
+// cf docs/G2_BF16_FIDELITY.md). Marge honnête : le binaire initialise CUDA avec BFC
+// `memory_fraction 0.90` → à 10 GiB libres, réserve utilisable ≈ 9 GiB, soit ~0,5 GiB
+// au-dessus des 8,5 mesurés (pas 1,5). Pas de flag de réglage (YAGNI).
+const MIN_FREE_VRAM_GIB: u64 = 10;
+
+// Parse `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` : première ligne =
+// GPU 0 (VM mono-GPU), entier en MiB. null = sortie illisible (l'appelant warn + continue).
+fn parseFreeMiB(stdout: []const u8) ?u64 {
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    const first = lines.next() orelse return null;
+    const trimmed = std.mem.trim(u8, first, " \t\r");
+    if (trimmed.len == 0) return null;
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
+
+fn checkVram(gpa: std.mem.Allocator, io: std.Io) !void {
+    const res = std.process.run(gpa, io, .{
+        .argv = &.{ "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits" },
+    }) catch |err| {
+        log.warn("garde VRAM sautée : nvidia-smi indisponible ({s}) — machine sans GPU ?", .{@errorName(err)});
+        return;
+    };
+    defer gpa.free(res.stdout);
+    defer gpa.free(res.stderr);
+    switch (res.term) {
+        .exited => |code| if (code != 0) {
+            log.warn("garde VRAM sautée : nvidia-smi exit={d}", .{code});
+            return;
+        },
+        else => {
+            log.warn("garde VRAM sautée : nvidia-smi terminé anormalement", .{});
+            return;
+        },
+    }
+    const free_mib = parseFreeMiB(res.stdout) orelse {
+        log.warn("garde VRAM sautée : sortie nvidia-smi illisible", .{});
+        return;
+    };
+    if (free_mib >= MIN_FREE_VRAM_GIB * 1024) return;
+
+    // Une décimale en arithmétique ENTIÈRE (pas de format float : API std.fmt 0.16-dev mouvante).
+    const gib10 = free_mib * 10 / 1024;
+    log.err("GPU occupé — VRAM libre {d}.{d} GiB < {d} GiB requis", .{ gib10 / 10, gib10 % 10, MIN_FREE_VRAM_GIB });
+    // Déviation assumée vs spec §2 : pas de `parseComputeApps` structuré — les lignes CSV brutes
+    // trimées suffisent au message (PID, nom, MiB lisibles) et restent best-effort.
+    if (std.process.run(gpa, io, .{
+        .argv = &.{ "nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader" },
+    })) |apps| {
+        defer gpa.free(apps.stdout);
+        defer gpa.free(apps.stderr);
+        var it = std.mem.splitScalar(u8, apps.stdout, '\n');
+        while (it.next()) |line| {
+            const l = std.mem.trim(u8, line, " \t\r");
+            if (l.len != 0) log.err("  {s}", .{l});
+        }
+    } else |err| {
+        log.warn("liste des process compute indisponible ({s})", .{@errorName(err)});
+    }
+    log.err("Libérer d'abord : `ollama ps` puis `ollama stop <modèle>` (réversible), ou --force-vram pour tenter quand même", .{});
+    return error.GpuBusy;
+}
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -766,6 +841,15 @@ pub fn main(init: std.process.Init) !void {
             return error.RoundTripFailed;
         }
         return;
+    }
+
+    // === Garde VRAM (docs/VRAM_CHECK_DESIGN.md) — avant tout travail GPU. Les modes host-only
+    // (--selftest-inputs/--selftest-gather/--ids-only) ont déjà early-return au-dessus ; en
+    // --allow-cpu le GPU est hors sujet. ===
+    if (args.force_vram) {
+        log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
+    } else if (!args.allow_cpu) {
+        try checkVram(allocator, io);
     }
 
     // === --oracle : lit la fixture AVANT tout (positions[0] = seq_len attendu == ids.len ; fed =
