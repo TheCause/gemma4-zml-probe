@@ -449,6 +449,17 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# Task 2 (gate A0) — runtime AUTONOME texte→texte : CLI + tokenizer ZML natif + chat template Zig.
+# Le tokenizer est exposé via le module zml (zml.zig: `pub const tokenizer = @import("zml/tokenizer")`)
+# → pas de dep séparée //zml/tokenizer (cf examples/llm/main.zig:168, mêmes deps que ci-dessous).
+zig_binary(
+    name = "gemma4_gen_auto",
+    main = "gemma4_gen_auto.zig",
+    srcs = ["engine.zig", "mem_probe.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",

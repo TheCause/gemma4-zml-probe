@@ -73,8 +73,27 @@ Chaîne complète démontrée : prompt texte → chat template Gemma → génér
 Démonstration : « What is the capital of France? Answer in one word. » → ZML GPU **48/48 == HF**
 (108 tok/s) → texte **« Paris »** → round-trip **48/48 PASS**.
 
-Limite assumée : le banc est validé **contre** l'oracle HF (HF tokenise et fixe la longueur) ; un
-runtime 100 % autonome (tokenizer intégré + early-stop EOS) est un développement futur.
+**Runtime 100 % autonome (livré 10-11 juil 2026, gates A0-A3)** — l'ex-« limite assumée »
+(banc validé contre l'oracle HF) est levée : `gemma4_gen_auto` est un binaire texte→texte
+qui ne dépend plus que des poids et du `tokenizer.json` (tokenizer ZML natif + chat template
+Zig + prefill-par-decode + early-stop EOS + détok). Usage :
+
+```bash
+cd /data/rqz_workspace/zml && ./bazel.sh run --@zml//platforms:cuda=true \
+  //examples/rqz:gemma4_gen_auto -- \
+  /data/gemma4-zml-probe/weights/model.safetensors \
+  <chemin>/tokenizer.json \
+  --prompt "What is the capital of France? Answer in one word." [--max-tokens 200]
+# stdout : réponse : "Paris"
+```
+
+⚠ Le flag `--@zml//platforms:cuda=true` est OBLIGATOIRE (sinon repli CPU silencieux —
+désormais refusé en dur par `error.CudaRequired`, échappatoire `--allow-cpu` débogage).
+Validation : A1 48/48 == HF autonome complet ; A2 différentiel (autonome ≥ replay, même
+bifurcation de marge fine au step ~590 — le N/N n'est pas une propriété garantie de toute
+séquence, cf `GEN_AUTONOME_DESIGN.md` § Résultats) ; A3 early-stop EOS + « Paris » sur
+stdout. Modes de banc : `--oracle <fixture>` (comparaison à `fed`), `--ids-only`,
+`--selftest-inputs`, `--selftest-gather`.
 
 ### 2.3 Fidélité en bf16 (chantier G2, PASS 4 juillet 2026)
 

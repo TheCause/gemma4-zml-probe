@@ -187,10 +187,14 @@ const LF: i64 = 8960;
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
 const PackedLong = engine.Packed(true);
 
-// Chat template Gemma — VÉRITÉ = repr() du step 1.1, recopié ici à l'octet près.
-// (la conformité est le gate A0, pas une hypothèse)
+// Chat template Gemma — VÉRITÉ = repr() du step 1.1 (mesuré 10 juil) :
+//   '<bos><|turn>user\nPROMPT<turn|>\n<|turn>model\n'
+// ⚠ Les tokens de tour sont <|turn>/(id 105) et <turn|>/(id 106) — PAS <start_of_turn>/<end_of_turn>.
+// BOS (id 2) : PRÉFIXÉ en id (l'encoder ZML n'ajoute AUCUN token spécial, Task 0) — le rendu
+// texte ci-dessous commence donc APRÈS <bos>. Ids de réf complets (prompt capital of France) :
+//   [2, 105, 2364, 107, …, 106, 107, 105, 4368, 107]
 fn renderChatTemplate(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "<start_of_turn>user\n{s}<end_of_turn>\n<start_of_turn>model\n", .{prompt});
+    return std.fmt.allocPrint(allocator, "<|turn>user\n{s}<turn|>\n<|turn>model\n", .{prompt});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -287,14 +291,26 @@ sl `{12,1,1,L_MAX,256}` ×2, fl `{3,1,1,L_MAX,512}` ×2).
 - [ ] **Step 3.3 : Selftest vs fixture — mode `--selftest-inputs <fixture>`**
 
 Charge la fixture A1 (49) et compare, pour chacun de ses `n_decode` steps k (position
-`p = seq_len + k` lue de `positions[k]`) : cos/sin host vs fixture (`max_abs ≤ 1e-6`),
+`p = seq_len + k` lue de `positions[k]`) : cos/sin host vs fixture (tolérance ci-dessous),
 masques host vs fixture (**égalité bit-exacte**, valeurs ∈ {0, MASK_MIN}), positions.
+
+> **Tolérance cos/sin — réalité mesurée (10 juil), pas le `≤ 1e-6` initialement visé** : le
+> `pow()` f32 de Zig (libm) et celui de PyTorch arrondissent `theta**exp` à 1 ULP l'un de
+> l'autre sur certains `inv_freq[i]` (aucun des deux n'est « le bon », vérifié en précision
+> arbitraire). L'erreur d'angle résultante croît **linéairement en p** (Δangle ≈ 2 ULP × p ×
+> ~6e-8 ≈ 1.2e-7×p), propagée par sin/cos à pente ≤ 1 : plancher 2^-18 = 3.8e-6 aux positions
+> courtes (p ≤ 68, fixture 48) ; 6.0e-5 mesuré à p = 612 (fixture longue ; borne 2-ULP 7.3e-5,
+> cohérente). Le selftest applique donc `tol(p) = 1e-5 + 1.5e-7×p` PAR STEP (dérivation
+> complète en commentaire de `cosSinTol` dans le runner) et les DEUX fixtures doivent PASS.
 
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_custom.safetensors'
+# + fixture longue (positions jusqu'à ~1023 — couvre le régime p ≥ 512 où le masque sliding mord) :
+ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --selftest-inputs /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
-Expected: `SELFTEST INPUTS PASS (48 steps, cos/sin max_abs=…e-7, masks bit-exact, positions ==)`.
-Si cos/sin FAIL : la formule 3.1 est mal transcrite — diff sur les 8 premières valeurs.
+Expected (les deux runs) : `SELFTEST INPUTS PASS (N steps, cos/sin max_abs=… max_ratio=… de tol(p), masks bit-exact, positions ==)`
+avec `max_ratio ≤ 1` (le critère). Si cos/sin FAIL avec un écart de plusieurs ordres de grandeur
+au-dessus de tol(p) : la formule 3.1 est mal transcrite — diff sur les 8 premières valeurs.
 
 - [ ] **Step 3.4 : Commit**
 
@@ -434,8 +450,9 @@ git tag gate/gen-auto-a1-pass
 ```bash
 ssh ia@192.168.1.163 '... //examples/rqz:gemma4_gen_auto -- <weights> $TOKJSON --prompt "<prompt exact du step 1.4>" --oracle /data/gemma4-zml-probe/gen_auto_long.safetensors'
 ```
-Expected: `A2 PASS — N/N argmax-match` (N ≥ 1000, ~10 s de génération + prefill). Reporter
-le tok/s (référence : 109 tok/s en replay).
+Expected: `A2 PASS — N/N argmax-match` (N = 999 : fixture générée au plafond structurel
+exact, seq_len 25 + 999 = L_MAX — mieux que le « ≥ 1000 » nominal ; ~10 s de génération +
+prefill). Reporter le tok/s (référence : 109 tok/s en replay).
 
 - [ ] **Step 6.2 : Commit (doc statut) + tag `gate/gen-auto-a2-pass`**
 
@@ -492,10 +509,14 @@ pointeurs (runner, tags, tok/s).
 
 ---
 
-## Récap gates
+## Récap gates — TOUS RENDUS (10-11 juil 2026, verdicts détaillés : DESIGN § Résultats)
 
-- [ ] A0 : ids ZML == HF (2 prompts) + round-trip — tag `gate/gen-auto-a0-pass`
-- [ ] A1 : 48/48 == HF autonome complet — tag `gate/gen-auto-a1-pass`
-- [ ] A2 : N/N (≥1000) == HF — tag `gate/gen-auto-a2-pass`
-- [ ] A3 : early-stop à l'index EOT d'expected — tag `gate/gen-auto-a3-pass`
-- [ ] Non-régression E1 + replay ; non-vacuité template (FAIL documenté)
+- [x] A0 : ids ZML == HF (2 prompts) + round-trip — tag `gate/gen-auto-a0-pass`
+- [x] A1 : 48/48 == HF autonome complet — tag `gate/gen-auto-a1-pass`
+- [x] A2 : critère N/N pré-enregistré **FAIL publié** (bifurcation marge 0.006, le contrôle
+  replay bifurque au même point) → requalifié **PASS différentiel** « autonome ≥ replay »
+  (décision Régis) — tag réel `gate/gen-auto-a2-diff-pass` (pas `a2-pass`). NB : le
+  « 590 ≥ 589 » compare deux indexations décalées d'un cran (autonome s0-inclus vs replay
+  s0-exclus) — normalisé, c'est le MÊME point de bifurcation, le ≥ tient par égalité.
+- [x] A3 : early-stop à l'index EOT d'expected (+2, s0 inclus) — tag `gate/gen-auto-a3-pass`
+- [x] Non-régression E1 + replay ; non-vacuité template (FAIL de perturbation documenté)

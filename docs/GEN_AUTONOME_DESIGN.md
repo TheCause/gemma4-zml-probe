@@ -1,8 +1,26 @@
-# Runtime autonome — Design (spec approuvée)
+# Runtime autonome — Design (spec approuvée — IMPLÉMENTÉE, 4 gates rendus)
 
-> **Statut** : spec validée par Régis le 10 juil 2026 (brainstorming 4 sections, 4/4 OK).
+> **Statut** : spec validée par Régis le 10 juil 2026 (brainstorming 4 sections, 4/4 OK) ;
+> **implémentée les 10-11 juil** (branche `gen-autonome`, exécution subagent-driven).
 > **But** : un binaire ZML texte→texte SANS oracle HF à l'usage — le banc, lui, reste validé
 > CONTRE HF (les gates ci-dessous). Ferme l'item backlog « Runtime 100 % autonome ».
+
+## Résultats (10-11 juil 2026)
+
+| Gate | Verdict | Mesures clés |
+|---|---|---|
+| A0 tokenizer+template | **PASS** (tag `gate/gen-auto-a0-pass`) | ids == HF bit-exact sur 2 prompts ; round-trip détok ; ⚠ tokens de tour RÉELS `<|turn>`/105, `<turn|>`/106 (pas start/end_of_turn) ; EOT extrait = 106 (piège : lookup `<end_of_turn>` → `<unk>` silencieux) |
+| A1 prefill-par-decode | **PASS** (tag `gate/gen-auto-a1-pass`) | **48/48 == HF, autonome complet, zéro input fixture** ; backend cuda, compile mono forwardStep GPU 16.7-17.4 s (risque nommé : non matérialisé), 75-94 tok/s |
+| A2 bout-en-bout long | **critère pré-enregistré N/N : FAIL — requalifié PASS au critère différentiel (décision Régis 10 juil)** | Autonome : 916/999, 1re bifurcation step gen 590 (pos 615), marge top1-top2 **0.006** (15.1260 vs 15.1197). **Contrôle replay (inputs HF exacts) : MÊME bifurcation step 589, mêmes tokens (12266 vs 25680), 997/999** (le replay se resynchronise par steps forcés ; l'autonome propage). Lecture : l'autonomie n'ajoute AUCUNE dégradation mesurable (590 steps parfaits ≥ replay) ; c'est ZML-fp32 vs HF-fp32-CUDA qui ne tient pas le N/N sur séquence à marges fines — le 1020/1020 de S46 était une propriété de S46. **Critère requalifié : A2-diff = « autonome ≥ replay sur la même fixture » → PASS (590 ≥ 589)** ; le FAIL du critère original est publié ici même (null-result, pattern G2.0 : mesurer ce que la référence s'autorise) |
+| A3 early-stop EOS | **PASS** (tag `gate/gen-auto-a3-pass`) | Free-run : stop après exactement **i+2 = 2 tokens** (EOT à l'index 0 d'`expected`), dernier = EOT ; EOT strippé avant détok ; **stdout : `réponse : "Paris"`** — pipeline texte→texte complet |
+| Non-régression | **PASS** (11 juil) | E1 4/4 (`[1018,6398,25967,53121]` == decode4 == HF) ; replay GPU 48/48 — le moteur n'a pas bougé d'un octet |
+| Non-vacuité | **PASS** (11 juil) | Template perturbé (`\n` après `user` retiré) → ids `{2,105,2364,3689,…}` (20 ids, le 107 disparaît) ≠ référence `{2,105,2364,107,…}` (21 ids) — le gate A0 discrimine ; restauration vérifiée (ids == référence, round-trip PASS, tree propre) |
+
+**Piège découvert (coût réel : 1 run tué en thrash)** : sans le flag de build
+`--@zml//platforms:cuda=true`, `bazel run` ET l'exécution directe du binaire retombent en
+**CPU silencieux** (libpjrt_cuda absente des runfiles) → compile/boucle XLA-CPU du mono =
+mur mémoire. Mitigé en dur : `error.CudaRequired` sauf `--allow-cpu` (débogage), ligne de
+log `backend = …` obligatoire. Cf ENGINE_LOG.md § Validation GPU 28 juin (cause racine).
 
 ## 1. But et périmètre (décisions de cadrage)
 
@@ -60,16 +78,20 @@ prompt (CLI) → chat template Gemma (Zig) → tokenizer ZML → ids[]
    parse** (format SentencePiece/Gemma) — c'est le premier step du plan, avant tout
    le reste.
 2. **Chat template** : reproduit en Zig (il ne vit PAS dans `tokenizer.json`) —
-   format Gemma `<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n`,
-   à vérifier caractère près contre l'oracle 49 (**la conformité est un gate, pas une
-   hypothèse** — gate A0).
+   **mesuré (Task 1, repr() HF)** : `<bos><|turn>user\n{prompt}<turn|>\n<|turn>model\n` —
+   les tokens de tour de CE tokenizer sont `<|turn>` (105) / `<turn|>` (106), pas les
+   `<start_of_turn>`/`<end_of_turn>` classiques de la famille Gemma. Conformité vérifiée
+   caractère près contre l'oracle 49 (**gate A0**).
 3. **Gather embeds host** : lecture streaming depuis `model.safetensors` (le pattern qui a
    résolu l'OOM du L2 CPU, repris de `gemma4_gchunk_auto`) : par token, lignes
    `embed_tokens[id]` et `embed_tokens_per_layer[id]` injectées **BRUTES (bf16, sans
    scaling)** — les scalings ScaledWordEmbedding ×√1536 et ×16 sont DÉJÀ dans le graphe
    (`EMBED_SCALE` engine.zig:644, `SQRT_PLE` engine.zig:535 ; doc `forwardStep` : « AVANT
    scale √1536, brut »). Les appliquer host serait un DOUBLE scaling → divergence garantie.
-4. **EOS** : id de `<end_of_turn>` extrait du tokenizer au démarrage (pas hardcodé).
+4. **EOS** : id du token de fin de tour extrait du tokenizer au démarrage (pas hardcodé).
+   **Mesuré (Task 1)** : `<turn|>` = **106**. ⚠ Piège consigné : `convert_tokens_to_ids("<end_of_turn>")`
+   retourne silencieusement `<unk>` (3) — ce token n'existe pas dans ce vocab ; extraire
+   l'EOT du champ `eot_token` de la special_tokens_map, jamais par lookup de chaîne supposée.
    Early-stop + garde `--max-tokens` (défaut 200) + garde
    `len(prompt_ids) + max_tokens ≤ L_MAX` (sinon erreur claire au lancement).
 5. **Détokenisation** : decoder ZML sur les ids générés ; round-trip sanity (re-encode du

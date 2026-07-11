@@ -36,8 +36,16 @@
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
-- [M] **Runtime 100 % autonome** — tokenizer intégré + early-stop EOS (aujourd'hui le banc est
-  validé CONTRE l'oracle HF ; limite assumée).
+- [x] **Runtime 100 % autonome** — **LIVRÉ 10-11 juil 2026** (branche `gen-autonome`,
+  spec `docs/GEN_AUTONOME_DESIGN.md`, plan `docs/GEN_AUTONOME_PLAN.md`) : binaire
+  `gemma4_gen_auto` texte→texte (tokenizer ZML natif, chat template Zig, prefill-par-decode,
+  early-stop EOS, détok stdout). Gates : A0 ids==HF bit-exact ; A1 **48/48 autonome complet**
+  (75-94 tok/s) ; A2 critère N/N FAIL publié → requalifié PASS différentiel (autonome ≥
+  replay, même bifurcation marge 0.006 au step ~590 — décision Régis) ; A3 early-stop
+  « Paris ». Non-régression E1+replay PASS, non-vacuité template PASS. Pièges neufs :
+  tokens de tour `<|turn>`/`<turn|>` (EOT=106, lookup `<end_of_turn>`→unk silencieux) ;
+  **repli CPU silencieux sans `--@zml//platforms:cuda=true`** (garde dure ajoutée) ;
+  tolérance cos/sin ULP linéaire en position.
 - [x] **Transfert G2.3 → TurboQuant / alambic** — **FAIT le 10 juil 2026** : notes livrées aux
   deux repos consommateurs (`turboquant/transfert_g23_zml.md` : baseline kv_store bf16, anti-cible
   softcap, banc rejouable ~40 s/run + pointeur CLAUDE.md ;
