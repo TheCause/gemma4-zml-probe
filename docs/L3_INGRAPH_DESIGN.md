@@ -13,8 +13,9 @@
 ## 1. But
 
 Éliminer les allers-retours host par step de la boucle de décode. Aujourd'hui, chaque step coûte :
-lecture disque de 2 lignes d'embeddings (`EmbedGather`), 3 `Buffer.fromBytes` H2D (embeds, embptls,
-step), l'appel graphe, D2H des logits complets (~1 Mo fp32) et un scan top-5 host. Après L3 :
+lecture disque de 2 lignes d'embeddings (`EmbedGather`), 2 `Buffer.fromBytes` + 1 `Buffer.scalar`
+H2D (embeds, embptls, step), l'appel graphe, D2H des logits complets (~1 Mo fp32) et un scan
+top-5 host. Après L3 :
 le host envoie **un scalaire u32** (le token à feeder) et reçoit `{next_tok, top5}` (~48 octets).
 La structure de la boucle host (prefill-par-decode, early-stop EOT, gardes L_MAX) est conservée.
 
@@ -24,7 +25,8 @@ Un struct local à `gemma4_gen_auto.zig` compose, dans UN graphe compilé par `c
 
 ```
 StepTok.forward(model, tabs, tok u32, packed, cache, ctrl) :
-    e    = tabs.emb.gather(.{ .voc = tok })      // [1,1,1536]  bf16, ligne brute
+    e    = model.embed_tokens.gather(.{ .voc = tok })  // [1,1,1536] bf16 — table DÉJÀ device
+                                                       // (lm_head tied) : zéro Go ajouté
     el   = tabs.eptl.gather(.{ .voc = tok })     // [1,1,8960]  bf16, ligne brute
     logits, cache' = Model.forwardStep(e, el, packed, cache, ctrl)   // INCHANGÉ
     next = logits.argMax(.voc)                   // in-graph
@@ -42,15 +44,18 @@ StepTok.forward(model, tabs, tok u32, packed, cache, ctrl) :
   `@setEvalBranchQuota(100_000)` dans `pjrt.zig` (à réappliquer si le workspace ZML de la 3090
   est resynchronisé). Le plan placera un **build 3090 tôt** pour fail-faster sur ce piège.
 
-### 2.1 Chargement des tables [it.7]
+### 2.1 Chargement des tables [it.7, amendé revue]
 
-Les deux tables deviennent des poids **ordinaires** du wrapper : struct `Tabs` déclaré avec les
-mêmes noms/dtype que le checkpoint (`embed_tokens.weight` [262144,1536] bf16 ≈ 0,8 Go ;
-`embed_tokens_per_layer.weight` [262144,8960] bf16 ≈ 4,7 Go), matérialisé par le MÊME
-`TensorStore`/`zml.io` que les poids du modèle — un seul chemin de lecture du checkpoint, offsets
-gérés par la lib. **`EmbedGather` est supprimé intégralement** (avec ses offsets absolus
-recalculés à la main). Pic mémoire au chargement surveillé par `mem_probe` (mécanisme identique
-aux ~5 Go de poids actuels).
+- `embed_tokens` : **aucun chargement nouveau** — le poids est déjà device-résident dans `Model`
+  (lm_head tied, cf `engine.zig` `dotPrec(…, self.embed_tokens, .d)`) ; le gather le réutilise
+  (sous réserve du tag `.voc` sur l'axe vocab — sinon repli : le dupliquer dans `Tabs`, +0,8 Go).
+- `embed_tokens_per_layer` : SEULE table ajoutée — struct `Tabs` avec le nom complet du checkpoint
+  (`model.language_model.embed_tokens_per_layer.weight`, clé exacte = `EPTL_KEY` actuel,
+  [262144,8960] bf16 ≈ **4,7 Go**), matérialisé par le MÊME `TensorStore`/`zml.io` que les poids
+  du modèle — un seul chemin de lecture, offsets gérés par la lib.
+- **`EmbedGather` est supprimé intégralement** (avec ses offsets absolus recalculés à la main et
+  son commentaire périmé « ~1,6 Go » de l'ère fp32). Pic mémoire au chargement surveillé par
+  `mem_probe`. VRAM ajoutée par L3 ≈ **4,7 Go** (pas 5,5).
 
 ### 2.2 Boucle host après L3
 
@@ -62,8 +67,8 @@ cf non-objectif donation §6.
 
 ## 3. VRAM — le seuil de la garde devient un livrable de mesure [it.1]
 
-Usage réel attendu ~8,5 + 5,5 ≈ **14 Go** — mais ce 14 est un a priori (8,5 mesuré G2.1 sur une
-autre config + 5,5 théorique). Doctrine §9.7 (« mesurer, pas présupposer ») :
+Usage réel attendu ~8,5 + 4,7 ≈ **13 Go** — mais ce 13 est un a priori (8,5 mesuré G2.1 sur une
+autre config + 4,7 théorique). Doctrine §9.7 (« mesurer, pas présupposer ») :
 
 - Sémantique BFC **vérifiée** (11 juil, `platform.zig:544` + PJRT) : `memory_fraction 0.90`
   préalloue 0.90 × la mémoire **libre à l'init**. Contrainte : `0.90 × libre ≥ besoin réel`.
@@ -91,7 +96,7 @@ design :
 | Gate | Contenu | Critère |
 |---|---|---|
 | **B0 — bench avant** | HEAD actuel (post-PR #6), prompt court `--oracle` 48 + run long ; **temps de prefill et tok/s de génération mesurés SÉPARÉMENT** [it.6] | chiffres de référence consignés |
-| **SG — selftest gather in-graph** [it.4] | `--selftest-gather` **converti** (pas supprimé) : mini-graphe `{Tabs, ids fixture} → gather`, comparé aux embeds/embptls de la fixture A1 existante | bit-exact (critère inchangé) |
+| **SG — selftest gather in-graph** [it.4] | `--selftest-gather` **converti** (pas supprimé) : mini-graphe `{tables, ids fixture} → gather`, comparé aux embeds/embptls de la fixture A1 existante. ⚠ Changement de catégorie : ce mode devient un mode **GPU** (graphe compilé) — la garde VRAM s'y applique désormais telle quelle (comportement assumé, plus de « host-only » pour ce flag) | bit-exact (critère inchangé) |
 | **G1 — fidélité courte** | `--oracle` fixture 48 steps (protocole A1) | 48/48 == HF |
 | **G1v — non-vacuité** | perturbation : corrompre `fed` de la fixture (convention repo) | le compare DOIT FAIL |
 | **G2 — early-stop** | « Paris » + prompt libre FR (protocole A3) | EOT naturel, réponse correcte |
@@ -118,7 +123,8 @@ design :
   boucle réécrite (suppression `EmbedGather` + `top5Of`), `--selftest-gather` converti [it.4],
   seuil garde VRAM ajusté [it.1].
 - `docs/DOCUMENTATION.md` (§2.2 usage + perf + note VRAM), `PLANNING.md` (item [M] L3),
-  `docs/G2_BF16_FIDELITY.md` ou note G2.1 : caveat « 12 Go » (une ligne).
+  `docs/G2_BF16_FIDELITY.md` ou note G2.1 : caveat « 12 Go » (une ligne),
+  `docs/VRAM_CHECK_DESIGN.md` : seuil final [it.1] + `--selftest-gather` reclassé GPU (§1/§4).
 - **Intacts** : `engine.zig` (invariant d'un octet), `BUILD.bazel`, tous les autres runners
   (`gemma4_gen_long_gpu` reste le replay de référence pour G2b/B0).
 - Chantier suivant (sous-projet séparé, propre cycle spec→plan) : batching / flash-attention.
