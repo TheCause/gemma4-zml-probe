@@ -668,13 +668,15 @@ const Top5 = struct { idx: [5]usize, val: [5]f32 };
 // filet) ; seul « VRAM libre < seuil » mesuré avec succès fait échouer le lancement.
 // ============================================================================================
 
-// Seuil requis : mesure G2.1 = 8,5 GiB réels (poids bf16 on-device, cf docs/G2_BF16_FIDELITY.md)
-// + ~4,7 Go pour la table L3 `Tabs.eptl` (embed_tokens_per_layer, spec docs/L3_INGRAPH_DESIGN.md
-// §2.1/§3) ≈ 13 Go a priori — PAS ENCORE MESURÉ post-L3 (doctrine §9.7 : mesurer, pas présupposer).
-// Valeur PROVISOIRE le temps du chantier L3 : 16 GiB (marge large, cf plan L3_INGRAPH_PLAN.md
-// Step 2.8). Seuil final = ceil(mesuré_GiB / 0.90) + 1, fixé en G3 (Step 8.2) une fois `mem_probe`
-// post-compile relevé sur la 3090. Pas de flag de réglage (YAGNI).
-const MIN_FREE_VRAM_GIB: u64 = 16;
+// Seuil requis — G3 (Step 8, amendement méthode) : `mem_probe` (ci-dessous, "post-load"/
+// "post-compile") loggue de la RSS HOST, pas de la VRAM device — et `nvidia-smi` pendant un run
+// normal ne montre que la RÉSERVE BFC préallouée (`0.90 × VRAM libre au lancement`), pas le
+// besoin réel. Mesure réelle faite en désactivant temporairement `preallocate` (BFC alloue à la
+// demande) et en échantillonnant `nvidia-smi --query-compute-apps` pendant tout le run (compile
+// + prefill + génération 999 steps, fixture A2) : pic observé = 16658 MiB ≈ 16,27 GiB. Seuil
+// final = ceil(pic_GiB / 0.90) + 1 = ceil(16,27 / 0,90) + 1 = ceil(18,08) + 1 = 20 GiB — couvre
+// la réserve BFC réelle (0.90×) avec 1 GiB de marge. Pas de flag de réglage (YAGNI).
+const MIN_FREE_VRAM_GIB: u64 = 20;
 
 // Parse `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` : première ligne =
 // GPU 0 (VM mono-GPU), entier en MiB. null = sortie illisible (l'appelant warn + continue).
