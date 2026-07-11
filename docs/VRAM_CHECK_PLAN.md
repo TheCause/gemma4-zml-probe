@@ -30,6 +30,9 @@ infra locale de Régis, à passer EN ENV au moment de l'exécution — ne jamais
 
 ## Task 1 : flag `--force-vram` + fonctions de garde + insertion dans `main`
 
+> Branche de travail : **`vram-check`** (existe déjà — la spec y est committée). Vérifier
+> `git branch --show-current` avant le premier commit ; si sur `main`, `git checkout vram-check`.
+
 **Files:**
 - Modify: `zml_runner/gemma4_gen_auto.zig` (Args ~l.56-71, parseArgs ~l.114, nouvelles fns avant
   `main` ~l.684, insertion dans `main` après le bloc `--ids-only` ~l.769)
@@ -112,6 +115,8 @@ fn checkVram(gpa: std.mem.Allocator, io: std.Io) !void {
     // Une décimale en arithmétique ENTIÈRE (pas de format float : API std.fmt 0.16-dev mouvante).
     const gib10 = free_mib * 10 / 1024;
     log.err("GPU occupé — VRAM libre {d}.{d} GiB < {d} GiB requis", .{ gib10 / 10, gib10 % 10, MIN_FREE_VRAM_GIB });
+    // Déviation assumée vs spec §2 : pas de `parseComputeApps` structuré — les lignes CSV brutes
+    // trimées suffisent au message (PID, nom, MiB lisibles) et restent best-effort.
     if (std.process.run(gpa, io, .{
         .argv = &.{ "nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader" },
     })) |apps| {
@@ -204,7 +209,16 @@ NB : le chemin réel de `tokenizer.json` sur la 3090 fait foi (cf run du 11 juil
 
 ## Task 4 : gate V2 — échappatoire `--force-vram`
 
-- [ ] **Step 4.1 : même état (GPU occupé), ajouter `--force-vram`.** Attendu : warn
+- [ ] **Step 4.1 : même état (GPU occupé) :**
+
+```bash
+ssh user@gpu-host 'cd /data/rqz_workspace/zml && ./bazel-bin/examples/rqz/gemma4_gen_auto \
+  /data/gemma4-zml-probe/weights/model.safetensors \
+  /data/gemma4-zml-probe/weights/tokenizer.json \
+  --prompt "ping" --force-vram 2>&1' | tee /tmp/vram_v2.log
+```
+
+Attendu : warn
   `--force-vram : garde VRAM sautée …`, PUIS l'OOM assumé peut suivre (c'est le contrat — le crash
   error-path upstream connu peut suivre l'OOM, il est cosmétique, ne pas le « corriger »).
   Archiver → `logs/vram_check_v2.log`.
