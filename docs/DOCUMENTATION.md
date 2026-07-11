@@ -89,6 +89,14 @@ cd /data/rqz_workspace/zml && ./bazel.sh run --@zml//platforms:cuda=true \
 
 ⚠ Le flag `--@zml//platforms:cuda=true` est OBLIGATOIRE (sinon repli CPU silencieux —
 désormais refusé en dur par `error.CudaRequired`, échappatoire `--allow-cpu` débogage).
+⚠ **Vérifier la VRAM avant de lancer** : la 3090 est partagée avec Hermès (Ollama
+`gemma4:31b`, ~22 Go). Si occupée : OOM dès la matérialisation (+ crash d'error-path
+upstream ZML, cosmétique). Libérer : `ollama stop gemma4:31b` (réversible — rechargé à la
+demande).
+
+**Validation réelle (11 juil 2026)** : prompt libre en français hors de toute fixture
+(« Explique-moi la fenêtre glissante d'attention en trois phrases ») → 110 tokens,
+early-stop EOT naturel, réponse correcte sur stdout, 54,5 tok/s moyenne prefill inclus.
 Validation : A1 48/48 == HF autonome complet ; A2 différentiel (autonome ≥ replay, même
 bifurcation de marge fine au step ~590 — le N/N n'est pas une propriété garantie de toute
 séquence, cf `GEN_AUTONOME_DESIGN.md` § Résultats) ; A3 early-stop EOS + « Paris » sur

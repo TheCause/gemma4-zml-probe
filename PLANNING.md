@@ -36,6 +36,9 @@
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
 - [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
 - [M] **L3 in-graph** — boucle de décode dans le graphe (réduire les allers-retours host).
+- [B] **Check VRAM au lancement de `gemma4_gen_auto`** — message explicite « GPU occupé par
+  <process>, libérer d'abord (ollama stop …) » au lieu de l'OOM cryptique + crash error-path
+  upstream (cf garde-fou contention, vécu 11 juil).
 - [x] **Runtime 100 % autonome** — **LIVRÉ 10-11 juil 2026** (branche `gen-autonome`,
   spec `docs/GEN_AUTONOME_DESIGN.md`, plan `docs/GEN_AUTONOME_PLAN.md`) : binaire
   `gemma4_gen_auto` texte→texte (tokenizer ZML natif, chat template Zig, prefill-par-decode,
@@ -55,6 +58,19 @@
 
 ### Garde-fous courants
 
+- **Contention VRAM 3090 (vécu 11 juil)** : Hermès (Ollama `gemma4:31b`, ~22/24 Go) partage la
+  carte — **vérifier `nvidia-smi --query-compute-apps` avant tout run GPU**. Symptôme si oublié :
+  OOM dès la matérialisation (`CreateBuffersForAsyncHostToDevice … 6.00MiB`) suivi d'un crash
+  `General protection exception` dans `io.zig deinit` — ce crash est un bug d'error-path UPSTREAM
+  ZML (double-free post-OOM), pas notre code ; l'OOM est la vraie erreur. Libération réversible :
+  `ollama stop gemma4:31b` (keep_alive recharge à la demande côté Hermès).
+- **Piège `deploy_to_3090.sh`** : exige `ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz`
+  en env — les défauts sont des placeholders (`user@gpu-host`) → échec de résolution DNS ; avec la
+  sortie redirigée, le deploy rate SILENCIEUSEMENT et on teste l'ancien binaire (vécu en
+  non-vacuité, 11 juil).
+- **GPU = flag de BUILD obligatoire** : `--@zml//platforms:cuda=true` sur chaque `bazel.sh run`
+  GPU (sinon libpjrt_cuda hors runfiles → repli CPU ; refusé en dur par `gemma4_gen_auto`
+  (`error.CudaRequired`), mais les AUTRES runners GPU du repo n'ont pas cette garde).
 - **Piège workspace ZML** : patch local 1 ligne `@setEvalBranchQuota(100_000)` dans `pjrt.zig`
   (`structSize`, commenté `local patch rqz`) — **à réappliquer si le workspace ZML de la 3090 est
   resynchronisé upstream**. Requis dès qu'un `@typeName` de type (modèle, runner) devient assez long
