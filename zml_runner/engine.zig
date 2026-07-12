@@ -324,7 +324,15 @@ pub const EngineCfg = struct {
     two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
     kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
     kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
+    // Variante d'attention (chantier batching, Phase 2). `.manual` = chemin actuel roulé main
+    // (scores bruts exposés → PrecRt s'y accroche) ; `.sdpa` = zml.nn.sdpa (chemin « produit »).
+    // Le défaut `.manual` est strictement neutre : la branche `.sdpa` est comptime-morte → HLO
+    // byte-identique (gate S1). NB : `.sdpa` NEUTRALISE les familles qk_scores/softmax/pv_ctx de
+    // PrecRt (sdpa fait ses propres converts) → gates sdpa en fp32 pur, cf spec §3.4.
+    attn: AttnKind = .manual,
 };
+
+pub const AttnKind = enum { manual, sdpa };
 
 /// Config de précision RUNTIME (G2.3, approche B de la spec). Un champ par FAMILLE d'ops ;
 /// `null` = f32 (baseline). Portée par le modèle comme CHAMP RUNTIME (self.prec) — plus dans
@@ -460,14 +468,31 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
         cache_v = cache_v.convert(prec.compute);
     }
 
-    const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
-    var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
-    scores = scores.add(mask.broad(scores.shape()));
-    const probs = inPrec(prec.softmax, scores).softmax(.k).convert(prec.compute);
+    // Variante d'attention (cfg.attn, comptime → une seule branche émise).
+    // `.manual` (défaut) : chemin historique, byte-identique (gate S1).
+    // `.sdpa` : helper ZML. DEUX pièges neutralisés ici —
+    //   (1) sdpa scale K par 1/√hd PAR DÉFAUT alors que Gemma 4 a scaling = 1.0 (la norme passe par
+    //       q_norm) → `.scale = 1.0` OBLIGATOIRE, sinon les scores sont divisés par 16 ;
+    //   (2) `q_final.dtype()` et NON `qs.dtype()` : `qs` est déclaré dans la branche `.manual`
+    //       ci-dessous, donc hors scope ici (l'erreur ne sortirait qu'au premier build sdpa).
+    // sdpa refait lui-même le splitAxis GQA (nn.zig) et sort `{b,q,h,hd}` après transpose+merge :
+    // même forme que `ctx_attn.transpose(...)` du chemin manuel → le merge `.m` ci-dessous est commun.
+    const ctx_bqhhd = if (cfg.attn == .sdpa) blk: {
+        const one = zml.Tensor.scalar(1.0, q_final.dtype());
+        const o = zml.nn.sdpa(q_final, cache_k, cache_v, .{ .attn_mask = mask, .scale = one });
+        break :blk o.transpose(.{ .b, .q, .h, .hd });
+    } else blk: {
+        const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
+        var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
+        scores = scores.add(mask.broad(scores.shape()));
+        const probs = inPrec(prec.softmax, scores).softmax(.k).convert(prec.compute);
 
-    const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
-    const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
-    const attn_m = ctx_attn.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
+        const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
+        const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
+        break :blk ctx_attn.transpose(.{ .b, .q, .h, .hd });
+    };
+
+    const attn_m = ctx_bqhhd.merge(.{ .m = .{ .h, .hd } });
     const attn_out = dotPrec(prec.o_proj, prec.compute, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
 
     const h1 = hidden.add(rmsScaleDPrec(prec.norms, prec.compute, attn_out, layer.post_attention_layernorm));

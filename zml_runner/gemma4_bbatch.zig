@@ -42,7 +42,11 @@ const LF: i64 = 8960;
 // SLIDING_PRODUCERS/FULL_PRODUCERS de scripts/49_gen_custom_oracle.py:41-42.
 const NUM_SLIDING_SLOTS: usize = 12;
 const NUM_FULL_SLOTS: usize = 3;
-const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
+// Variante d'attention : COMPTIME (elle change le graphe). Un second main (`gemma4_bbs.zig`)
+// déclare `pub const ATTN = .sdpa` et réutilise TOUT ce fichier — pattern e1/e2 du repo, sans
+// dupliquer le runner. Root == ce fichier → `.manual` (le défaut neutre du gate S1).
+const ATTN: engine.AttnKind = if (@hasDecl(@import("root"), "ATTN")) @import("root").ATTN else .manual;
+const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX, .attn = ATTN });
 const PackedLong = engine.Packed(true);
 
 // K du topK in-graph — CONSIGNÉ dans les logs (confound pré-enregistré du gate B4 : gen_auto est

@@ -473,6 +473,17 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# Phase 2 (gates S2/S3) — MÊME runner, variante d'attention `.sdpa` (comptime → autre graphe).
+# gemma4_bbs.zig n'est qu'un main : il déclare `pub const ATTN = .sdpa`, que gemma4_bbatch.zig lit
+# via @import("root"). Pattern des couples e1/e2 (deux mains, sources partagées par `srcs`).
+zig_binary(
+    name = "gemma4_bbs",
+    main = "gemma4_bbs.zig",
+    srcs = ["engine.zig", "mem_probe.zig", "gemma4_bbatch.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",
