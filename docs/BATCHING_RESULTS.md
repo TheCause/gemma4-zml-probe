@@ -13,7 +13,7 @@
 | B1 — selftest primitives batchées | ✅ fait (12 juil) | **PASS** | 4/4 sous-tests exacts, B=2 |
 | B2 — fidélité par lane (B=2, B=4) | ✅ fait (12 juil) | **PASS** | 2/2 puis 4/4 lanes à 48/48 == HF ; non-vacuité OK |
 | B3 — indépendance inter-lanes | ✅ fait (12 juil) | **PASS** | 4 lanes identiques, 48/48 steps |
-| B4 — sweep B → plafond VRAM | ⏳ | | |
+| B4 — sweep B → plafond | ✅ fait (12 juil) | **PASS** | 2106 tok/s à B=64 (×18,5) ; non-régression ratio 0,999 |
 
 ## Phase 2 — sdpa
 
@@ -211,3 +211,58 @@ sémantiquement correctes — elles suivent une autre trajectoire greedy tout au
 **Conséquence pratique** : pour un banc de mesure (l'usage cible), c'est sans effet. Pour un
 usage exigeant la reproductibilité token-pour-token vs HF, il faut **fixer B** (le graphe est
 alors stable) et accepter la variance inter-compiles — ou rester en mono-séquence.
+
+---
+
+## B4 — sweep B → plafond — **PASS** (12 juillet 2026)
+
+Protocole pré-enregistré : `docs/BATCH_BENCH_PROTOCOL.md` (committé avant le premier run).
+Custody : **un seul binaire** pour tout le sweep (moteur shape-polymorphe, gate T0),
+sha256 `50d8278269…` vérifié avant chaque run. GPU vierge exigé et attendu entre chaque point.
+
+| B | Débit agrégé | Par lane | Gain vs mono | Pic VRAM | Compile | Fidélité |
+|---|---|---|---|---|---|---|
+| 1 | 113,6 tok/s | 113,6 | ×1,0 | 16 678 MiB | 17,1 s | PASS (48/48) |
+| 2 | 211,6 | 105,8 | ×1,9 | 16 670 | 22,4 s | PASS (2/2 lanes) |
+| 4 | 401,9 | 100,5 | ×3,5 | 16 670 | 22,4 s | 3/4 lanes (**1 bifurcation sur tie**) |
+| 8 | 718,5 | 89,8 | ×6,3 | 16 670 | 22,9 s | PASS spot (0 bifurcation) |
+| 16 | 1 203,2 | 75,2 | ×10,6 | 16 666 | 23,7 s | PASS spot |
+| 32 | 1 734,4 | 54,2 | ×15,3 | 16 672 | 24,2 s | PASS spot |
+| 64 | **2 105,8** | 32,9 | **×18,5** | 16 672 | 23,7 s | PASS spot |
+
+### Non-régression (bras appariés, protocole §4) — **PASS**
+
+Runs **frais et appariés** dans la même fenêtre de session (jamais les chiffres publiés), 3 runs
+par bras, médiane :
+
+| Bras | Runs (tok/s) | Médiane |
+|---|---|---|
+| `gemma4_gen_auto` B=1 | 111,8 / 113,4 / 115,3 | **113,4** |
+| `gemma4_bbatch` B=1 | 113,3 / 114,0 / 111,6 | **113,3** |
+
+Critère pré-enregistré : médiane(bbatch) ≥ 0,95 × médiane(gen_auto) = 107,7 tok/s.
+**VERDICT : PASS — ratio 0,999.** Le runner batché ne coûte **rien** en mono-séquence : la
+généralisation par lane n'a pas dégradé le chemin B=1 (et la variance des 3 runs, ±1,5 %, est
+bien dans le budget bruit de 5 % pré-enregistré).
+
+### Le plafond n'est PAS la VRAM — c'est une courbe de rendement
+
+**Le pic VRAM ne bouge pas de la plage entière** (16 666 → 16 678 MiB, soit ±0,07 %) : il est
+atteint pendant la **compilation XLA**, où le cache KV marginal (~38 Mo/lane) est noyé. Le sweep
+a atteint B=64 **sans jamais approcher le plafond de 22 GiB** — l'arrêt par projection n'a jamais
+mordu. La garde VRAM de `gemma4_gen_auto` (20 GiB, calibrée B=1) reste donc **valide quel que soit B**.
+
+Ce que le sweep mesure réellement, c'est la **saturation compute** : le gain marginal par lane
+s'effondre progressivement (113 → 106 → 100 → 90 → 75 → 54 → 33 tok/s). Il n'y a pas de « mur »,
+mais un **rendement décroissant** :
+
+- **B=8-16 = point d'exploitation utile** : ×6,3 à ×10,6 de débit agrégé, tout en gardant
+  **75-90 tok/s par séquence** (au-dessus du confort de lecture humain).
+- **B=32-64** : le débit agrégé monte encore (jusqu'à ×18,5) mais chaque séquence tombe à
+  33-54 tok/s — pertinent pour du **throughput pur** (génération de corpus, distillation),
+  pas pour de l'interactif.
+
+> **Correction d'une hypothèse de la spec** : le design supposait que le plafond de batch serait
+> imposé par la VRAM (« chaque séquence ajoute ~38 Mo de cache ») et faisait du plafond l'output
+> du banc. La mesure dit autre chose : **la VRAM n'est pas le facteur limitant** dans cette
+> gamme. C'est le compute qui plafonne, et il le fait en douceur.
