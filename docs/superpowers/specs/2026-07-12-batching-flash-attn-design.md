@@ -105,8 +105,11 @@ Justification — c'est le geste G2.3 réappliqué (« sortir la config du type 
 
 Squelette gen_auto généralisé par lane. Nom court (13c < plafond ~20c du quota comptime).
 
-- **CLI** : `<model.safetensors> <tokenizer.json>` + `--prompts <fichier>` (un prompt par ligne)
-  OU `--oracles <f1,f2,...>` (N fixtures 49) ; `--replicate N` (duplique la liste de prompts,
+- **CLI** : `<model.safetensors> <tokenizer.json>` + `--prompts <fichier>` (un prompt par ligne,
+  **toujours requis** hors selftest) ; `--oracles <f1,f2,...>` (N fixtures 49, **appariées par
+  index aux lignes de `--prompts`** — la fixture ne contient PAS les ids du prompt, seul son
+  manifest sidecar les a : le runner tokenise les prompts, vérifie `positions[0]==ids.len` et
+  `prompt_ids` du sidecar par lane) ; `--replicate N` (duplique la liste de prompts,
   points de sweep perf) ; `--max-tokens`, `--force-vram`, `--allow-cpu`, `--no-prealloc`
   (mesure VRAM, pattern g23_sweep), `--temperature/--top-k/--seed` (mode charge, §3.5),
   `--selftest-batch <fixture>` (spike B1, §6).
@@ -308,7 +311,10 @@ pas les logs » — logs/ gitignorés).
   + branche comptime au site attention.
 - `zml_runner/gemma4_bbatch.zig` — **nouveau** runner (inclut le spike B1 en mode
   `--selftest-batch` — pas de runner séparé) [rev.5].
-- `zml_runner/BUILD.bazel` — cible `gemma4_bbatch` (pattern zig_binary, srcs engine+mem_probe).
+- `zml_runner/gemma4_bbs.zig` — **nouveau** second main Phase 2 (`.attn = .sdpa`, pattern e1/e2 ;
+  rules_zig n'a pas de defines `-D`).
+- `zml_runner/BUILD.bazel` — cibles `gemma4_bbatch` et `gemma4_bbs` (pattern zig_binary,
+  srcs engine+mem_probe).
 - `scripts/` — script sweep (pattern g2_3_sweep.sh) + wrapper génération d'oracles en lot.
 - `fixtures/bench_prompts_b<N>.txt` — jeu de prompts du banc, **versionné** [rev.4].
 - `docs/BATCH_BENCH_PROTOCOL.md` — protocole pré-enregistré du banc, committé avant tout run [rev.1].
