@@ -13,6 +13,19 @@ set -uo pipefail
 # sert tous les B. Son sha256 est consigné une fois et re-vérifié avant chaque run : s'il
 # change en cours de sweep, le sweep est invalide.
 
+# VERROU D'INSTANCE UNIQUE. Deux sweeps concurrents se partagent le GPU ET les fichiers
+# temporaires → chiffres croisés, faux OracleCountMismatch, contention. (Piège vécu : un sweep
+# tué côté client a survécu sur la VM et s'est superposé au suivant.) Le verrou rend ça impossible.
+exec 9>/tmp/batch_sweep.lock
+if ! flock -n 9; then
+  echo "!! un sweep tourne déjà (verrou /tmp/batch_sweep.lock) — refus de démarrer" >&2
+  exit 3
+fi
+
+# Fichiers temporaires UNIQUES à cette instance (jamais de noms partagés).
+TMP=$(mktemp -d /tmp/batch_sweep.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+
 WEIGHTS="${WEIGHTS:?WEIGHTS manquant}"
 TOKENIZER="${TOKENIZER:?TOKENIZER manquant}"
 FIXTURES="${FIXTURES:?FIXTURES manquant (répertoire des oracle_lane*.safetensors)}"
@@ -60,7 +73,7 @@ gen_rate_ga() { grep -oE 'génération [0-9]+ tokens en [0-9.]+s \(([0-9.]+) tok
 # BFC 0.90×libre — « piège 14 »), échantillonnage pendant le run, scopé au PID du runner.
 measure_vram_peak() {  # $1 = commande complète (string)
   local peak=0 used pid
-  eval "$1" >/tmp/sweep_vram_run.log 2>&1 &
+  eval "$1" >"$TMP/vram_run.log" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     used=$(nvidia-smi --query-compute-apps=used_memory --format=csv,noheader,nounits 2>/dev/null | sort -rn | head -1)
@@ -94,8 +107,8 @@ for B in $B_LIST; do
   # Charge (protocole §3) : B<=4 => prompts distincts + oracles par lane ; B>=8 => --replicate + spot-check lane 0
   if [ "$B" -le 4 ]; then
     orc=""; for i in $(seq 0 $((B - 1))); do orc="${orc}${orc:+,}$FIXTURES/oracle_lane${i}.safetensors"; done
-    head -n "$B" "$PROMPTS_B4" > /tmp/sweep_prompts.txt
-    FID_ARGS="--prompts /tmp/sweep_prompts.txt --oracles $orc"
+    head -n "$B" "$PROMPTS_B4" > "$TMP/prompts.txt"
+    FID_ARGS="--prompts $TMP/prompts.txt --oracles $orc"
   else
     rep=$((B / 4))
     orc=""; for i in 0 1 2 3; do orc="${orc}${orc:+,}$FIXTURES/oracle_lane${i}.safetensors"; done
@@ -111,10 +124,19 @@ for B in $B_LIST; do
   else
     if echo "$fid_out" | grep -q "B2 lane 0 : PASS"; then fid="PASS(spot)"; else fid="FAIL"; fi
   fi
-  # lanes en échec (bifurcations sur tie) rapportées explicitement — jamais masquées
+  # lanes en échec (bifurcations sur tie) rapportées explicitement — jamais masquées.
+  # Le détail (step, tokens, marge top1−top2) est TOUJOURS loggué : c'est lui qui distingue une
+  # bifurcation légitime sur tie (marge ~1e-4) d'un vrai bug de batching.
   nfail=$(echo "$fid_out" | grep -c "B2 lane .* : FAIL" || true)
+  if [ "$nfail" -gt 0 ]; then
+    echo "  !! B=$B : $nfail lane(s) divergent(s) de leur fixture —"
+    echo "$fid_out" | grep -E "B2 lane .* : FAIL|step gen=|marge" | head -6 | sed 's/^/     /'
+  fi
   [ "$nfail" -gt 0 ] && fid="$fid/${nfail}bif"
-  if [ "$fid" = "FAIL" ]; then echo "  !! cause du FAIL B=$B :"; echo "$fid_out" | grep -E "error" | head -3; fi
+  if [ "${fid%%/*}" = "FAIL" ] && [ "$nfail" -eq 0 ]; then
+    echo "  !! B=$B : le run n'a PAS tourné (ni PASS ni bifurcation) — cause :"
+    echo "$fid_out" | grep -E "error" | head -3 | sed 's/^/     /'
+  fi
   compile=$(echo "$fid_out" | grep -oE 'compile: [0-9.]+s' | grep -oE '[0-9.]+' | head -1)
 
   # 2) runs perf (3×, médiane)
@@ -141,13 +163,13 @@ echo
 echo "=== non-régression : bras appariés gen_auto vs bbatch à B=1 (3 runs, médiane, seuil 0,95×)"
 check_sha "$GA" "$SHA_GA"
 ga_rates=(); bb_rates=()
-head -n 1 "$PROMPTS_B4" > /tmp/sweep_p1.txt
+head -n 1 "$PROMPTS_B4" > "$TMP/p1.txt"
 for _ in $(seq $RUNS); do
   wait_gpu_free || exit 1
   r=$($GA "$WEIGHTS" "$TOKENIZER" --oracle "$FIXTURES/oracle_lane0.safetensors" --prompt "$(head -1 "$PROMPTS_B4")" 2>&1 | gen_rate_ga)
   ga_rates+=("${r:-0}")
   wait_gpu_free || exit 1
-  r=$($BB "$WEIGHTS" "$TOKENIZER" --prompts /tmp/sweep_p1.txt --oracles "$FIXTURES/oracle_lane0.safetensors" 2>&1 | gen_rate_bb)
+  r=$($BB "$WEIGHTS" "$TOKENIZER" --prompts "$TMP/p1.txt" --oracles "$FIXTURES/oracle_lane0.safetensors" 2>&1 | gen_rate_bb)
   bb_rates+=("${r:-0}")
 done
 med_ga=$(median "${ga_rates[@]}"); med_bb=$(median "${bb_rates[@]}")
