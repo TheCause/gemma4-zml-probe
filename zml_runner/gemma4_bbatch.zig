@@ -42,11 +42,13 @@ const LF: i64 = 8960;
 // SLIDING_PRODUCERS/FULL_PRODUCERS de scripts/49_gen_custom_oracle.py:41-42.
 const NUM_SLIDING_SLOTS: usize = 12;
 const NUM_FULL_SLOTS: usize = 3;
-// Variante d'attention : COMPTIME (elle change le graphe). Un second main (`gemma4_bbs.zig`)
-// déclare `pub const ATTN = .sdpa` et réutilise TOUT ce fichier — pattern e1/e2 du repo, sans
-// dupliquer le runner. Root == ce fichier → `.manual` (le défaut neutre du gate S1).
-const ATTN: engine.AttnKind = if (@hasDecl(@import("root"), "ATTN")) @import("root").ATTN else .manual;
-const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX, .attn = ATTN });
+// Variante d'attention : COMPTIME (elle change le graphe). Le second main (`gemma4_bbs.zig`)
+// appelle `runWith(.sdpa, init)` et réutilise TOUT ce fichier — pattern e1/e2 du repo, zéro
+// duplication du runner. ⚠ NE PAS passer par `@import("root")` : bbs importe bbatch, donc lire
+// root depuis bbatch referme une **boucle de dépendance** (vécu au 1er build).
+fn ModelWith(comptime attn: engine.AttnKind) type {
+    return engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX, .attn = attn });
+}
 const PackedLong = engine.Packed(true);
 
 // K du topK in-graph — CONSIGNÉ dans les logs (confound pré-enregistré du gate B4 : gen_auto est
@@ -892,17 +894,21 @@ const Tabs = struct {
 // cache {slot,B,1,L_MAX,HD}). ⚠ CROSS-REF : si le dtype/shape des indices de gather change ici,
 // changer À L'IDENTIQUE le tok_sym du selftest (BbGat) — sinon B1 resterait vert en validant autre
 // chose que ce que le runtime fait.
-const BBStep = struct {
-    pub fn forward(model: Model, tabs: Tabs, tok: zml.Tensor, p: PackedLong, cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-        const e = model.embed_tokens.gather(.{ .voc = tok }, .{}); // {b,s,d} bf16 brut — GatherOpts `.{}` OBLIGATOIRE
-        const el = tabs.eptl.gather(.{ .voc = tok }, .{}); // {b,s,lf} bf16 brut
-        const logits, const slk, const slv, const flk, const flv = model.forwardStep(e, el, p, cache, ctrl);
-        // Forme struct à un champ EXIGÉE par `Tensor.topK` (tensor.zig:3098) : `.{ .voc = .voc }`,
-        // PAS `.topK(.voc, …)` (un enum literal seul ne matche aucune branche → échec de compile).
-        const t5 = logits.topK(.{ .voc = .voc }, K_TOPK, .{});
-        return .{ t5.values, t5.indices, slk, slv, flk, flv };
-    }
-};
+// Générique sur le type de modèle (donc sur la variante d'attention) : le corps est le MÊME,
+// seul le graphe tracé par `forwardStep` diffère.
+fn BBStepWith(comptime M: type) type {
+    return struct {
+        pub fn forward(model: M, tabs: Tabs, tok: zml.Tensor, p: PackedLong, cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            const e = model.embed_tokens.gather(.{ .voc = tok }, .{}); // {b,s,d} bf16 brut — GatherOpts `.{}` OBLIGATOIRE
+            const el = tabs.eptl.gather(.{ .voc = tok }, .{}); // {b,s,lf} bf16 brut
+            const logits, const slk, const slv, const flk, const flv = model.forwardStep(e, el, p, cache, ctrl);
+            // Forme struct à un champ EXIGÉE par `Tensor.topK` (tensor.zig:3098) : `.{ .voc = .voc }`,
+            // PAS `.topK(.voc, …)` (un enum literal seul ne matche aucune branche → échec de compile).
+            const t5 = logits.topK(.{ .voc = .voc }, K_TOPK, .{});
+            return .{ t5.values, t5.indices, slk, slv, flk, flv };
+        }
+    };
+}
 
 // top-K par lane, rapatrié du device (K_TOPK entrées) : top1 = next token ; le K entier sert au
 // diagnostic --oracles (marge top1−top2 : vigilance ties d'argmax, spec §4).
@@ -910,7 +916,16 @@ const Top5 = struct { idx: [K_TOPK]usize, val: [K_TOPK]f32 };
 
 const StopReason = enum { running, oracle, eot, max_tokens, l_max };
 
+/// Point d'entrée du binaire `gemma4_bbatch` : variante d'attention `.manual` (défaut neutre).
+/// `gemma4_bbs.zig` (Phase 2) appelle `runWith(.sdpa, init)` sur CE MÊME corps.
 pub fn main(init: std.process.Init) !void {
+    return runWith(.manual, init);
+}
+
+/// Corps du runner, générique sur la variante d'attention (comptime : elle change le graphe).
+pub fn runWith(comptime ATTN: engine.AttnKind, init: std.process.Init) !void {
+    const Model = ModelWith(ATTN);
+    const BBStep = BBStepWith(Model);
     @setEvalBranchQuota(200000); // piège quota comptime (35 couches inline × traçage)
     const arena = init.arena;
     const allocator = init.gpa;
