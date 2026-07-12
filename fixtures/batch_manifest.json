@@ -1,0 +1,26 @@
+{
+  "chantier": "batching statique + variante sdpa",
+  "spec": "docs/superpowers/specs/2026-07-12-batching-flash-attn-design.md",
+  "plan": "docs/superpowers/plans/2026-07-12-batching-flash-attn.md",
+  "gate_t0_infra": {
+    "date": "2026-07-12",
+    "zml_rev_3090": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+    "zml_rev_m1_mirror": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+    "zml_rev_match": true,
+    "zml_workspace_3090": "/data/rqz_workspace/zml",
+    "pjrt_patch": {
+      "present": true,
+      "path": "pjrt/pjrt.zig:26",
+      "content": "@setEvalBranchQuota(100_000)",
+      "note": "local patch rqz — type names longs (EngineModel cfg comptime) font deborder le quota 1000 via indexOf. Chemin reel = pjrt/pjrt.zig (PAS zml/pjrt.zig)."
+    },
+    "gpu": {
+      "driver": "580.159.03",
+      "memory_total_mib": 24576,
+      "memory_used_at_capture_mib": 0,
+      "compute_apps_at_capture": "aucune (GPU vierge)"
+    },
+    "upstream_audit": "docs/ZML_UPSTREAM_AUDIT_2026-07-12.md (164 commits d'avance, pas de bump — verrous cudnn/FA2 B==1 inchanges)"
+  },
+  "sweep_points": []
+}

@@ -52,7 +52,8 @@ Expected: un hash (attendu `adee932e...`) + `M zml/pjrt.zig` (patch local struct
 
 - [ ] **Step 2: Vérifier le patch pjrt**
 
-Run : `ssh user@gpu-host "grep -n 'setEvalBranchQuota' /data/rqz_workspace/zml/zml/pjrt.zig"`
+Run : `ssh user@gpu-host "grep -n 'setEvalBranchQuota' /data/rqz_workspace/zml/pjrt/pjrt.zig"`
+(chemin réel = `pjrt/pjrt.zig`, PAS `zml/pjrt.zig`)
 Expected: une ligne `@setEvalBranchQuota(100_000)` dans `structSize`. Si absente → la
 réappliquer AVANT tout build (cf. `PLANNING.md` « patch local rqz »).
 
