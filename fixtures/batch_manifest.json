@@ -22,5 +22,20 @@
     },
     "upstream_audit": "docs/ZML_UPSTREAM_AUDIT_2026-07-12.md (164 commits d'avance, pas de bump — verrous cudnn/FA2 B==1 inchanges)"
   },
+  "gate_t0": {
+    "date": "2026-07-12",
+    "verdict": "PASS",
+    "method": "md5 module_0001.zml.before_optimizations.txt (gold G2.3.0), temoin gemma4_gen_auto rebuilde avant/apres",
+    "md5_before": "ac9df2ae66da8aba65a0a606bf5947ec",
+    "md5_after": "ac9df2ae66da8aba65a0a606bf5947ec",
+    "byte_identical": true,
+    "dump_files": 308,
+    "sanity_tokens": [9259, 236888]
+  },
+  "vm_paths": {
+    "weights": "/data/gemma4-zml-probe/weights/model.safetensors",
+    "tokenizer": "/data/gemma4-zml-probe/gemma4-e2b-it-meta/tokenizer.json",
+    "warning": "le snapshot du cache HF est un symlink vers blobs/ -> error.InvalidPath avec TensorRegistry.fromPath"
+  },
   "sweep_points": []
 }

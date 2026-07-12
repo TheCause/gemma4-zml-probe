@@ -20,6 +20,10 @@ pub const FULL_WRITER: usize = 14;
 pub const SLIDING_WRITER_SLOT: i64 = 11; // slidingSlot(13)
 pub const FULL_WRITER_SLOT: i64 = 2; // fullSlot(14)
 
+// B/S ne sont PLUS consommés par le moteur : depuis le gate batch T0, les 5 sites de reshape
+// (q/k/v + les 2 du PLE) dérivent leurs dims batch/seq des SHAPES D'ENTRÉE (`h0.dim(.b)`,
+// `embeds.dim(.s)`…) → le graphe est shape-polymorphe, un binaire unique sert tous les B.
+// Déclarations gardées pour les runners existants (qui construisent encore des shapes à 1).
 pub const B: i64 = 1;
 pub const S: i64 = 1;
 pub const D: i64 = 1536;
@@ -392,7 +396,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
 
     const h0 = rmsScaleDPrec(prec.norms, prec.compute, hidden, layer.input_layernorm);
 
-    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
+    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), NH, hd }).withTags(.{ .b, .s, .nh, .hd });
     q = rmsScaleHdPrec(prec.norms, prec.compute, q, layer.q_norm);
     q = if (full) manualRope(prec.rope, prec.compute, q, cos, sin, half) else slidingRope(prec.rope, prec.compute, q, pos_s);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
@@ -409,12 +413,12 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
             cache_v = cache.sl_v.choose1d(.slot, SLIDING_WRITER_SLOT);
         }
     } else {
-        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         k = rmsScaleHdPrec(prec.norms, prec.compute, k, layer.k_norm);
         k = if (full) manualRope(prec.rope, prec.compute, k, cos, sin, half) else slidingRope(prec.rope, prec.compute, k, pos_s);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
-        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         // v_norm n'a PAS de poids : entrée encadrée seulement, sortie re-upcastée (famille norms).
         v = zml.nn.rmsNorm(inPrec(prec.norms, v), .hd, RMS_EPS).convert(prec.compute);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
@@ -533,10 +537,10 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const prec = self.prec;
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
-                .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .reshape(.{ embptl_slice.dim(.b), embptl_slice.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
             const context = dotPrec(prec.ple, prec.compute, embeds, self.per_layer_model_projection, .d)
                 .scale(INV_SQRT_HID)
-                .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .reshape(.{ embeds.dim(.b), embeds.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
             const context_norm = rmsScaleP(context, cvt(self.per_layer_projection_norm, prec.compute));
             return context_norm.add(token_identity).scale(INV_SQRT_2);
         }
