@@ -10,7 +10,7 @@
 | Gate | État | Verdict | Chiffres |
 |---|---|---|---|
 | T0 — neutralité du B shape-polymorphe | ✅ fait (12 juil) | **PASS** | md5 `before_optimizations` identique |
-| B1 — selftest primitives batchées | ⏳ | | |
+| B1 — selftest primitives batchées | ✅ fait (12 juil) | **PASS** | 4/4 sous-tests exacts, B=2 |
 | B2 — fidélité par lane (B=2, B=4) | ⏳ | | |
 | B3 — indépendance inter-lanes | ⏳ | | |
 | B4 — sweep B → plafond VRAM | ⏳ | | |
@@ -57,3 +57,21 @@ présent à **`pjrt/pjrt.zig:26`** (`@setEvalBranchQuota(100_000)`) — NB le ch
 - tokenizer : `/data/gemma4-zml-probe/gemma4-e2b-it-meta/tokenizer.json`
 - ⚠ le checkpoint du cache HF (`/data/hf_cache/hub/models--google--gemma-4-E2B-it/snapshots/…`)
   est un **lien symbolique vers `blobs/`** → `error.InvalidPath` avec ZML `TensorRegistry.fromPath`.
+
+---
+
+## B1 — selftest des primitives batchées — **PASS 4/4** (12 juillet 2026)
+
+`gemma4_bbatch --selftest-batch <fixture>` : mini-graphes compilés (pattern SgFwd), B=2, valeurs
+exactes vs référence host. **Le runner a compilé du premier coup** sur la 3090 (14,5 s) — le
+gather rank-2 `{B,1}` passe sans le repli 1-D documenté, et le layout D2H du topK est bien `{b,K}`.
+
+| Sous-test | Verdict | Ce qui est prouvé |
+|---|---|---|
+| 1 — `gather` batché | **PASS** | 2 lanes × 2 tables (embed_tokens + eptl) **bit-exact u16** vs gather 1-lane ET vs la fixture (tok = {50429, 106}) |
+| 2 — `scatterSlices` batché | **PASS** | **Jamais exercé dans ce repo** : `pos_u` scalaire PARTAGÉ, update `{b=2,…}` → lane0=1.0 et lane1=2.0 écrites chacune à `k=3`, zéros ailleurs. La sémantique « dim `.b` non indexée = fenêtre » est confirmée. |
+| 3 — `topK` batché | **PASS** | Layout D2H `{b=2, K=5}` (stride 5 par lane), indices i32, argmax distincts par lane. Valeurs choisies sans tie possible (`v[l][j] = (7j+3l) % 16`, 7 premier avec 16 ⇒ permutation) → attendu calculable host, indépendant de la politique de tie-break XLA. |
+| 4 — `broad` rank-égal | **PASS** | Le masque `{b=1,h=1,q=1,k}` est bien diffusé aux 2 lanes. **L'invariant fragile de la spec §2.8 est prouvé, pas supposé** : à rank égal `broad` diffuse par POSITIONS (pas par tags) et l'ordre des axes coïncide ici. Les tables Packed peuvent donc rester à b=1 (jamais ×B en VRAM). |
+
+VRAM libre au lancement : 23,8 GiB — **aucun seuil appliqué** (le plafond est l'output du banc,
+la garde ne mord que sur contention).
