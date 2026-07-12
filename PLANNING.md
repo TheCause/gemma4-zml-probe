@@ -34,7 +34,15 @@
   VRAM kv_store −17 MiB (= ½ cache). Oracle anti-câblage-croisé 12/12 exact (2 découvertes :
   déduplication de nœuds au traçage ZML ; dédup inter-familles norms×ple nommée). Résultats :
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
-- [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence.
+- [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence. **EN COURS** (branche
+  `batching`) : spec `docs/superpowers/specs/2026-07-12-batching-flash-attn-design.md`, plan
+  `docs/superpowers/plans/2026-07-12-batching-flash-attn.md`, résultats
+  `docs/BATCHING_RESULTS.md`. Audit upstream ZML fait (`docs/ZML_UPSTREAM_AUDIT_2026-07-12.md`)
+  → **pas de bump** (les 164 commits d'avance ne débloquent rien : cudnn sdpa toujours mort,
+  FA2/FA3 assertent toujours B==1). **Gate T0 PASS** : moteur shape-polymorphe (les 5 reshapes
+  dérivent B/S des shapes d'entrée), HLO byte-identique (md5 `ac9df2ae…`), un binaire unique
+  sert tous les B. Reste : B1 (selftest primitives batchées) → B2/B3 (fidélité, indépendance)
+  → B4 (sweep B → plafond VRAM) ; puis Phase 2 sdpa (S1-S3).
 - [x] **L3 in-graph** — **LIVRÉ 12 juil 2026** (branche `l3-ingraph`, spec/plan
   `docs/L3_INGRAPH_DESIGN.md`/`docs/L3_INGRAPH_PLAN.md`) : forward token→token, gather
   embeddings + `topK` désormais **dans le graphe** (`StepTok`/`Tabs`), le host ne thread plus
