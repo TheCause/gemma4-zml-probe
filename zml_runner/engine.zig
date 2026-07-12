@@ -20,6 +20,10 @@ pub const FULL_WRITER: usize = 14;
 pub const SLIDING_WRITER_SLOT: i64 = 11; // slidingSlot(13)
 pub const FULL_WRITER_SLOT: i64 = 2; // fullSlot(14)
 
+// B/S ne sont PLUS consommés par le moteur : depuis le gate batch T0, les 5 sites de reshape
+// (q/k/v + les 2 du PLE) dérivent leurs dims batch/seq des SHAPES D'ENTRÉE (`h0.dim(.b)`,
+// `embeds.dim(.s)`…) → le graphe est shape-polymorphe, un binaire unique sert tous les B.
+// Déclarations gardées pour les runners existants (qui construisent encore des shapes à 1).
 pub const B: i64 = 1;
 pub const S: i64 = 1;
 pub const D: i64 = 1536;
@@ -320,7 +324,15 @@ pub const EngineCfg = struct {
     two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
     kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
     kmax_full: i64 = 8, // (info ; la dim full vient de la fixture)
+    // Variante d'attention (chantier batching, Phase 2). `.manual` = chemin actuel roulé main
+    // (scores bruts exposés → PrecRt s'y accroche) ; `.sdpa` = zml.nn.sdpa (chemin « produit »).
+    // Le défaut `.manual` est strictement neutre : la branche `.sdpa` est comptime-morte → HLO
+    // byte-identique (gate S1). NB : `.sdpa` NEUTRALISE les familles qk_scores/softmax/pv_ctx de
+    // PrecRt (sdpa fait ses propres converts) → gates sdpa en fp32 pur, cf spec §3.4.
+    attn: AttnKind = .manual,
 };
+
+pub const AttnKind = enum { manual, sdpa };
 
 /// Config de précision RUNTIME (G2.3, approche B de la spec). Un champ par FAMILLE d'ops ;
 /// `null` = f32 (baseline). Portée par le modèle comme CHAMP RUNTIME (self.prec) — plus dans
@@ -392,7 +404,7 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
 
     const h0 = rmsScaleDPrec(prec.norms, prec.compute, hidden, layer.input_layernorm);
 
-    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ B, S, NH, hd }).withTags(.{ .b, .s, .nh, .hd });
+    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), NH, hd }).withTags(.{ .b, .s, .nh, .hd });
     q = rmsScaleHdPrec(prec.norms, prec.compute, q, layer.q_norm);
     q = if (full) manualRope(prec.rope, prec.compute, q, cos, sin, half) else slidingRope(prec.rope, prec.compute, q, pos_s);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
@@ -409,12 +421,12 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
             cache_v = cache.sl_v.choose1d(.slot, SLIDING_WRITER_SLOT);
         }
     } else {
-        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         k = rmsScaleHdPrec(prec.norms, prec.compute, k, layer.k_norm);
         k = if (full) manualRope(prec.rope, prec.compute, k, cos, sin, half) else slidingRope(prec.rope, prec.compute, k, pos_s);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
-        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ B, S, KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
         // v_norm n'a PAS de poids : entrée encadrée seulement, sortie re-upcastée (famille norms).
         v = zml.nn.rmsNorm(inPrec(prec.norms, v), .hd, RMS_EPS).convert(prec.compute);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
@@ -456,14 +468,31 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
         cache_v = cache_v.convert(prec.compute);
     }
 
-    const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
-    var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
-    scores = scores.add(mask.broad(scores.shape()));
-    const probs = inPrec(prec.softmax, scores).softmax(.k).convert(prec.compute);
+    // Variante d'attention (cfg.attn, comptime → une seule branche émise).
+    // `.manual` (défaut) : chemin historique, byte-identique (gate S1).
+    // `.sdpa` : helper ZML. DEUX pièges neutralisés ici —
+    //   (1) sdpa scale K par 1/√hd PAR DÉFAUT alors que Gemma 4 a scaling = 1.0 (la norme passe par
+    //       q_norm) → `.scale = 1.0` OBLIGATOIRE, sinon les scores sont divisés par 16 ;
+    //   (2) `q_final.dtype()` et NON `qs.dtype()` : `qs` est déclaré dans la branche `.manual`
+    //       ci-dessous, donc hors scope ici (l'erreur ne sortirait qu'au premier build sdpa).
+    // sdpa refait lui-même le splitAxis GQA (nn.zig) et sort `{b,q,h,hd}` après transpose+merge :
+    // même forme que `ctx_attn.transpose(...)` du chemin manuel → le merge `.m` ci-dessous est commun.
+    const ctx_bqhhd = if (cfg.attn == .sdpa) blk: {
+        const one = zml.Tensor.scalar(1.0, q_final.dtype());
+        const o = zml.nn.sdpa(q_final, cache_k, cache_v, .{ .attn_mask = mask, .scale = one });
+        break :blk o.transpose(.{ .b, .q, .h, .hd });
+    } else blk: {
+        const qs = q_final.splitAxis(.h, .{ .h = cache_k.dim(.h), .hq = .auto });
+        var scores = dotPrec(prec.qk_scores, prec.compute, qs, cache_k, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
+        scores = scores.add(mask.broad(scores.shape()));
+        const probs = inPrec(prec.softmax, scores).softmax(.k).convert(prec.compute);
 
-    const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
-    const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
-    const attn_m = ctx_attn.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
+        const ps = probs.splitAxis(.h, .{ .h = cache_v.dim(.h), .hq = .auto });
+        const ctx_attn = dotPrec(prec.pv_ctx, prec.compute, ps, cache_v, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
+        break :blk ctx_attn.transpose(.{ .b, .q, .h, .hd });
+    };
+
+    const attn_m = ctx_bqhhd.merge(.{ .m = .{ .h, .hd } });
     const attn_out = dotPrec(prec.o_proj, prec.compute, attn_m, layer.o_proj, .m).rename(.{ .q = .s });
 
     const h1 = hidden.add(rmsScaleDPrec(prec.norms, prec.compute, attn_out, layer.post_attention_layernorm));
@@ -533,10 +562,10 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const prec = self.prec;
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
-                .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .reshape(.{ embptl_slice.dim(.b), embptl_slice.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
             const context = dotPrec(prec.ple, prec.compute, embeds, self.per_layer_model_projection, .d)
                 .scale(INV_SQRT_HID)
-                .reshape(.{ B, S, NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .reshape(.{ embeds.dim(.b), embeds.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
             const context_norm = rmsScaleP(context, cvt(self.per_layer_projection_norm, prec.compute));
             return context_norm.add(token_identity).scale(INV_SQRT_2);
         }

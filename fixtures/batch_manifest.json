@@ -1,0 +1,41 @@
+{
+  "chantier": "batching statique + variante sdpa",
+  "spec": "docs/superpowers/specs/2026-07-12-batching-flash-attn-design.md",
+  "plan": "docs/superpowers/plans/2026-07-12-batching-flash-attn.md",
+  "gate_t0_infra": {
+    "date": "2026-07-12",
+    "zml_rev_3090": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+    "zml_rev_m1_mirror": "adee932efa875d181cfc3ec8cbc4eb822db76035",
+    "zml_rev_match": true,
+    "zml_workspace_3090": "/data/rqz_workspace/zml",
+    "pjrt_patch": {
+      "present": true,
+      "path": "pjrt/pjrt.zig:26",
+      "content": "@setEvalBranchQuota(100_000)",
+      "note": "local patch rqz — type names longs (EngineModel cfg comptime) font deborder le quota 1000 via indexOf. Chemin reel = pjrt/pjrt.zig (PAS zml/pjrt.zig)."
+    },
+    "gpu": {
+      "driver": "580.159.03",
+      "memory_total_mib": 24576,
+      "memory_used_at_capture_mib": 0,
+      "compute_apps_at_capture": "aucune (GPU vierge)"
+    },
+    "upstream_audit": "docs/ZML_UPSTREAM_AUDIT_2026-07-12.md (164 commits d'avance, pas de bump — verrous cudnn/FA2 B==1 inchanges)"
+  },
+  "gate_t0": {
+    "date": "2026-07-12",
+    "verdict": "PASS",
+    "method": "md5 module_0001.zml.before_optimizations.txt (gold G2.3.0), temoin gemma4_gen_auto rebuilde avant/apres",
+    "md5_before": "ac9df2ae66da8aba65a0a606bf5947ec",
+    "md5_after": "ac9df2ae66da8aba65a0a606bf5947ec",
+    "byte_identical": true,
+    "dump_files": 308,
+    "sanity_tokens": [9259, 236888]
+  },
+  "vm_paths": {
+    "weights": "/data/gemma4-zml-probe/weights/model.safetensors",
+    "tokenizer": "/data/gemma4-zml-probe/gemma4-e2b-it-meta/tokenizer.json",
+    "warning": "le snapshot du cache HF est un symlink vers blobs/ -> error.InvalidPath avec TensorRegistry.fromPath"
+  },
+  "sweep_points": []
+}

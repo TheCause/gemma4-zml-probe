@@ -122,6 +122,38 @@ marge fine au step ~590 — le N/N n'est pas une propriété garantie de toute s
 banc : `--oracle <fixture>` (comparaison à `fed`), `--ids-only`, `--selftest-inputs`,
 `--selftest-gather` (mode GPU depuis L3, cf plus haut).
 
+### 2.2 bis Génération BATCHÉE multi-prompts (chantier batching, 8 gates PASS le 12 juillet 2026)
+
+`gemma4_bbatch` : le même runtime autonome, mais **B séquences en parallèle** dans un seul graphe.
+Le moteur est devenu **shape-polymorphe** (les 5 reshapes dérivent B/S des shapes d'entrée), donc
+**un binaire unique sert tous les B** — sans changer d'un octet le HLO à B=1 (gate T0, md5
+byte-identique).
+
+```bash
+# banc multi-prompts (B = nombre de lignes du fichier)
+gemma4_bbatch <model.safetensors> <tokenizer.json> --prompts prompts.txt --max-tokens 48
+# fidélité par lane vs oracles HF (fixtures appariées par index)
+gemma4_bbatch ... --prompts fixtures/bench_prompts_b4.txt --oracles f0.st,f1.st,f2.st,f3.st
+# constitution du jeu (les lanes doivent avoir la MÊME longueur tokenisée)
+gemma4_bbatch ... --prompts candidats.txt --ids-only
+```
+
+**Débit mesuré (fp32, 3090)** — le pic VRAM ne bouge pas (16 670 MiB à tous les B : il est atteint
+pendant la **compilation**, le cache KV par lane ~38 Mo y est noyé) :
+
+| B | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|
+| agrégé (tok/s) | 113,6 | 211,6 | 401,9 | 718,5 | **1 203** | 1 734 | **2 106** |
+| par lane (tok/s) | 113,6 | 105,8 | 100,5 | 89,8 | 75,2 | 54,2 | 32,9 |
+
+**Le plafond n'est pas la VRAM, c'est le compute** — il n'y a pas de mur, mais un rendement
+décroissant. **Point d'exploitation utile : B=8-16** (×6 à ×10 de débit agrégé en gardant
+75-90 tok/s par séquence). Au-delà : throughput pur (corpus, distillation), pas d'interactif.
+Non-régression vérifiée : bbatch à B=1 == `gen_auto` (ratio 0,999, runs appariés).
+Contraintes V1 : prompts de **même longueur tokenisée** (le moteur partage un `ctrl.step` et une
+position de scatter), greedy (sampling host-side optionnel hors gates).
+Détails et findings : `docs/BATCHING_RESULTS.md`.
+
 ### 2.3 Fidélité en bf16 (chantier G2, PASS 4 juillet 2026)
 
 La claim « == HF » n'est **pas un artefact fp32**. Protocole complet : [`G2_BF16_FIDELITY.md`](G2_BF16_FIDELITY.md).
@@ -465,6 +497,25 @@ d'elle-même.
 15. **Pas de bit-à-bit entre deux compiles XLA-GPU** (autotuning : le `before_optimizations` est
     stable, le post-opt non) — comparer des MÉTRIQUES, quantifier le bruit compile-à-compile
     (~2 % sur un grand effet, jusqu'à ~16 % sur un petit — G2.3 §9.2/§9.4).
+16. **Un banc doit distinguer « le test a échoué » de « le test n'a pas tourné »** (chantier
+    batching) : le 1er sweep a rapporté un « B=4 FAIL » qui était en réalité un run **refusé par
+    la garde de contention** (VRAM du run précédent non libérée). Corollaire : **verrou
+    d'instance unique** (`flock`) + fichiers temporaires uniques (`mktemp`) — deux sweeps
+    concurrents (un « tué » côté client survivait sur la VM) se partageaient GPU et `/tmp`, et
+    produisaient des chiffres croisés parfaitement plausibles.
+17. **Le batching n'introduit pas d'erreur, il EXPOSE la fragilité des ties** : à B>1, l'ordre de
+    réduction GEMM change → un tie à ~1e-4 sur les logits bascule. Le même run B=4 donne 4/4 en
+    isolation et 3/4 dans le sweep (**même binaire, même prompts**) : c'est le piège 15 qui se
+    manifeste sur l'argmax. Les lanes restent bit-identiques **entre elles** (aucune
+    contamination). Ne jamais lire une bifurcation de lane comme un bug de batching sans avoir
+    regardé la **marge top1−top2**.
+18. **`@import("root")` referme une boucle de dépendance** quand le fichier root importe le
+    module qui le lit (`gemma4_bbs` → `gemma4_bbatch` → root) : pour une variante comptime entre
+    deux binaires partageant des sources, passer un **paramètre comptime explicite**
+    (`runWith(comptime attn, init)`), pas `@import("root")`.
+19. **`zml.nn.sdpa` scale K par 1/√hd par DÉFAUT** alors que Gemma 4 a un scaling de 1.0 (la
+    normalisation passe par `q_norm`) → `.scale = Tensor.scalar(1.0)` **obligatoire**, sinon les
+    scores sont silencieusement divisés par 16.
 
 ---
 
