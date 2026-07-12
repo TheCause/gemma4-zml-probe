@@ -19,9 +19,9 @@
 
 | Gate | État | Verdict | Chiffres |
 |---|---|---|---|
-| S1 — neutralité `attn=.manual` | ⏳ | | |
-| S2 — fidélité sdpa | ⏳ | | |
-| S3 — A/B perf sdpa vs manual | ⏳ | | |
+| S1 — neutralité `attn=.manual` | ✅ fait (12 juil) | **PASS** | md5 identique à la baseline T0 |
+| S2 — fidélité sdpa | ✅ fait (12 juil) | **PASS** | 48/48 par lane (B=1 et B=4) |
+| S3 — A/B perf sdpa vs manual | ✅ fait (12 juil) | **PAS DE GAIN** | Δ = +1,0 % (B=1) / +0,0 % (B=4) |
 | F1 — spike FA2 (optionnel) | ⏳ | | |
 
 ---
@@ -266,3 +266,58 @@ mais un **rendement décroissant** :
 > imposé par la VRAM (« chaque séquence ajoute ~38 Mo de cache ») et faisait du plafond l'output
 > du banc. La mesure dit autre chose : **la VRAM n'est pas le facteur limitant** dans cette
 > gamme. C'est le compute qui plafonne, et il le fait en douceur.
+
+---
+
+# Phase 2 — variante d'attention `sdpa`
+
+## S1 — neutralité de `attn = .manual` — **PASS** (12 juillet 2026)
+
+L'ajout du champ comptime `EngineCfg.attn` **et de sa branche** (livrés ensemble — un champ que
+rien ne consomme rendrait ce gate vacuous) laisse le chemin par défaut strictement intact :
+
+| | md5 `module_0001.zml.before_optimizations.txt` |
+|---|---|
+| Baseline T0 (avant la branche) | `ac9df2ae66da8aba65a0a606bf5947ec` |
+| S1 (branche `.sdpa` ajoutée, `attn = .manual`) | `ac9df2ae66da8aba65a0a606bf5947ec` |
+| **Verdict** | **byte-identique → PASS** |
+
+La branche `.sdpa` est bien **comptime-morte**, et le refactor (le `merge .m` devient commun aux
+deux chemins) n'a pas changé l'**ordre d'émission** du chemin manuel.
+
+## S2 — fidélité de la variante sdpa — **PASS** (12 juillet 2026)
+
+`gemma4_bbs` (= le runner batché, variante `.sdpa`) vs les mêmes fixtures HF :
+
+| Run | Verdict |
+|---|---|
+| sdpa, B=1 | **PASS — 48/48** |
+| sdpa, B=4 | **PASS — 4/4 lanes à 48/48** |
+
+**Le piège du scaling est bien neutralisé** : `zml.nn.sdpa` applique 1/√hd sur K par défaut, alors
+que Gemma 4 a un scaling de 1.0 (la normalisation passe par `q_norm`). Sans le `.scale = 1.0`
+explicite, les scores auraient été **divisés par 16** — l'oracle == HF le prouve a contrario.
+
+## S3 — A/B perf sdpa vs manual — **PAS DE GAIN DÉMONTRABLE** (12 juillet 2026)
+
+Runs appariés dans la même fenêtre de session, 3 runs par bras, médiane (protocole B4 §4) :
+
+| B | manual (tok/s) | sdpa (tok/s) | Δ | Verdict |
+|---|---|---|---|---|
+| 1 | 112,2 / 113,2 / 112,3 → **112,3** | 113,6 / 113,4 / 113,2 → **113,4** | **+1,0 %** | \|Δ\| < 5 % → pas de gain démontrable |
+| 4 | 397,9 / 403,5 / 400,2 → **400,2** | 400,3 / 403,3 / 398,3 → **400,3** | **+0,0 %** | \|Δ\| < 5 % → pas de gain démontrable |
+
+**Conclusion honnête, et elle était prévisible** : l'audit upstream
+(`docs/ZML_UPSTREAM_AUDIT_2026-07-12.md`) avait établi que **le chemin cudnn de `zml.nn.sdpa` est
+du code mort** (bloc commenté `nn.zig:1085-1088`, `canUseCudnnSdpa` inexistant) — y compris dans
+l'upstream d'aujourd'hui. `sdpa` se réduit donc à **la même composition dot → softmax → dot** que
+notre chemin manuel, et XLA la fuse à l'identique. **Il n'y avait aucun kernel flash à gagner.**
+
+Ce que ce gate établit malgré tout :
+1. La variante est **numériquement correcte** (S2) — le chemin « produit » de GPU_PORT_PLAN §9.3
+   est validé et disponible si un ZML futur réactive le cudnn.
+2. Le **coût de l'abstraction est nul** : passer par le helper ZML ne dégrade pas la perf
+   (Δ ≈ 0), donc rien ne s'oppose à l'adopter — mais rien ne l'impose non plus.
+3. Le vrai gain flash-attention est ailleurs : **Triton Unified Attention** (B>1 natif, f32,
+   scale custom, sliding window), qui exige un bump ZML **et** une refonte du cache YOCO vers un
+   layout paginé → **3e chantier**, cf. l'audit.
