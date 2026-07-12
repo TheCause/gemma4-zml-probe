@@ -80,6 +80,11 @@ consommateurs dérivent la dimension batch (et seq) **des shapes d'entrée** :
 // après :  .reshape(.{ x.dim(.b), x.dim(.s), NH, hd })   // x = tensor d'entrée du site
 ```
 
+Note d'implémentation : en Zig le receiver n'est pas référençable dans ses propres arguments —
+couper la chaîne (`const qd = dotPrec(...); qd.reshape(.{ qd.dim(.b), ... })`) ou dériver de
+`h0`/`embeds` déjà en scope, qui portent `{b,s}` (le dot ZML préserve les tags non contractés,
+`tensor.zig:1139-1155`).
+
 Justification — c'est le geste G2.3 réappliqué (« sortir la config du type ») :
 - **Un binaire unique** sert tous les B → doctrine de custody G2.3 §7.1 conservée telle quelle
   (build unique pour tout le sweep, sha256 constant vérifié avant chaque run — pas de custody
@@ -129,8 +134,9 @@ Squelette gen_auto généralisé par lane. Nom court (13c < plafond ~20c du quot
   prefill, compté dans generated) pour rester comparable aux 110-113 tok/s B=1 ;
   `t_prefill_end` unique (frontière commune) ; tok/s **agrégé** = Σ tokens générés (lanes
   actives) / gen_s, et tok/s **par lane** ; prefill mesuré séparément. Le **K du topK est
-  consigné au manifest** (confound K=64 bbatch vs K=5 gen_auto — si B4 est marginal, re-run
-  avec K apparié) [rev. canonique].
+  consigné au manifest** (confound K=64 bbatch vs K=5 gen_auto — seuil « marginal » pré-défini :
+  si le verdict B4 tient à moins de 5 points de %, re-run avec K apparié qui **remplace** le
+  verdict initial ; les deux mesures publiées) [rev. canonique].
 - **Garde VRAM** : la garde 20 GiB de gen_auto est calibrée B=1 et reste **intouchée**.
   bbatch porte une **garde de contention** (refus si d'autres process compute occupent le GPU,
   échappatoire `--force-vram`) — logique nvidia-smi **dupliquée** depuis checkVram, PAS
@@ -142,7 +148,11 @@ Squelette gen_auto généralisé par lane. Nom court (13c < plafond ~20c du quot
 - **Protocole pré-enregistré committé AVANT tout run** (discipline G2.3 §5) :
   `docs/BATCH_BENCH_PROTOCOL.md` fige, avant le premier point de mesure : la liste des B,
   le jeu de prompts (fichier versionné), le nombre de runs par point, les statistiques,
-  le budget bruit, et le protocole B4 (§6). Tout écart = déviation documentée.
+  le budget bruit, et le protocole B4 (§6). **Charge par point explicitée** : bras apparié
+  B=1 = fixture 49 (gen_auto est mono-prompt) ; points B=2/4 = jeux distincts versionnés
+  (politique §3.2) ; B≥8 = `--replicate` + spot-check lane 0 ; la médiane de non-régression
+  se calcule sur 3 runs × 48 tokens, le run long 999 sert au pic VRAM (façon G3 — vérifier
+  `ids.len + 999 ≤ L_MAX=1024` pour le prompt du run long). Tout écart = déviation documentée.
 - **Un build unique pour tout le sweep** (§3.1) : sha256 du binaire consigné une fois,
   vérifié avant chaque run (le hash qui change = sweep invalide — doctrine G2.3 §7.1).
 - Balayage B ∈ {1, 2, 4, 8, 16, …} (liste bornée, pas linéaire — chaque B = un graphe
@@ -193,7 +203,7 @@ pub const EngineCfg = struct {
 - **Note quota comptime** : ce champ enum allonge `@typeName` (tension avec la leçon G2.3) —
   mitigations : noms courts, patch pjrt 100_000 vérifié en T0, build 3090 tôt (leçon L3 [it.5]).
 
-### 3.5 Sampling optionnel (mode charge, hors gates — dernière tâche, détachable)
+### 3.5 Sampling optionnel (mode charge, hors gates — livré après B4, détachable)
 
 - `topK` in-graph passe à K paramétrable dans bbatch (défaut 64 ; gen_auto reste K=5,
   aucune contrainte d'identité entre les deux binaires — les gates de bbatch sont vs fixtures HF).
@@ -240,10 +250,10 @@ driftent — préférer les ancres de section (« piège 14/15 ») [rev. fact-ch
 
 | Gate | Contenu | Critère PASS |
 |---|---|---|
-| **T0** | Neutralité du B shape-polymorphe (`dim(.b)/dim(.s)` aux 5 sites) ; capture `git rev-parse` ZML 3090 + vérif patch pjrt | md5 `module_0001.zml.before_optimizations.txt` **identique** sur gemma4_gen_auto recompilé (méthode gold G2.3.0 — jamais le post-opt, piège 15 ; gen_auto est le bon témoin : il instancie EngineModel avec les défauts) ; rev consignée au manifest |
+| **T0** | Neutralité du B shape-polymorphe (`dim(.b)/dim(.s)` aux 5 sites) ; capture `git rev-parse` ZML 3090 + vérif patch pjrt | md5 `module_0001.zml.before_optimizations.txt` **identique** sur gemma4_gen_auto recompilé (méthode gold G2.3.0 — jamais le post-opt, piège 15). Témoin valide car **ses entrées symboliques sont à b=1/s=1 littéraux** (`gen_auto.zig:937,944-956`) et forwardStep+perLayerInputs exerce les 5 sites ; NB sa cfg réelle est `two_masks=true` (`gen_auto.zig:50`) — la couverture du chemin `two_masks=false` repose sur le partage du code des 5 sites (option : md5 secondaire sur gemma4_engine_e1). **Repli pré-enregistré** (hiérarchie G2.3.0 §6.1) : si le md5 diffère cosmétiquement → diff catégorisé publié + gates cumulatifs (G1 == HF, E1 4/4, replay == HF), sinon refactor rejeté. Rev consignée au manifest |
 | **B1** | Spike primitives batchées sur 3090, mode `--selftest-batch` de bbatch : scatterSlices update `.b=2` au même pos (jamais exercé), gather tok `{2,1}`, topK `{b,K}` layout D2H, **et broad du masque b=1→B rank-égal (§2.8)** | mini-graphe type SgFwd, valeurs exactes vs référence host, B=2 |
 | **B2** | Fidélité batch, **prompts distincts**, B=2 puis B=4 | chaque lane **48/48 == sa fixture 49** (fp32) ; procédure d'échec §4 ; **non-vacuité** : une lane corrompue (fed altéré) → FAIL obligatoire |
-| **B3** | Indépendance inter-lanes — **pinné [rev.6]** : B=4, même prompt ×4, 48 steps | égalité des **ids u32 par step sur les 4 lanes**, à chaque step où les lanes sont actives (même prompt ⇒ même step d'EOT attendu ; toute divergence de step d'EOT = FAIL) |
+| **B3** | Indépendance inter-lanes — **pinné [rev.6]** : B=4, même prompt ×4, 48 steps ; prompt choisi pour que l'EOT tombe **dans** la fenêtre des 48 steps (sinon la clause EOT est documentée vacuous et seule l'égalité des ids porte) | égalité des **ids u32 par step sur les 4 lanes**, à chaque step où les lanes sont actives (même prompt ⇒ même step d'EOT attendu ; toute divergence de step d'EOT = FAIL) |
 | **B4** | Sweep B ∈ {1,2,4,8,…} → plafond. **Protocole pré-enregistré** [rev.1], committé dans `BATCH_BENCH_PROTOCOL.md` AVANT tout run : comparateur = **runs frais appariés** gen_auto vs bbatch B=1 dans la même fenêtre de session (jamais les chiffres publiés seuls) ; **3 runs par bras ; statistique = médiane ; budget bruit = −5 %** (couvre le ~2 % « grand effet » du piège 15 avec marge) ; charge = fixture 49 × 48 tokens + un run long 999 (façon G3) | table B → {tok/s agrégé, par lane, pic VRAM --no-prealloc, compile s} publiée ; plafond B rapporté ; non-régression : **médiane(bbatch B=1) ≥ 0,95 × médiane(gen_auto)** en tok/s gén |
 
 **Phase 2 — sdpa (détachable)** :
@@ -252,7 +262,7 @@ driftent — préférer les ancres de section (« piège 14/15 ») [rev. fact-ch
 |---|---|---|
 | **S1** | Neutralité `attn=.manual` — livré AVEC la branche comptime (§3.4, jamais un champ sans branche) | md5 before_opt identique (même méthode que T0) |
 | **S2** | Fidélité sdpa, B=1 et B=4 | 48/48 par lane vs mêmes fixtures ; procédure d'échec §4 |
-| **S3** | Perf A/B sdpa vs manual | même protocole que B4 (runs appariés, 3×, médiane, budget −5 %) aux mêmes B ; verdict différentiel publié (gain OU absence de gain — le cudnn étant mort, l'A/B mesure la fusion XLA : conclusion honnête exigée) |
+| **S3** | Perf A/B sdpa vs manual | même protocole que B4 (runs appariés, 3×, médiane) aux mêmes B ; **sémantique A/B du budget** : \|Δ médiane\| < 5 % ⇒ verdict « pas de gain démontrable » (le cudnn étant mort, l'A/B mesure la fusion XLA : conclusion honnête exigée, dans les deux sens) |
 | **F1** *(spike optionnel, non bloquant)* | FA2 custom call à B=1 | mesure tok/s + fidélité courte ; échec/incompatibilité = résultat publiable, ne bloque pas le cycle |
 
 Chaque gate FAIL/null se documente au même titre qu'un PASS (« la doc porte les résultats,
