@@ -181,3 +181,33 @@ Le pic **ne croît pas avec B** dans cette gamme : il est atteint **pendant la c
 dedans. Conséquence : dans la gamme testée, **le plafond de batch n'est pas gouverné par la VRAM
 du cache** mais par le pic de compilation — le seuil de garde de `gemma4_gen_auto` (20 GiB,
 calibré B=1) reste donc valide tel quel.
+
+---
+
+## Résultat central — la fidélité stricte n'est pas *reproductible d'une compile à l'autre*
+
+Le même run à B=4 (mêmes prompts, mêmes fixtures, même binaire — sha256 vérifié) donne :
+- en isolation (12 juil, ~16 h) : **4/4 lanes à 48/48** ;
+- dans le sweep (12 juil, ~17 h) : **3/4 lanes**, une lane bifurque.
+
+Et à B=8 : **2 lanes bifurquent** au premier run, **zéro** au run du sweep.
+
+**Ce n'est ni un bug de batching, ni du bruit de mesure** : c'est le **non-déterminisme
+inter-compiles XLA-GPU** — le « piège 15 » déjà consigné dans ce repo, et déjà observé au gate
+G2b de L3 (bifurcation au step 960 ou 590 **selon la compile**). Chaque valeur de B, et chaque
+compilation, produit un plan d'exécution dont l'ordre de réduction diffère ; un tie à ~1e-4
+bascule alors d'un côté ou de l'autre.
+
+**Formulation juste** (celle qu'il faut retenir) :
+> Le batching **n'introduit pas d'erreur**. Il **expose la fragilité des ties** à l'ordre de
+> réduction — fragilité qui existe déjà entre deux compilations du même code mono-séquence.
+> C'est une propriété du couple XLA/GPU, pas du portage.
+
+C'est exactement pourquoi le critère de fidélité de ce repo est **différentiel** et non N/N
+(précédents : A2, G2b ; HF lui-même ne se reproduit pas à 1020/1020). Les lanes restent
+**bit-identiques entre elles** (B3) : aucune contamination. Les sorties bifurquées restent
+sémantiquement correctes — elles suivent une autre trajectoire greedy tout aussi valide.
+
+**Conséquence pratique** : pour un banc de mesure (l'usage cible), c'est sans effet. Pour un
+usage exigeant la reproductibilité token-pour-token vs HF, il faut **fixer B** (le graphe est
+alors stable) et accepter la variance inter-compiles — ou rester en mono-séquence.
