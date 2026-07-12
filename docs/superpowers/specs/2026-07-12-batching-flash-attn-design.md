@@ -50,6 +50,9 @@ un à un par le fact-check de revue) :
    batché est la paged attention, au layout cache `{page,k_chunk,...}` incompatible avec les
    15 slots YOCO. → « flash + batching » simultané **infaisable sur ce vendored ZML** :
    le design séquence, FA2 réel = spike B=1 optionnel non bloquant (gate F1).
+   **Vérifié aussi sur origin/master du 12 juil** (`ed2bd190`, 164 commits d'avance) : les deux
+   verrous (cudnn mort, FA2/FA3 B==1) tiennent — un bump ne débloquerait rien pour ce chantier
+   (audit complet : `docs/ZML_UPSTREAM_AUDIT_2026-07-12.md`).
 5. **La révision ZML de la 3090 n'est pinée nulle part** (deploy = rsync de `zml_runner/` seul ;
    présomption forte `/data/rqz_workspace/zml == adee932e` — les numéros de ligne cités dans
    les commentaires du code livré matchent exactement). À capturer en gate T0, avec le rappel
@@ -290,7 +293,12 @@ pas les logs » — logs/ gitignorés).
 - Prompts de longueurs hétérogènes : padding, positions `[b]`, masques par lane.
 - Vrai prefill S>1 (option B) — reste la baseline léguée, mesurée séparément (L3 §6 [it.6]).
 - Sampling in-graph (RNG device) ; sampling de référence (le mode charge est une approximation top-K).
-- Flash-attention batchée (paged attention, layout cache incompatible) ; bump de révision ZML.
+- Flash-attention batchée (paged attention, layout cache incompatible).
+- **Bump de révision ZML** — décision étayée par l'audit upstream du 12 juil
+  (`docs/ZML_UPSTREAM_AUDIT_2026-07-12.md`) : les 164 commits d'avance ne débloquent rien pour
+  ce chantier (cudnn sdpa toujours mort, FA2/FA3 toujours B==1, surface API du moteur identique) ;
+  bump = chantier dédié APRÈS, déclencheurs consignés (dont l'éventuel 3e chantier
+  « triton paged attention », seul chemin flash B>1 crédible, qui l'imposera de toute façon).
 - Combinaison sdpa × familles de précision bf16 (G2.3).
 
 ## 9. Périmètre exact
