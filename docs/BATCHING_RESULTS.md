@@ -11,8 +11,8 @@
 |---|---|---|---|
 | T0 — neutralité du B shape-polymorphe | ✅ fait (12 juil) | **PASS** | md5 `before_optimizations` identique |
 | B1 — selftest primitives batchées | ✅ fait (12 juil) | **PASS** | 4/4 sous-tests exacts, B=2 |
-| B2 — fidélité par lane (B=2, B=4) | ⏳ | | |
-| B3 — indépendance inter-lanes | ⏳ | | |
+| B2 — fidélité par lane (B=2, B=4) | ✅ fait (12 juil) | **PASS** | 2/2 puis 4/4 lanes à 48/48 == HF ; non-vacuité OK |
+| B3 — indépendance inter-lanes | ✅ fait (12 juil) | **PASS** | 4 lanes identiques, 48/48 steps |
 | B4 — sweep B → plafond VRAM | ⏳ | | |
 
 ## Phase 2 — sdpa
@@ -75,3 +75,46 @@ gather rank-2 `{B,1}` passe sans le repli 1-D documenté, et le layout D2H du to
 
 VRAM libre au lancement : 23,8 GiB — **aucun seuil appliqué** (le plafond est l'output du banc,
 la garde ne mord que sur contention).
+
+---
+
+## B2 — fidélité par lane vs HF — **PASS** (12 juillet 2026)
+
+Chaque lane est comparée **à sa propre fixture HF mono B=1** (jamais à un run HF batché, dont
+le padding changerait la numérique de la référence — spec §4). Jeu : 4 prompts **distincts** de
+même longueur tokenisée (19 tokens), fixtures produites par `scripts/60_batch_oracles.sh`
+(N invocations de `scripts/49`, `--n-tokens 48` figé).
+
+| Run | Verdict | Détail |
+|---|---|---|
+| **B=2** (prompts distincts) | **PASS 2/2** | lanes 0 et 1 : **48/48 argmax-match** |
+| **B=4** (prompts distincts) | **PASS 4/4** | lanes 0-3 : **48/48 argmax-match** |
+| **Non-vacuité** (fixture corrompue) | **FAIL obligatoire obtenu** | `fed[10]` altéré (12345) sur la lane 1 → FAIL **au step gen=10 exactement** (`généré=674, attendu=12345`), diagnostic top-5 émis (marge top1−top2 = 9,48e-2) ; **lane 0 reste PASS** → le gate mord, et il mord *par lane*. |
+
+**Aucune bifurcation d'argmax légitime observée** : la procédure d'échec pré-enregistrée (§4 —
+requalification différentielle sur tie) **n'a pas eu à servir**. Le batching ne dégrade pas la
+fidélité : à B=2 et B=4, chaque lane reproduit HF token pour token sur 48 steps.
+
+## B3 — indépendance inter-lanes — **PASS** (12 juillet 2026)
+
+`--replicate 4` sur un prompt unique, 48 steps : **les 4 lanes produisent des ids identiques à
+chaque step** (48/48 comparés), et leurs textes détokenisés sont identiques — c'est d'ailleurs
+exactement la réponse HF de la fixture correspondante (« ## Le Mystère de Moustache… »),
+recoupement croisé gratuit avec B2. Aucune contamination : le `scatterSlices` à position
+scalaire partagée n'écrit pas d'une lane sur l'autre (ce que B1/2 avait prouvé sur mini-graphe,
+B3 le confirme sur le moteur complet).
+
+**Limite honnête** : l'EOT n'arrive pas dans la fenêtre de 48 steps pour ce prompt
+(`step EOT=null` sur les 4 lanes) → la clause « même step d'EOT » du critère est **vacuous ici**
+(cas prévu par le plan). Le critère porteur reste l'égalité des ids par step, qui est vérifiée.
+
+## Perf — premiers chiffres (non gatés, B4 fera la mesure protocolaire)
+
+| B | Prefill (par lane) | Génération agrégée | Par lane | Compile |
+|---|---|---|---|---|
+| 2 | 65-73 tok/s | **210 tok/s** | 105 tok/s | 25,8 s |
+| 4 | 69-71 tok/s | **402 tok/s** | 100 tok/s | 22,1 s |
+
+Le débit agrégé scale **quasi linéairement** (×1,9 à B=2, ×3,6 à B=4 par rapport au mono ~110)
+avec une érosion par lane très faible (110 → 105 → 100 tok/s). Chiffres indicatifs : le verdict
+de non-régression B4 se fera sur **runs frais appariés, 3×, médiane** (protocole pré-enregistré).
