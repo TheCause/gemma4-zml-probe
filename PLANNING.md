@@ -34,15 +34,25 @@
   VRAM kv_store −17 MiB (= ½ cache). Oracle anti-câblage-croisé 12/12 exact (2 découvertes :
   déduplication de nœuds au traçage ZML ; dédup inter-familles norms×ple nommée). Résultats :
   `docs/G2_3_OP_SENSITIVITY.md`. → PR vers main à merger.
-- [M] **Batching / flash-attention** — perf GPU au-delà du mono-séquence. **EN COURS** (branche
-  `batching`) : spec `docs/superpowers/specs/2026-07-12-batching-flash-attn-design.md`, plan
-  `docs/superpowers/plans/2026-07-12-batching-flash-attn.md`, résultats
-  `docs/BATCHING_RESULTS.md`. Audit upstream ZML fait (`docs/ZML_UPSTREAM_AUDIT_2026-07-12.md`)
-  → **pas de bump** (les 164 commits d'avance ne débloquent rien : cudnn sdpa toujours mort,
-  FA2/FA3 assertent toujours B==1). **Gate T0 PASS** : moteur shape-polymorphe (les 5 reshapes
-  dérivent B/S des shapes d'entrée), HLO byte-identique (md5 `ac9df2ae…`), un binaire unique
-  sert tous les B. Reste : B1 (selftest primitives batchées) → B2/B3 (fidélité, indépendance)
-  → B4 (sweep B → plafond VRAM) ; puis Phase 2 sdpa (S1-S3).
+- [x] **Batching / flash-attention** — **LIVRÉ 12 juil 2026** (branche `batching`, spec/plan
+  `docs/superpowers/specs|plans/2026-07-12-batching-flash-attn*`, résultats
+  `docs/BATCHING_RESULTS.md`, protocole pré-enregistré `docs/BATCH_BENCH_PROTOCOL.md`).
+  **8 gates PASS** — Phase 1 : T0 (moteur **shape-polymorphe** : les 5 reshapes dérivent B/S des
+  shapes d'entrée → **un binaire unique sert tous les B**, HLO **byte-identique** md5
+  `ac9df2ae…`), B1 (primitives batchées : scatter batché **jamais exercé** + broad rank-égal
+  prouvés), B2 (**48/48 == HF par lane** à B=2/B=4 + non-vacuité), B3 (lanes bit-identiques),
+  B4 (sweep 1→64 : **113 → 2 106 tok/s**, ×18,5 ; non-régression ratio **0,999**).
+  Phase 2 : S1 (byte-identique), S2 (sdpa 48/48 == HF), S3 (**PAS DE GAIN** : Δ ≈ 0 %).
+  **3 findings** : (1) le **plafond n'est pas la VRAM mais le compute** — le pic ne bouge pas
+  (16 670 MiB à tous les B, dominé par la compile) → la garde 20 GiB reste valide ; sweet spot
+  **B=8-16** ; (2) le batching **n'introduit pas d'erreur, il expose la fragilité des ties**
+  (même run B=4 : 4/4 en isolation, 3/4 dans le sweep — piège 15 sur l'argmax) ; (3) **sdpa ne
+  gagne rien** car son chemin cudnn est du **code mort** (audit upstream
+  `docs/ZML_UPSTREAM_AUDIT_2026-07-12.md` → **pas de bump ZML** : les 164 commits d'avance ne
+  débloquent rien, FA2/FA3 assertent toujours B==1).
+- [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
+  (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
+  YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
 - [x] **L3 in-graph** — **LIVRÉ 12 juil 2026** (branche `l3-ingraph`, spec/plan
   `docs/L3_INGRAPH_DESIGN.md`/`docs/L3_INGRAPH_PLAN.md`) : forward token→token, gather
   embeddings + `topK` désormais **dans le graphe** (`StepTok`/`Tabs`), le host ne thread plus
