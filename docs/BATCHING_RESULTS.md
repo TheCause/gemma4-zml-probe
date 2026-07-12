@@ -118,3 +118,66 @@ B3 le confirme sur le moteur complet).
 Le débit agrégé scale **quasi linéairement** (×1,9 à B=2, ×3,6 à B=4 par rapport au mono ~110)
 avec une érosion par lane très faible (110 → 105 → 100 tok/s). Chiffres indicatifs : le verdict
 de non-régression B4 se fera sur **runs frais appariés, 3×, médiane** (protocole pré-enregistré).
+
+---
+
+## Finding — bifurcation d'argmax sur tie à B=8 (le risque pré-enregistré s'est matérialisé)
+
+Au premier run à B=8 (`--replicate 2` sur le jeu de 4 prompts), **2 lanes sur 8 divergent de leur
+fixture HF** — et l'analyse montre que **ce n'est pas un bug de batching** :
+
+```
+B2 lane 1 : FAIL — 20/48 match, 1er mismatch au step gen=18
+B2 lane 5 : FAIL — 20/48 match, 1er mismatch au step gen=18     (même prompt que lane 1)
+  step gen=18 : généré=1017  attendu(fed)=236764
+  top-5 : idx={1017, 236764, …}  val={15.564460, 15.564353, …}
+  marge top1−top2 = 1,07e-4
+B3 PASS — lanes identiques 48/48 steps (4 groupes × 2 réplicas)
+```
+
+**Ce qui est établi** :
+1. Les deux lanes qui divergent portent le **même prompt** (lane 5 = réplica de lane 1) et
+   divergent **ensemble, au même step, vers le même token** — B3 le confirme indépendamment
+   (les lanes répliquées restent bit-identiques entre elles).
+   → **Aucune contamination inter-lanes** : le batching est correct.
+2. Les deux logits en compétition diffèrent de **1,07e-4 sur ~15,56** (écart relatif ~7e-6) :
+   c'est un **tie quasi parfait**. Changer B change les shapes GEMM, donc les kernels et l'ordre
+   de réduction XLA — un tie de cette finesse bascule.
+3. Les 6 autres lanes restent à **48/48**, et à B=2 et B=4 **toutes** les lanes sont à 48/48.
+
+**Application de la procédure d'échec pré-enregistrée** (spec §4, pattern A2) : le FAIL brut est
+**publié** ci-dessus ; le diagnostic top-5 montre une marge fine (tie) ; le critère est donc
+**requalifié en différentiel** pour B ≥ 8 — c'est exactement ce que le protocole prévoyait
+(§3 : « B ≥ 8 → spot-check lane 0 »). La leçon L3 se répète : **le critère N/N n'est pas
+exigible dès que l'ordre de réduction change** (précédents : HF ne se reproduit pas lui-même
+1016/1020 ; bifurcation G2b à 960 vs 590 selon la compile).
+
+**Ce que ça dit du batching en production** : jusqu'à B=4, la fidélité est **stricte** (== HF
+token pour token). Au-delà, les sorties restent parfaitement cohérentes entre lanes et
+sémantiquement correctes, mais un tie occasionnel peut faire diverger une lane de la trajectoire
+HF de référence — comportement attendu de tout moteur batché en float, pas un défaut du portage.
+
+## Piège d'instrumentation (sweep v1) — corrigé
+
+Le premier sweep a rapporté **B=4 → FAIL** alors que le même run **PASSE 4/4 en isolation**.
+Cause : le script enchaînait les runs sans attendre la libération de la VRAM du précédent → la
+**garde de contention du runner** (`error.GpuBusy`) refusait le run, et l'absence de « B2 PASS »
+dans la sortie se lisait comme un échec de fidélité. `scripts/61_batch_sweep.sh` attend désormais
+un GPU réellement libre avant chaque run et **loggue la cause** de tout FAIL.
+Leçon : un banc qui ne distingue pas « le test a échoué » de « le test n'a pas tourné » produit
+des faux FAIL — exactement le genre de silence que la discipline maison cherche à éliminer.
+
+## Mesure VRAM — le pic est dominé par la compilation, pas par le cache
+
+Mesure fine (`--no-prealloc`, échantillonnage 0,2 s, scopé au PID) :
+
+| B | pic VRAM |
+|---|---|
+| 1 | 16 698 MiB |
+| 8 | 16 686 MiB |
+
+Le pic **ne croît pas avec B** dans cette gamme : il est atteint **pendant la compilation XLA**
+(workspace transitoire), alors que le coût marginal par lane (~38 Mo de cache KV f32) reste noyé
+dedans. Conséquence : dans la gamme testée, **le plafond de batch n'est pas gouverné par la VRAM
+du cache** mais par le pic de compilation — le seuil de garde de `gemma4_gen_auto` (20 GiB,
+calibré B=1) reste donc valide tel quel.
