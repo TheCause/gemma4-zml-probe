@@ -92,7 +92,9 @@ si le wrapper pur s'avère impossible et qu'engine.zig doit bouger, la preuve de
 - **Étage 1** : script numpy de référence dequantant le checkpoint entier → comparaison par
   tranches (pattern scripts 07/14).
 - **Étage 2** : HF transformers chargeant **le même checkpoint** décompressé bf16 → décode
-  greedy 48 tokens, référence de bout en bout.
+  greedy 48 tokens, référence de bout en bout. Device : **CPU de la VM** par défaut (E2B bf16
+  ≈ 10 Go, ça passe ; déterminisme préférable, cohérent avec les oracles historiques) ; GPU
+  seulement si trop lent, alors comparaison sous enveloppe.
 
 **Critère épistémique** : on ne compare JAMAIS E2B-W4 à E2B-bf16 pour la correction (deux
 modèles différents). Vérité = ZML-W4 vs HF-lisant-le-même-checkpoint-W4.
@@ -189,7 +191,8 @@ peut pas échouer ne compte pas.
   réutiliser `/data/venvs/gemma4-probe` + `llm-compressor`/`compressed-tensors`), build ZML
   `/data/rqz_workspace/zml`, pilotage M1. Chemins connus : poids E2B
   `/data/gemma4-zml-probe/weights/model.safetensors`, tokenizer
-  `/data/gemma4-zml-probe/gemma4-e2b-it-meta/tokenizer.json`.
+  `/data/gemma4-zml-probe/gemma4-e2b-it-meta/tokenizer.json`. Le tokenizer 12B arrive avec le
+  checkpoint `w4a16-ct` (même famille de vocab 262144 — identité exacte à confirmer en U0).
 - **Taille du chantier** : comparable au portage E2B par jalon — plusieurs sessions, nuits
   3090. J1 seul a de la valeur (brique réutilisable, E2B en ~2,5 Go, terrain TurboQuant-poids) ;
   **règle d'arrêt possible après J1**.
