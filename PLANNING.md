@@ -50,6 +50,12 @@
   gagne rien** car son chemin cudnn est du **code mort** (audit upstream
   `docs/ZML_UPSTREAM_AUDIT_2026-07-12.md` → **pas de bump ZML** : les 164 commits d'avance ne
   débloquent rien, FA2/FA3 assertent toujours B==1).
+- [ ] 🌱 **Chantier W4 — poids 4-bit dans ZML → Gemma 4 12B sur la 3090** : spec prête au
+  tiroir (`docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`, approuvée + revue
+  18 juil 2026, exécution différée — décision Régis « graine »). Au réveil : `writing-plans`
+  depuis la spec, **jalon J1 d'abord** (brique W4 sur E2B) ; J2 (12B Unified) re-décidable
+  après J1. ⚠ re-vérifier au réveil : df VM (`/` ≠ `/data`), upstream ZML sans bump,
+  checkpoints QAT dispo.
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
