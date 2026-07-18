@@ -178,7 +178,7 @@ peut pas échouer ne compte pas.
 | R5 | GQA repeat-KV erroné | U4 dédié par tranche |
 | R6 | p-RoPE partial faux | U5 + oracle scripté + sanity position 0 |
 | R7 | RMSNorm variante / préfixes / lm_head tied | U0 cartographie obligatoire |
-| R8 | **Disque VM : ~16 Go libres** vs E2B-unquantized ~10 Go + 12B-w4a16 ~8 Go | `df` avant download, ménage `/data` d'abord ; jamais sur M1 (lui-même critique) |
+| R8 | Un download qui atterrit sur `/` de la VM (60 Go, ~16 Go libres) au lieu de `/data` (984 Go, ~213 Go libres au 18 juil) — le cache HF va dans `~/.cache` par défaut | `HF_HOME=/data/hf_cache` systématique (piège connu depuis mai) ; les checkpoints (~18 Go cumulés) tiennent large sur `/data` ; jamais sur M1 (lui critique) |
 | R9 | Non-déterminisme XLA-GPU | Enveloppe G2.3, jamais bit-à-bit inter-compiles |
 | R10 | RAM CPU VM insuffisante pour l'oracle 12B | Vérifier au plan ; repli vLLM w4a16 + enveloppe |
 
