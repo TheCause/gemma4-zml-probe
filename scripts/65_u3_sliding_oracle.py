@@ -28,6 +28,11 @@ morsure (S=1040 > fenêtre 1024) : comptage masqué ASSERTÉ == causal pur + Σ_
 Sorties : fixtures/u_sliding.safetensors (S=8 ET S=1040 : hidden bf16, étages a-d f32,
 masques f32) + fixtures/u_sliding_manifest.json (seuils, seed, comptages, points fixes, versions).
 
+Périmètre du gating U3 (Amendement 2 du plan) : le plan était MUET sur le S du gating —
+l'interprétation retenue (gating S=8 aux seuils §3, tripwire 1e-3 à S=1040 sans mean_abs)
+est une décision d'interprétation DÉCLARÉE, ratification Régis en attente ; le chemin rope
+à S=1040 est gaté au seuil plein par U4 (cas mordant).
+
 Venv : /data/venvs/g12b. Lancement (VM) :
   /data/venvs/g12b/bin/python3 scripts/65_u3_sliding_oracle.py
 """
@@ -220,10 +225,12 @@ def main() -> None:
         "thresholds": {"u3_max_abs": MAX_ABS_THR, "u3_mean_abs": MEAN_ABS_THR, "u4_max_abs": MAX_ABS_THR,
                        "note": "seuils f32 (§3) — comparaisons f32, PAS bit-exact (matmuls)"},
         "cases": manifest_cases,
-        "pass": "gate u3 : étages a-c (q/k/v) aux seuils §3 sur S=8 (périmètre pré-enregistré "
-                "du plan : fixture « S=8, étages a/b/c/d ») + tripwire diagnostique S=1040 "
-                "borne 1e-3 ; gate u4 : attention complète (étage d) max_abs <= 1e-4 sur S=8 "
-                "ET S=1040 (cas mordant), comptage masque recompté in-gate",
+        "pass": "gate u3 : étages a-c (q/k/v) aux seuils §3 sur S=8 — périmètre : le plan "
+                "était MUET sur le S du gating, interprétation (gating S=8, tripwire 1e-3 à "
+                "S=1040 sans mean_abs) déclarée en Amendement 2, ratification Régis en "
+                "attente ; le chemin rope à S=1040 est gaté au seuil plein par U4 ; gate u4 : "
+                "attention complète (étage d) max_abs <= 1e-4 sur S=8 ET S=1040 (cas "
+                "mordant), comptage masque recompté in-gate",
         "finding_ulp_rope_2026_07_24": {
             "fait": "zml.nn.rope (moteur, chemin sliding) génère inv_freq par exp(-log(theta)*n/N) "
                     "f32 ; HF par theta**(-n/N) f32 — écart 1 ULP (max 5.96e-8, relatif 5.7e-7), "

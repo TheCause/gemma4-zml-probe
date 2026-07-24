@@ -15,9 +15,11 @@
 //   u3 <weights_12b/model.safetensors> <fixtures/u_sliding.safetensors>
 //       — U3 : étages q/k/v de l'attention sliding L0 (dequantW4 du PACKÉ via W4Lin.toW,
 //         q_norm/k_norm, v_norm SANS poids, rope sliding zml.nn.rope theta 1e4 == engine
-//         slidingRope), comparés f32 aux hooks du module réel (script 65). GATING au périmètre
-//         PRÉ-ENREGISTRÉ du plan (§ Task 4, fixture « S=8, étages a/b/c/d ») : S=8 aux seuils
-//         §3 (max_abs <= 1e-4, mean_abs <= 1e-6). Les étages S=1040 sont EN PLUS mesurés en
+//         slidingRope), comparés f32 aux hooks du module réel (script 65). Périmètre U3 : le
+//         plan était MUET sur le S du gating — interprétation (gating S=8, tripwire 1e-3 à
+//         S=1040 sans mean_abs) déclarée en Amendement 2, ratification Régis en attente. Le
+//         chemin rope à S=1040 est gaté au seuil plein par U4. Gating S=8 aux seuils §3
+//         (max_abs <= 1e-4, mean_abs <= 1e-6). Les étages S=1040 sont EN PLUS mesurés en
 //         tripwire diagnostique (borne 1e-3) : le run du 24 juil a montré que zml.nn.rope
 //         diverge du HF réel de 1 ULP f32 sur inv_freq (zml exp(-log θ·n/N) vs HF θ^(-n/N)),
 //         amplifié LINÉAIREMENT par la position (Δangle = pos·Δinv ≈ 6.1e-5 rad à pos 708 →
@@ -410,7 +412,7 @@ const U34Fix = struct {
 
 fn gateU3(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
     log.info("u3 (U3) — étages q/k/v attention sliding L0 (PACKÉ dequantW4, rope theta 1e4) vs hooks module réel", .{});
-    log.info("  gating §3 sur S=8 (périmètre pré-enregistré du plan) ; S=1040 = tripwire diagnostique borne 1e-3 (phase ULP inv_freq, cf en-tête)", .{});
+    log.info("  gating §3 sur S=8 (plan muet sur le S — interprétation déclarée Amendement 2, ratification en attente) ; S=1040 = tripwire diagnostique borne 1e-3 (phase ULP inv_freq, cf en-tête)", .{});
 
     var st: Stores = undefined;
     try openStores(&st, allocator, io, ckpt_path, fixture_path);
@@ -422,8 +424,9 @@ fn gateU3(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     var n_pass: usize = 0;
     inline for (U34_SEQ_LENS) |s| {
         const sfx = std.fmt.comptimePrint("_s{d}", .{s});
-        // Seuils : S=8 = §3 (gating U3) ; S=1040 = borne tripwire 1e-3, mean libre (un bug de
-        // câblage GQA/layout donnerait O(0.1) ; la phase ULP amplifiée pos<=1039 prédit ~5e-4).
+        // Seuils : S=8 = §3 (gating U3) ; S=1040 = borne tripwire 1e-3, mean_abs NON gaté
+        // (abandon DÉCLARÉ, Amendement 2 — un bug de câblage GQA/layout donnerait O(0.1) ;
+        // la phase ULP amplifiée pos<=1039 prédit ~5e-4).
         const gating = s <= 8;
         const max_thr: f64 = if (gating) U3_MAX_ABS else 1.0e-3;
         const mean_thr: ?f64 = if (gating) U3_MEAN_ABS else null;
