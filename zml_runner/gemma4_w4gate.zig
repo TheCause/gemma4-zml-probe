@@ -260,6 +260,19 @@ const W3_MAX_ABS: f32 = 1.0e-4;
 const W3_MEAN_ABS: f32 = 1.0e-6;
 const W3_MODULE = "model.language_model.layers.0.self_attn.q_proj";
 
+// Points fixes (Task 6) — 8 valeurs out[0,0,:8] copiées de fixtures/w4_gemm_manifest.json
+// (champ fixed_points_out_0_0_0_8, précision complète, oracle scripts/58_w4_gemm_oracle.py).
+const W3_FIXED_POINTS = [_]f32{
+    0.1776973307132721,
+    -1.0740256309509277,
+    -0.3690187633037567,
+    0.659105658531189,
+    -0.36505067348480225,
+    -0.0689384937286377,
+    0.919886589050293,
+    -1.1612508296966553,
+};
+
 const W3Fix = struct {
     x: zml.Tensor,
     out_expected: zml.Tensor,
@@ -331,13 +344,22 @@ fn gateW3(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     const mean_abs = @as(f32, @floatCast(sum_abs / @as(f64, @floatFromInt(got.len))));
     log.info("  max_abs {e:.6} at o={d} (got={d:.7} expected={d:.7}), mean_abs {e:.6}", .{ max_abs, max_idx, got[max_idx], exp[max_idx], mean_abs });
 
-    // points fixes: ajoutés au câblage W3 (Task 6)
+    // Points fixes : les 8 valeurs out[0,0,:8] (offset plat 0, b=s=1) vs oracle, même tolérance
+    // que le reste du gate (pattern L_BLOCKS de gemma4_full_layer.zig).
+    var fixed_max: f32 = 0.0;
+    for (W3_FIXED_POINTS, 0..) |expected, i| {
+        const actual = got[i];
+        const diff = @abs(actual - expected);
+        if (diff > fixed_max) fixed_max = diff;
+        log.info("  point fixe +{d}: actual={d:.7} expected={d:.7} diff={e:.3}", .{ i, actual, expected, diff });
+    }
+    log.info("  points fixes max_diff: {e:.6}", .{fixed_max});
 
-    if (max_abs > W3_MAX_ABS or mean_abs > W3_MEAN_ABS) {
-        log.err("W3 : hors tolérance (max_abs {e:.6} <= {e:.1} ? mean_abs {e:.6} <= {e:.1} ?)", .{ max_abs, W3_MAX_ABS, mean_abs, W3_MEAN_ABS });
+    if (max_abs > W3_MAX_ABS or mean_abs > W3_MEAN_ABS or fixed_max > W3_MAX_ABS) {
+        log.err("W3 : hors tolérance (max_abs {e:.6} <= {e:.1} ? mean_abs {e:.6} <= {e:.1} ? points fixes {e:.6} <= {e:.1} ?)", .{ max_abs, W3_MAX_ABS, mean_abs, W3_MEAN_ABS, fixed_max, W3_MAX_ABS });
         return error.GateFailed;
     }
-    log.info("PASS w3", .{});
+    log.info("PASS w3 (max_abs {e:.6}, mean_abs {e:.6}, 8/8 points fixes)", .{ max_abs, mean_abs });
 }
 
 // ---------------------------------------------------------------------------- main
