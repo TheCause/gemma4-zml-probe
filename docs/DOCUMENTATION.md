@@ -320,6 +320,23 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `W4_RESULTS.md` | **Poids 4-bit w4a16 (W4-J1)** : format, 6 gates, finding scale-invariance, état J2 |
 | `SESSION_2026-06-27_RAPPORT.md` | Rapport de la session « écrite sans compiler » + audit |
 
+### 5.4 Checklist de clôture de chantier (à faire quand un chantier est mergé)
+
+Un chantier n'est pas clos tant que la **documentation destinée au lecteur externe** ne reflète
+pas l'état réel de `main`. Rafraîchir dans l'ordre :
+
+- [ ] `docs/<CHANTIER>_RESULTS.md` — source de vérité du chantier (verdicts, chiffres, commits/tags).
+- [ ] `docs/DOCUMENTATION.md` — §2 (capacité), §5.1/§5.2/§5.3 (inventaires scripts/runners/docs),
+  §7 (chiffres), §8 (pièges neufs), §9 (backlog), §10 (historique).
+- [ ] **`README.md`** — bandeau de statut, **tableau des milestones**, limites/next. ⚠ Le README
+  est la vitrine publique GitHub : c'est le document le plus vu et le plus facile à oublier
+  (il a dérivé sur 5 chantiers avant le 24 juil 2026 parce qu'il n'était sur aucune checklist).
+- [ ] `PLANNING.md` (racine) — état du chantier, pointeur vers le RESULTS.
+- [ ] `git diff main...HEAD | grep -cE '<IP>|<user>@'` = 0 avant tout push (repo public).
+
+Règle : « == HF » se qualifie toujours (token-exact en fp32 / enveloppe en bf16 / même-checkpoint
+en quantifié) — ne jamais laisser un doc affirmer un bit-à-bit qui n'existe pas.
+
 ---
 
 ## 6. Utilisation
