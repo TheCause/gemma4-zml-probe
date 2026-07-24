@@ -496,6 +496,16 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# W4 — runner décode E2B-W4 complet (GPU). Clone ciblé de gemma4_gen_auto (duplication assumée,
+# précédent bbs) : seuls Model/StepTok/init changent, engine.zig INTACT.
+zig_binary(
+    name = "gemma4_w4auto",
+    main = "gemma4_w4auto.zig",
+    srcs = ["engine.zig", "mem_probe.zig", "w4.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",
