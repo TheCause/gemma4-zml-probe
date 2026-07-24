@@ -13,6 +13,10 @@
 //         EXACT de Gemma4TextScaledWordEmbedding.forward ; jamais dans engine.zig), comparé
 //         BIT-EXACT u16 (max_abs == 0) à la fixture du script 64. Modes u3/… : Tasks 4+.
 //
+// ⚠ IMPÉRATIF modes futurs (u3-u7) : tout mode lisant le PACKÉ passe par openStores /
+// registryFromFile — JAMAIS TensorRegistry.fromPath (realPath traverse les symlinks HF vers
+// blobs/<sha256> sans extension .safetensors -> error.InvalidPath, bug mordu au 1er run w2-12b).
+//
 // Verdicts par erreur Zig : error.GateFailed / error.VacuousGate ; PASS -> log + exit 0.
 
 const std = @import("std");
@@ -42,6 +46,35 @@ fn registryFromFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     return registry;
 }
 
+/// Les DEUX stores de tout gate : checkpoint PACKÉ + fixture. Passage OBLIGATOIRE (voir ⚠ en
+/// tête) : le packé passe STRUCTURELLEMENT par registryFromFile, la fixture (fichier régulier
+/// .safetensors, jamais un symlink HF) par fromPath.
+const Stores = struct {
+    reg_ck: zml.safetensors.TensorRegistry,
+    store_ck: zml.io.TensorStore,
+    reg_fx: zml.safetensors.TensorRegistry,
+    store_fx: zml.io.TensorStore,
+
+    fn deinit(self: *Stores) void {
+        self.store_fx.deinit();
+        self.reg_fx.deinit();
+        self.store_ck.deinit();
+        self.reg_ck.deinit();
+    }
+};
+
+/// Construit IN PLACE dans `out` : TensorStore garde un *pointeur* vers sa registry (io.zig:34)
+/// — un retour par valeur déplacerait les registries et pendrait ces pointeurs.
+fn openStores(out: *Stores, allocator: std.mem.Allocator, io: std.Io, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    out.reg_ck = try registryFromFile(allocator, io, ckpt_path);
+    errdefer out.reg_ck.deinit();
+    out.store_ck = .fromRegistry(allocator, &out.reg_ck);
+    errdefer out.store_ck.deinit();
+    out.reg_fx = try .fromPath(allocator, io, fixture_path);
+    errdefer out.reg_fx.deinit();
+    out.store_fx = .fromRegistry(allocator, &out.reg_fx);
+}
+
 // ---------------------------------------------------------------------------- w2-12b (U1b)
 
 const G2 = struct {
@@ -64,22 +97,19 @@ fn gateW2_12b(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io
     log.info("w2-12b (U1b) — dequant des 3 shapes 12B vs fixture u_mats12 (bit-exact u16)", .{});
 
     // DEUX stores : checkpoint packé 12B + fixture (pattern gemma4_w4gate.gateW2).
-    var reg_ck: zml.safetensors.TensorRegistry = try registryFromFile(allocator, io, ckpt_path);
-    defer reg_ck.deinit();
-    var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
-    defer store_ck.deinit();
-    var reg_fx: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
-    defer reg_fx.deinit();
-    var store_fx: zml.io.TensorStore = .fromRegistry(allocator, &reg_fx);
-    defer store_fx.deinit();
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+    const store_ck = &st.store_ck;
+    const store_fx = &st.store_fx;
 
     var n_pass: usize = 0;
     inline for (W2_MODS) |m| {
         log.info("  module {s} -> {s}", .{ m.name, m.key });
         const lin: w4.W4Lin = .init(store_ck.view(), m.name);
-        const lin_buf = try zml.io.load(w4.W4Lin, &lin, arena, io, platform, &store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+        const lin_buf = try zml.io.load(w4.W4Lin, &lin, arena, io, platform, store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
         const exp_sym: OneT = .{ .t = store_fx.view().createTensor(m.key, .{ .o, .d }, null) };
-        const exp_buf = try zml.io.load(OneT, &exp_sym, arena, io, platform, &store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+        const exp_buf = try zml.io.load(OneT, &exp_sym, arena, io, platform, store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
 
         // UN compileFn par module : les 3 shapes diffèrent.
         var exe = try platform.compileFn(allocator, io, G2.forward, .{ lin.pk, lin.sc }, .{ .shardings = &.{sharding} });
@@ -142,21 +172,18 @@ const EMB_KEY = "model.language_model.embed_tokens.weight"; // bf16 NON quantifi
 fn gateU2(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
     log.info("u2 (U2) — gather embed_tokens + scale bf16 62.0 (chemin 12B, D12) vs fixture u_embed (bit-exact u16)", .{});
 
-    var reg_ck: zml.safetensors.TensorRegistry = try registryFromFile(allocator, io, ckpt_path);
-    defer reg_ck.deinit();
-    var store_ck: zml.io.TensorStore = .fromRegistry(allocator, &reg_ck);
-    defer store_ck.deinit();
-    var reg_fx: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
-    defer reg_fx.deinit();
-    var store_fx: zml.io.TensorStore = .fromRegistry(allocator, &reg_fx);
-    defer store_fx.deinit();
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+    const store_ck = &st.store_ck;
+    const store_fx = &st.store_fx;
 
     const emb_sym: OneT = .{ .t = store_ck.view().createTensor(EMB_KEY, .{ .voc, .d }, null) };
     if (emb_sym.t.dim(.voc) != 262144 or emb_sym.t.dim(.d) != g12.g12.d) {
         log.err("u2 : shape embed_tokens inattendue {d}x{d}", .{ emb_sym.t.dim(.voc), emb_sym.t.dim(.d) });
         return error.GateFailed;
     }
-    const emb_buf = try zml.io.load(OneT, &emb_sym, arena, io, platform, &store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    const emb_buf = try zml.io.load(OneT, &emb_sym, arena, io, platform, store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
 
     const fix_sym: U2Fix = .{
         .ids = store_fx.view().createTensor("ids", .{.s}, null),
@@ -167,7 +194,7 @@ fn gateU2(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
         log.err("u2 : fixture incohérente (ids {d}, expected {d}x{d})", .{ n_ids, fix_sym.expected.dim(.s), fix_sym.expected.dim(.d) });
         return error.VacuousGate;
     }
-    const fix_buf = try zml.io.load(U2Fix, &fix_sym, arena, io, platform, &store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    const fix_buf = try zml.io.load(U2Fix, &fix_sym, arena, io, platform, store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
 
     var exe = try platform.compileFn(allocator, io, U2.forward, .{ emb_sym.t, fix_sym.ids }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
