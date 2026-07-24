@@ -484,6 +484,18 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# W4 (plan docs/superpowers/plans/2026-07-24-w4-j1-brique-e2b.md) — gates W1/W2/W3 CPU de la
+# brique poids 4-bit. Nom court : quota comptime @typeName pjrt structSize (piège 4).
+# engine.zig dans srcs DÈS MAINTENANT : w4.zig l'importera à la Task 7 (W4LayerW.toLayerW) et
+# Bazel doit exposer tout fichier @import-é au sandbox (convention BUILD.bazel:373-374).
+zig_binary(
+    name = "gemma4_w4gate",
+    main = "gemma4_w4gate.zig",
+    srcs = ["w4.zig", "engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",
