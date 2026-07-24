@@ -11,7 +11,27 @@
 //       — U2 : gather embed_tokens (bf16 NON quantifié du PACKÉ, D9) + scale CHEMIN 12B (D12 :
 //         ×62.0 constante bf16 == bf16(√3840), produit bf16×bf16 — reproduit l'ordre de casts
 //         EXACT de Gemma4TextScaledWordEmbedding.forward ; jamais dans engine.zig), comparé
-//         BIT-EXACT u16 (max_abs == 0) à la fixture du script 64. Modes u3/… : Tasks 4+.
+//         BIT-EXACT u16 (max_abs == 0) à la fixture du script 64.
+//   u3 <weights_12b/model.safetensors> <fixtures/u_sliding.safetensors>
+//       — U3 : étages q/k/v de l'attention sliding L0 (dequantW4 du PACKÉ via W4Lin.toW,
+//         q_norm/k_norm, v_norm SANS poids, rope sliding zml.nn.rope theta 1e4 == engine
+//         slidingRope), comparés f32 aux hooks du module réel (script 65). GATING au périmètre
+//         PRÉ-ENREGISTRÉ du plan (§ Task 4, fixture « S=8, étages a/b/c/d ») : S=8 aux seuils
+//         §3 (max_abs <= 1e-4, mean_abs <= 1e-6). Les étages S=1040 sont EN PLUS mesurés en
+//         tripwire diagnostique (borne 1e-3) : le run du 24 juil a montré que zml.nn.rope
+//         diverge du HF réel de 1 ULP f32 sur inv_freq (zml exp(-log θ·n/N) vs HF θ^(-n/N)),
+//         amplifié LINÉAIREMENT par la position (Δangle = pos·Δinv ≈ 6.1e-5 rad à pos 708 →
+//         max_abs 4.9e-4 sur l'étage a, diagnostic au chiffre près) — pas un bug de câblage ;
+//         la borne 1e-3 attrape un vrai bug (GQA/layout => O(0.1)) tout en tolérant la phase
+//         ULP (~5e-4 prédit). L'effet s'annule en rotation RELATIVE dans les scores QK : U4
+//         (S=1040 mordant) tient 2.8e-5 << 1e-4.
+//   u4 <weights_12b/model.safetensors> <fixtures/u_sliding.safetensors>
+//       — U4 : attention sliding complète L0 (scores GQA groupe 2 par splitAxis — le groupe
+//         dérive de la shape de K, pattern engine.zig runLayerGen ; masque ADDITIF de la
+//         fixture = mécanique HF réelle ; softmax f32 ; context ; o_proj) vs la sortie du
+//         module réel : max_abs <= 1e-4. Non-vacuité : le comptage masqué du masque S=1040
+//         est RECOMPTÉ in-gate et doit mordre (== causal pur + 136, fenêtre 1024 < S).
+//         Modes u5/… : Tasks 5+.
 //
 // ⚠ IMPÉRATIF modes futurs (u3-u7) : tout mode lisant le PACKÉ passe par openStores /
 // registryFromFile — JAMAIS TensorRegistry.fromPath (realPath traverse les symlinks HF vers
@@ -27,7 +47,7 @@ const g12 = @import("g12.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-const usage = "Usage: gemma4_g12gate <w2-12b|u2> <model.safetensors> <fixture.safetensors>";
+const usage = "Usage: gemma4_g12gate <w2-12b|u2|u3|u4> <model.safetensors> <fixture.safetensors>";
 
 const load_opts = .{ .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 };
 
@@ -232,6 +252,301 @@ fn gateU2(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     log.info("PASS u2 — {d} ids x {d} : {d} u16 bit-exact (max_abs == 0), scale bf16 62.0 chemin 12B", .{ n_ids, g12.g12.d, got.len });
 }
 
+// ---------------------------------------------------------------------------- u3/u4 (attention sliding L0)
+
+// Constantes du contrat U0 §1 pour la couche 0 sliding (géométrie g12.g12) :
+const ATTN_PREFIX = "model.language_model.layers.0.self_attn.";
+const HD_S: i64 = @intCast(g12.g12.hd_sliding); // 256 (pattern engine.zig:102 — Geom porte des usize)
+const RMS_EPS: f32 = 1.0e-6;
+const SLIDING_WINDOW: i64 = 1024;
+const U34_SEQ_LENS = [_]i64{ 8, 1040 }; // 1040 > fenêtre : cas mordant (témoin U4)
+const U3_MAX_ABS: f64 = 1.0e-4; // §3 — U4 : max_abs seul, même seuil
+const U3_MEAN_ABS: f64 = 1.0e-6;
+
+/// Poids d'attention L0, lus du PACKÉ (D9 — dequantW4 in-graph, brique U1b bit-exacte).
+const AttnW = struct {
+    q: w4.W4Lin,
+    k: w4.W4Lin,
+    v: w4.W4Lin,
+    o: w4.W4Lin,
+    q_norm: zml.Tensor,
+    k_norm: zml.Tensor,
+
+    fn init(v_ck: zml.io.TensorStore.View) AttnW {
+        return .{
+            .q = .init(v_ck, ATTN_PREFIX ++ "q_proj"),
+            .k = .init(v_ck, ATTN_PREFIX ++ "k_proj"),
+            .v = .init(v_ck, ATTN_PREFIX ++ "v_proj"),
+            .o = .init(v_ck, ATTN_PREFIX ++ "o_proj"),
+            .q_norm = v_ck.createTensor(ATTN_PREFIX ++ "q_norm.weight", .{.hd}, null),
+            .k_norm = v_ck.createTensor(ATTN_PREFIX ++ "k_norm.weight", .{.hd}, null),
+        };
+    }
+};
+
+// Ops miroir du chemin moteur (runLayerGen, prec fam=null == baseline f32) — mêmes primitives
+// zml, mêmes ordres de casts : dot `a_f32.dot(b.convert(.f32))` (dotPrec fam=null), q/k_norm
+// `rmsNorm(.hd) puis mul(poids convert f32)` (rmsScaleHdPrec), rope `zml.nn.rope sequential
+// theta 1e4` (slidingRope ; pos=null => arange sur .s, positions 0..S-1 du prefill).
+const U34Ops = struct {
+    fn projNormRope(h: zml.Tensor, pk: zml.Tensor, sc: zml.Tensor, norm: zml.Tensor) zml.Tensor {
+        const w = w4.dequantW4(pk, sc).withTags(.{ .o, .d }); // bf16 {o,d}, == export dq (U1b)
+        const x = h.convert(.f32).dot(w.convert(.f32), .d); // {b,s,o} f32
+        const xh = x.splitAxis(.o, .{ .nh = .auto, .hd = HD_S }); // {b,s,nh,hd}
+        const normalized = zml.nn.rmsNorm(xh, .hd, RMS_EPS);
+        const xn = normalized.mul(norm.convert(.f32).broad(xh.shape()));
+        return zml.nn.rope(xn, null, .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = g12.g12.rope_theta_sliding } } });
+    }
+
+    /// Étage (c) : v_proj + v_norm SANS poids (RMSNorm with_scale=False — l'op existe, piège 9).
+    fn vStage(h: zml.Tensor, pk: zml.Tensor, sc: zml.Tensor) zml.Tensor {
+        const w = w4.dequantW4(pk, sc).withTags(.{ .o, .d });
+        const x = h.convert(.f32).dot(w.convert(.f32), .d);
+        const xh = x.splitAxis(.o, .{ .nh = .auto, .hd = HD_S });
+        return zml.nn.rmsNorm(xh, .hd, RMS_EPS);
+    }
+
+    /// U4 : attention complète — GQA groupe 2 par splitAxis, le groupe DÉRIVE de la shape de K
+    /// (k.dim(.h) = 8 -> hq = 16/8 = 2), pattern engine.zig runLayerGen (chemin .manual).
+    fn attn(h: zml.Tensor, qpk: zml.Tensor, qsc: zml.Tensor, qn: zml.Tensor, kpk: zml.Tensor, ksc: zml.Tensor, kn: zml.Tensor, vpk: zml.Tensor, vsc: zml.Tensor, opk: zml.Tensor, osc: zml.Tensor, mask: zml.Tensor) zml.Tensor {
+        const q = projNormRope(h, qpk, qsc, qn);
+        const k = projNormRope(h, kpk, ksc, kn);
+        const v = vStage(h, vpk, vsc);
+        const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
+        const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
+        const v_new = v.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
+
+        const qs = q_final.splitAxis(.h, .{ .h = k_new.dim(.h), .hq = .auto });
+        var scores = qs.dot(k_new, .hd).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .k });
+        scores = scores.add(mask.convert(.f32).broad(scores.shape())); // additif, scaling 1.0 (piège 10)
+        const probs = scores.softmax(.k); // f32
+
+        const ps = probs.splitAxis(.h, .{ .h = v_new.dim(.h), .hq = .auto });
+        const ctx = ps.dot(v_new, .k).merge(.{ .h = .{ .h, .hq } }).transpose(.{ .b, .h, .q, .hd });
+        const attn_m = ctx.transpose(.{ .b, .q, .h, .hd }).merge(.{ .m = .{ .h, .hd } });
+        return attn_m.dot(opk_deq(opk, osc), .m).rename(.{ .q = .s }); // {b,s,d} f32
+    }
+
+    fn opk_deq(opk: zml.Tensor, osc: zml.Tensor) zml.Tensor {
+        // o_proj [3840, 4096] = [.d out, .m in] (tags du site moteur, engine.LayerW.o_proj).
+        return w4.dequantW4(opk, osc).withTags(.{ .d, .m }).convert(.f32);
+    }
+};
+
+/// Comparaison f32 vs f32 aux seuils §3. Diagnostics : localisation + valeurs au pire écart
+/// (piège 17 : on compare des VALEURS ; en cas d'égalité de |écart| le premier index est
+/// rapporté, les suivants comptés dans n_over).
+const StageVerdict = struct { max_abs: f64, mean_abs: f64 };
+
+fn compareStage(allocator: std.mem.Allocator, io: std.Io, name: []const u8, got_buf: *zml.Buffer, exp_t: zml.Buffer, max_thr: f64, mean_thr: ?f64) !StageVerdict {
+    var got_s = try got_buf.toSliceAlloc(allocator, io);
+    defer got_s.free(allocator);
+    const got = got_s.items(f32);
+    var exp_s = try exp_t.toSliceAlloc(allocator, io);
+    defer exp_s.free(allocator);
+    const exp = exp_s.items(f32);
+    if (got.len != exp.len) {
+        log.err("{s} : longueurs D2H inattendues ({d} != {d})", .{ name, got.len, exp.len });
+        return error.GateFailed;
+    }
+    var max_abs: f64 = 0;
+    var sum_abs: f64 = 0;
+    var max_i: usize = 0;
+    var n_over: usize = 0;
+    for (got, exp, 0..) |g, e, i| {
+        const d = @abs(@as(f64, g) - @as(f64, e));
+        sum_abs += d;
+        if (d > max_abs) {
+            max_abs = d;
+            max_i = i;
+        }
+        if (d > max_thr) n_over += 1;
+    }
+    const mean_abs = sum_abs / @as(f64, @floatFromInt(got.len));
+    const ok = max_abs <= max_thr and (mean_thr == null or mean_abs <= mean_thr.?);
+    if (ok) {
+        log.info("    {s} : max_abs={e:.3} mean_abs={e:.3} ({d} f32) OK", .{ name, max_abs, mean_abs, got.len });
+    } else {
+        log.err("    {s} : FAIL max_abs={e:.3} (seuil {e:.1}) mean_abs={e:.3} — pire écart à l'index {d} : got={e:.6} expected={e:.6} ; {d}/{d} au-dessus du seuil", .{ name, max_abs, max_thr, mean_abs, max_i, got[max_i], exp[max_i], n_over, got.len });
+        return error.GateFailed;
+    }
+    return .{ .max_abs = max_abs, .mean_abs = mean_abs };
+}
+
+/// Fixture d'un cas S : clés du script 65 (layouts pré-transpose des hooks).
+const U34Fix = struct {
+    hidden: zml.Tensor, // {b,s,d} bf16
+    q: zml.Tensor, // {b,s,nh,hd} f32 (nh=16)
+    k: zml.Tensor, // {b,s,nh,hd} f32 (nh=8)
+    v: zml.Tensor, // {b,s,nh,hd} f32 (nh=8)
+    mask: zml.Tensor, // {b,h,q,k} f32 additive
+    out: zml.Tensor, // {b,s,d} f32 (sortie o_proj du module réel)
+
+    fn init(v_fx: zml.io.TensorStore.View, comptime sfx: []const u8) U34Fix {
+        return .{
+            .hidden = v_fx.createTensor("hidden" ++ sfx, .{ .b, .s, .d }, null),
+            .q = v_fx.createTensor("q" ++ sfx, .{ .b, .s, .nh, .hd }, null),
+            .k = v_fx.createTensor("k" ++ sfx, .{ .b, .s, .nh, .hd }, null),
+            .v = v_fx.createTensor("v" ++ sfx, .{ .b, .s, .nh, .hd }, null),
+            .mask = v_fx.createTensor("mask" ++ sfx, .{ .b, .h, .q, .k }, null),
+            .out = v_fx.createTensor("out" ++ sfx, .{ .b, .s, .d }, null),
+        };
+    }
+
+    fn check(self: U34Fix, s: i64) !void {
+        const g = g12.g12;
+        if (self.hidden.dim(.s) != s or self.hidden.dim(.d) != g.d or
+            self.q.dim(.s) != s or self.q.dim(.nh) != g.nh or self.q.dim(.hd) != g.hd_sliding or
+            self.k.dim(.s) != s or self.k.dim(.nh) != g.kvh_sliding or
+            self.v.dim(.s) != s or self.v.dim(.nh) != g.kvh_sliding or
+            self.mask.dim(.q) != s or self.mask.dim(.k) != s or
+            self.out.dim(.s) != s or self.out.dim(.d) != g.d)
+        {
+            log.err("u3/u4 : fixture S={d} incohérente avec la géométrie g12", .{s});
+            return error.VacuousGate;
+        }
+    }
+};
+
+fn gateU3(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    log.info("u3 (U3) — étages q/k/v attention sliding L0 (PACKÉ dequantW4, rope theta 1e4) vs hooks module réel", .{});
+    log.info("  gating §3 sur S=8 (périmètre pré-enregistré du plan) ; S=1040 = tripwire diagnostique borne 1e-3 (phase ULP inv_freq, cf en-tête)", .{});
+
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+
+    const aw: AttnW = .init(st.store_ck.view());
+    const aw_buf = try zml.io.load(AttnW, &aw, arena, io, platform, &st.store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+    var n_pass: usize = 0;
+    inline for (U34_SEQ_LENS) |s| {
+        const sfx = std.fmt.comptimePrint("_s{d}", .{s});
+        // Seuils : S=8 = §3 (gating U3) ; S=1040 = borne tripwire 1e-3, mean libre (un bug de
+        // câblage GQA/layout donnerait O(0.1) ; la phase ULP amplifiée pos<=1039 prédit ~5e-4).
+        const gating = s <= 8;
+        const max_thr: f64 = if (gating) U3_MAX_ABS else 1.0e-3;
+        const mean_thr: ?f64 = if (gating) U3_MEAN_ABS else null;
+        log.info("  cas S={d} ({s}) :", .{ s, if (gating) "gating §3" else "tripwire ULP 1e-3" });
+        const fix: U34Fix = .init(st.store_fx.view(), sfx);
+        try fix.check(s);
+        const fix_buf = try zml.io.load(U34Fix, &fix, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+        // Étage (a) Q : proj + q_norm + rope.
+        {
+            var exe = try platform.compileFn(allocator, io, U34Ops.projNormRope, .{ fix.hidden, aw.q.pk, aw.q.sc, aw.q_norm }, .{ .shardings = &.{sharding} });
+            defer exe.deinit();
+            var args = try exe.args(allocator);
+            defer args.deinit(allocator);
+            var results = try exe.results(allocator);
+            defer results.deinit(allocator);
+            args.set(.{ fix_buf.hidden, aw_buf.q.pk, aw_buf.q.sc, aw_buf.q_norm });
+            exe.call(args, &results);
+            var r = results.get(zml.Buffer);
+            defer r.deinit();
+            _ = try compareStage(allocator, io, "étage a (q post proj+norm+rope)", &r, fix_buf.q, max_thr, mean_thr);
+        }
+        // Étage (b) K : proj + k_norm + rope.
+        {
+            var exe = try platform.compileFn(allocator, io, U34Ops.projNormRope, .{ fix.hidden, aw.k.pk, aw.k.sc, aw.k_norm }, .{ .shardings = &.{sharding} });
+            defer exe.deinit();
+            var args = try exe.args(allocator);
+            defer args.deinit(allocator);
+            var results = try exe.results(allocator);
+            defer results.deinit(allocator);
+            args.set(.{ fix_buf.hidden, aw_buf.k.pk, aw_buf.k.sc, aw_buf.k_norm });
+            exe.call(args, &results);
+            var r = results.get(zml.Buffer);
+            defer r.deinit();
+            _ = try compareStage(allocator, io, "étage b (k post proj+norm+rope)", &r, fix_buf.k, max_thr, mean_thr);
+        }
+        // Étage (c) V : proj + v_norm SANS poids.
+        {
+            var exe = try platform.compileFn(allocator, io, U34Ops.vStage, .{ fix.hidden, aw.v.pk, aw.v.sc }, .{ .shardings = &.{sharding} });
+            defer exe.deinit();
+            var args = try exe.args(allocator);
+            defer args.deinit(allocator);
+            var results = try exe.results(allocator);
+            defer results.deinit(allocator);
+            args.set(.{ fix_buf.hidden, aw_buf.v.pk, aw_buf.v.sc });
+            exe.call(args, &results);
+            var r = results.get(zml.Buffer);
+            defer r.deinit();
+            _ = try compareStage(allocator, io, "étage c (v post v_norm sans poids)", &r, fix_buf.v, max_thr, mean_thr);
+        }
+        n_pass += 1;
+    }
+    if (n_pass != U34_SEQ_LENS.len) return error.GateFailed;
+    log.info("PASS u3 — 3 étages S=8 aux seuils §3 (max_abs<=1e-4, mean_abs<=1e-6) + tripwire S=1040 sous borne ULP 1e-3", .{});
+}
+
+/// Non-vacuité U4 (leçon « vacuité de l'antécédent ») : le masque S>fenêtre de la fixture est
+/// RECOMPTÉ ici et doit mordre — masqués == causal pur + Σ_{q>=1024}(q-1023), strictement > causal.
+fn checkMaskBite(allocator: std.mem.Allocator, io: std.Io, mask_buf: zml.Buffer, s: i64) !void {
+    var m_s = try mask_buf.toSliceAlloc(allocator, io);
+    defer m_s.free(allocator);
+    const m = m_s.items(f32);
+    var n_masked: usize = 0;
+    for (m) |x| {
+        if (x < -1.0e30) n_masked += 1;
+    }
+    const su: usize = @intCast(s);
+    const causal: usize = su * (su - 1) / 2;
+    var bite: usize = 0;
+    var qi: usize = @intCast(SLIDING_WINDOW);
+    while (qi < su) : (qi += 1) bite += qi - @as(usize, @intCast(SLIDING_WINDOW - 1));
+    if (n_masked != causal + bite) {
+        log.err("u4 : masque S={d} — {d} masqués != causal {d} + morsure {d} (mécanique HF non reproduite ?)", .{ s, n_masked, causal, bite });
+        return error.VacuousGate;
+    }
+    if (s > SLIDING_WINDOW) {
+        if (bite == 0 or n_masked <= causal) {
+            log.err("u4 : masque S={d} ne mord PAS (masqués {d} <= causal {d}) — gate vacant", .{ s, n_masked, causal });
+            return error.VacuousGate;
+        }
+        log.info("    masque S={d} MORD : {d} masqués = causal {d} + {d} (fenêtre {d}) — témoin U4", .{ s, n_masked, causal, bite, SLIDING_WINDOW });
+    } else {
+        log.info("    masque S={d} : {d} masqués == causal pur {d} (fenêtre non mordante, attendu)", .{ s, n_masked, causal });
+    }
+}
+
+fn gateU4(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    log.info("u4 (U4) — attention sliding complète L0 (GQA groupe 2, masque HF, softmax f32, o_proj) vs module réel, S={{8,1040}}", .{});
+
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+
+    const aw: AttnW = .init(st.store_ck.view());
+    const aw_buf = try zml.io.load(AttnW, &aw, arena, io, platform, &st.store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+    var n_pass: usize = 0;
+    inline for (U34_SEQ_LENS) |s| {
+        const sfx = std.fmt.comptimePrint("_s{d}", .{s});
+        log.info("  cas S={d} :", .{s});
+        const fix: U34Fix = .init(st.store_fx.view(), sfx);
+        try fix.check(s);
+        const fix_buf = try zml.io.load(U34Fix, &fix, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+        try checkMaskBite(allocator, io, fix_buf.mask, s);
+
+        var exe = try platform.compileFn(allocator, io, U34Ops.attn, .{ fix.hidden, aw.q.pk, aw.q.sc, aw.q_norm, aw.k.pk, aw.k.sc, aw.k_norm, aw.v.pk, aw.v.sc, aw.o.pk, aw.o.sc, fix.mask }, .{ .shardings = &.{sharding} });
+        defer exe.deinit();
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        var results = try exe.results(allocator);
+        defer results.deinit(allocator);
+        args.set(.{ fix_buf.hidden, aw_buf.q.pk, aw_buf.q.sc, aw_buf.q_norm, aw_buf.k.pk, aw_buf.k.sc, aw_buf.k_norm, aw_buf.v.pk, aw_buf.v.sc, aw_buf.o.pk, aw_buf.o.sc, fix_buf.mask });
+        exe.call(args, &results);
+        var r = results.get(zml.Buffer);
+        defer r.deinit();
+        _ = try compareStage(allocator, io, "étage d (attention complète -> o_proj)", &r, fix_buf.out, U3_MAX_ABS, null);
+        n_pass += 1;
+    }
+    if (n_pass != U34_SEQ_LENS.len) return error.GateFailed;
+    log.info("PASS u4 — attention complète S=8 + S=1040 (fenêtre MORDANTE recomptée) max_abs<=1e-4", .{});
+}
+
 // ---------------------------------------------------------------------------- main
 
 pub fn main(init: std.process.Init) !void {
@@ -263,6 +578,18 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingArgument;
         }
         try gateU2(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
+    } else if (std.mem.eql(u8, mode, "u3")) {
+        if (process_args.len < 4) {
+            log.err("{s}", .{usage});
+            return error.MissingArgument;
+        }
+        try gateU3(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
+    } else if (std.mem.eql(u8, mode, "u4")) {
+        if (process_args.len < 4) {
+            log.err("{s}", .{usage});
+            return error.MissingArgument;
+        }
+        try gateU4(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
     } else {
         log.err("mode inconnu '{s}' — {s}", .{ mode, usage });
         return error.MissingArgument;

@@ -1,0 +1,125 @@
+{
+  "source": "65_u3_sliding_oracle.py (Task 4, plan J2 amendé 2026-07-24)",
+  "oracle": "Gemma4TextAttention(text_config, layer_idx=0) RÉEL, poids export dq (D9), module f32 (flux moteur bf16->f32, précédent W3/P5.2) ; intermédiaires par HOOKS (apply_rotary_pos_emb x2, v_norm, o_proj), témoin eager asserté",
+  "mask": "create_sliding_window_causal_mask (transformers 5.14, mask_kwargs du forward Gemma4TextModel), additive f32 [1,1,S,S]",
+  "layouts": {
+    "hidden": "[1,S,3840] bf16 (graine consignée, module nourri en f32)",
+    "q": "[1,S,16,256] f32 post q_proj+q_norm+rope, PRE-transpose (unsqueeze_dim=2)",
+    "k": "[1,S,8,256] f32 post k_proj+k_norm+rope, PRE-transpose",
+    "v": "[1,S,8,256] f32 post v_norm (RMSNorm SANS poids), PRE-transpose",
+    "out": "[1,S,3840] f32 sortie o_proj (== sortie module, asserté)"
+  },
+  "geometry": {
+    "gqa_groups": 2,
+    "nh": 16,
+    "kvh": 8,
+    "hd": 256,
+    "sliding_window": 1024,
+    "scaling": 1.0,
+    "rope": "default theta 1e4, 256 dims pleines",
+    "layer": 0
+  },
+  "seed": 1337,
+  "seq_lens": [
+    8,
+    1040
+  ],
+  "thresholds": {
+    "u3_max_abs": 0.0001,
+    "u3_mean_abs": 1e-06,
+    "u4_max_abs": 0.0001,
+    "note": "seuils f32 (§3) — comparaisons f32, PAS bit-exact (matmuls)"
+  },
+  "cases": {
+    "S=8": {
+      "mask_counts": {
+        "masked": 28,
+        "causal_pure": 28,
+        "sliding_bite": 0,
+        "morsure": "fenetre non mordante (== causal pur)"
+      },
+      "points_fixes": {
+        "out[0,0,:3]": [
+          1.2352138757705688,
+          0.13788294792175293,
+          -0.99415123462677
+        ],
+        "out[0,-1,3837:]": [
+          -0.4907010793685913,
+          0.19707009196281433,
+          0.291550874710083
+        ],
+        "q[0,-1,0,:3]": [
+          -0.28929245471954346,
+          0.6656613349914551,
+          -0.09111413359642029
+        ],
+        "k[0,-1,7,:3]": [
+          0.22761543095111847,
+          0.136924609541893,
+          0.22759564220905304
+        ],
+        "v[0,0,0,:3]": [
+          -1.7700188159942627,
+          0.9535539746284485,
+          0.45878225564956665
+        ],
+        "mask[0,0,-1,:3]": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "S=1040": {
+      "mask_counts": {
+        "masked": 540416,
+        "causal_pure": 540280,
+        "sliding_bite": 136,
+        "morsure": "TEMOIN U4 (fenetre franchie)"
+      },
+      "points_fixes": {
+        "out[0,0,:3]": [
+          0.353731632232666,
+          -0.7892323136329651,
+          1.0713454484939575
+        ],
+        "out[0,-1,3837:]": [
+          0.026638170704245567,
+          0.09974835067987442,
+          -0.17268118262290955
+        ],
+        "q[0,-1,0,:3]": [
+          -0.49763864278793335,
+          0.8480826616287231,
+          0.6758062243461609
+        ],
+        "k[0,-1,7,:3]": [
+          0.08135755360126495,
+          0.26050740480422974,
+          0.01997942291200161
+        ],
+        "v[0,0,0,:3]": [
+          1.5190179347991943,
+          0.8213014602661133,
+          0.174474835395813
+        ],
+        "mask[0,0,-1,:3]": [
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ]
+      }
+    }
+  },
+  "pass": "gate u3 : étages a-c (q/k/v) aux seuils §3 sur S=8 (périmètre pré-enregistré du plan : fixture « S=8, étages a/b/c/d ») + tripwire diagnostique S=1040 borne 1e-3 ; gate u4 : attention complète (étage d) max_abs <= 1e-4 sur S=8 ET S=1040 (cas mordant), comptage masque recompté in-gate",
+  "finding_ulp_rope_2026_07_24": {
+    "fait": "zml.nn.rope (moteur, chemin sliding) génère inv_freq par exp(-log(theta)*n/N) f32 ; HF par theta**(-n/N) f32 — écart 1 ULP (max 5.96e-8, relatif 5.7e-7), amplifié linéairement par la position : delta-angle = pos*delta-inv (6.1e-5 rad a pos 708) -> etage a S=1040 max_abs mesure 4.9e-4 > seuil §3",
+    "diagnostic": "pas un bug de cablage (S=8 : marges x26-x134) ; verifie au chiffre : d_inv[3]=5.96e-8, d_cos@708=5.76e-5, pire ecart a hd=131 (freq imag 3)",
+    "consequence": "l'effet s'annule en rotation RELATIVE dans les scores QK : U4 S=1040 mordant tient max_abs 2.78e-5 << 1e-4 ; sans impact decode (bf16 ~4e-3, U8/U9 = argmax)"
+  },
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0+cu130"
+  }
+}
