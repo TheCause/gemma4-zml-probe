@@ -1,0 +1,23 @@
+{
+  "source": "57_w4_unpack_fixture.py \u00e9tage 0",
+  "layout": "compressed-tensors pack-quantized : nibble j = bits [4j,4j+4), stocke q+8",
+  "pass": "unpack ZML == q_expected (int, bit-exact) ; dequant ZML == deq_expected (bf16, bit-exact) ; packed_corrupt DOIT diverger (non-vacuit\u00e9)",
+  "tensors": {
+    "packed": [
+      2,
+      4
+    ],
+    "scales": [
+      2,
+      1
+    ],
+    "q_expected": [
+      2,
+      32
+    ],
+    "deq_expected": [
+      2,
+      32
+    ]
+  }
+}
