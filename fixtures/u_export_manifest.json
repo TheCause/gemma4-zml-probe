@@ -12,11 +12,11 @@
     "shards": [
       {
         "file": "model-00001-of-00002.safetensors",
-        "bytes": 13982479404
+        "bytes": 13982519668
       },
       {
         "file": "model-00002-of-00002.safetensors",
-        "bytes": 11950246964
+        "bytes": 11950295236
       }
     ],
     "quantization_config_removed": true

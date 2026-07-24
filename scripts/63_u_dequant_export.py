@@ -73,6 +73,13 @@ def snapshot_dir() -> str:
     return snap
 
 
+def _shard_sizes(weight_map: dict) -> list:
+    """Tailles des shards depuis le DISQUE — source de vérité unique pour le manifest,
+    utilisée par les deux branches (export et --skip-export) : elles convergent par construction."""
+    return [{"file": fn, "bytes": os.path.getsize(os.path.join(OUT_DIR, fn))}
+            for fn in sorted(set(weight_map.values()))]
+
+
 def dequant_manual(wp: torch.Tensor, ws: torch.Tensor, shape: list) -> torch.Tensor:
     """Recomposition manuelle (formule J1 prouvée, script 57) — contrôlée par le selfcheck (ii)."""
     out_d, in_d = int(shape[0]), int(shape[1])
@@ -126,7 +133,7 @@ def run_export() -> dict:
             shards.append(cur)
 
         n_shards = len(shards)
-        weight_map, shard_files, total = {}, [], 0
+        weight_map, total = {}, 0
         for i, entries in enumerate(shards, start=1):
             fname = f"model-{i:05d}-of-{n_shards:05d}.safetensors"
             tensors = {}
@@ -145,7 +152,6 @@ def run_export() -> dict:
                 weight_map[out_key] = fname
                 total += nbytes
             save_file(tensors, os.path.join(OUT_DIR, fname), metadata={"format": "pt"})
-            shard_files.append((fname, sum(e[1] for e in entries)))
             print(f"  shard {i}/{n_shards} : {len(tensors)} tenseurs, "
                   f"{sum(e[1] for e in entries)/1e9:.2f} Go -> {fname}", flush=True)
             del tensors
@@ -156,16 +162,18 @@ def run_export() -> dict:
 
     # config ÉPURÉ : sans quantization_config, sinon from_pretrained exigerait ct (absent de M4).
     cfg = json.load(open(os.path.join(snap, "config.json")))
-    qcfg = cfg.pop("quantization_config")
+    cfg.pop("quantization_config")
     with open(os.path.join(OUT_DIR, "config.json"), "w") as fh:
         json.dump(cfg, fh, indent=2)
     for name in TOKENIZER_FILES:
         shutil.copy2(os.path.join(snap, name), os.path.join(OUT_DIR, name))
 
     print(f"export : {len(weight_map)} clés, {total/1e9:.2f} Go, {n_shards} shards", flush=True)
+    # Manifest depuis le DISQUE (même logique que --skip-export : convergence par construction).
+    cfg_written = json.load(open(os.path.join(OUT_DIR, "config.json")))
     return {"n_keys": len(weight_map), "total_bytes": total,
-            "shards": [{"file": n, "bytes": b} for n, b in shard_files],
-            "quantization_config_removed": bool(qcfg)}
+            "shards": _shard_sizes(weight_map),
+            "quantization_config_removed": "quantization_config" not in cfg_written}
 
 
 def selfcheck_official_328() -> int:
@@ -252,10 +260,11 @@ def fixture_u1b() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--fixture-u1b", action="store_true",
-                    help="écrit uniquement la fixture U1b (Task 3), pas d'export")
-    ap.add_argument("--skip-export", action="store_true",
-                    help="rejoue les selfchecks sur un export existant")
+    group = ap.add_mutually_exclusive_group()  # les deux modes sont incompatibles, refus explicite
+    group.add_argument("--fixture-u1b", action="store_true",
+                       help="écrit uniquement la fixture U1b (Task 3), pas d'export")
+    group.add_argument("--skip-export", action="store_true",
+                       help="rejoue les selfchecks sur un export existant")
     args = ap.parse_args()
 
     if args.fixture_u1b:
@@ -263,11 +272,13 @@ def main() -> None:
         return
 
     if args.skip_export:
+        # Source de vérité DISQUE, même logique que la branche export (convergence par construction).
         index = json.load(open(os.path.join(OUT_DIR, "model.safetensors.index.json")))
+        cfg_written = json.load(open(os.path.join(OUT_DIR, "config.json")))
         export_info = {"n_keys": len(index["weight_map"]),
                        "total_bytes": index["metadata"]["total_size"],
-                       "shards": sorted({v for v in index["weight_map"].values()}),
-                       "quantization_config_removed": True}
+                       "shards": _shard_sizes(index["weight_map"]),
+                       "quantization_config_removed": "quantization_config" not in cfg_written}
     else:
         export_info = run_export()
 
