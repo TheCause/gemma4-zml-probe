@@ -14,7 +14,7 @@
 
 ## Contexte opératoire (à lire avant toute tâche)
 
-- **Machines** : le code vit sur M1 (`~/dev/gemma4-zml-probe`) ; il se compile et tourne sur la 3090 (`ssh ia@gpu-host` via jumphost, cf `zml_runner/deploy_to_3090.sh`, variables `ZML_REMOTE/ZML_JUMP/ZML_DST`). Workspace ZML : `/data/rqz_workspace/zml`, build via `./bazel.sh`.
+- **Machines** : le code vit sur M1 (`~/dev/gemma4-zml-probe`) ; il se compile et tourne sur la 3090 (`ssh user@gpu-host` via jumphost, cf `zml_runner/deploy_to_3090.sh`, variables `ZML_REMOTE/ZML_JUMP/ZML_DST`). Workspace ZML : `/data/rqz_workspace/zml`, build via `./bazel.sh`.
 - **Prérequis 3090** : swap actif (sinon OOM-kill exit 255 au compile XLA — vérifié par `scripts/smoke.sh`) ; patch local `@setEvalBranchQuota(100_000)` dans `pjrt.zig` (fonction `structSize`) présent.
 - **Vérification** : ce projet ne teste pas par pytest mais par **gates** (compile → run → comparaison à un oracle → tag). Chaque tâche code se termine par un build (smoke) ; les gates G2.3.0/1/2 sont les vraies validations.
 - **Zig 0.16-dev** : `pub fn main(init: std.process.Init)`, `init.minimal.args.toSlice(...)`, `std.Io.Dir.cwd()` + API Io threadée (cf `docs/DOCUMENTATION.md` pièges).
