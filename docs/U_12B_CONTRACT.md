@@ -2,9 +2,13 @@
 
 Jalon J2 (Gemma 4 12B `google/gemma-4-12B-it-qat-w4a16-ct` w4a16 sur la 3090). Cette carte
 est committée AVANT tout code moteur (règle J1 restaurée par l'Amendement 2026-07-24) —
-elle fige les faits D1 sur lesquels `engine.zig` (géométrie comptime `Geom`, Task 2) et le
-runner `g12.zig` (Task 8) seront bâtis. Source de vérité : `scripts/62_u0_contract.py`,
-exécuté sur la VM (`/data/venvs/g12b`), manifest auto-vérifié `fixtures/u0_contract_manifest.json`.
+elle fige les faits D1 (D1/D7 = décisions figées du plan J2, cf. renvoi ci-dessous) sur
+lesquels `engine.zig` (géométrie comptime `Geom`, Task 2) et le runner `g12.zig` (Task 8)
+seront bâtis. Source de vérité : `scripts/62_u0_contract.py`, exécuté sur la VM
+(`/data/venvs/g12b`), manifest auto-vérifié `fixtures/u0_contract_manifest.json`.
+
+**Spec :** `docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md` (§4.2 corrigée par ce contrat)
+**Plan :** `docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md` (décisions D1-D13 + Amendement 2026-07-24)
 
 ## 1. Les deux géométries d'attention (D1)
 
@@ -14,7 +18,7 @@ exécuté sur la VM (`/data/venvs/g12b`), manifest auto-vérifié `fixtures/u0_c
 | KV | **8** KV × 256 → GQA **groupe 2** | **1** KV × 512 → **MQA** (groupe 16, broadcast) |
 | v_proj | présent | **ABSENT** (`attention_k_eq_v`) |
 | V | `v_norm(v_proj(x))` | **`v_norm(k_proj(x))` — capturé AVANT k_norm et AVANT RoPE** |
-| RoPE | default, theta 1e4, 256 dims pleines | proportional, theta 1e6, partial 0.25 sur 512 (== chemin full E2B) |
+| RoPE | default, theta 1e4, 256 dims pleines | proportional, theta 1e6, partial 0.25 sur 512 (== chemin full E2B) — **64 fréquences actives, padding zéros dans `inv_freq`, `rotate_half` par moitiés** |
 
 Commun aux deux géométries : scaling d'attention 1.0, pas de softcap d'attention texte,
 RMSNorm `x*weight` fp32 (**PAS** `1+weight`), q_norm/k_norm avec poids (256/512), v_norm
@@ -73,20 +77,27 @@ couches). Vérifié bit contre `config.json.text_config.layer_types` du checkpoi
 
 ## 5. Pièges hérités applicables (repo)
 
-- **8** — scalings d'embeddings implicites : `embed_tokens` ET `embed_tokens_per_layer`
-  portent chacun un scale (`Gemma4TextScaledWordEmbedding`) ; ne pas en oublier un côté 12B.
+- **8** — scalings d'embeddings implicites : `embed_tokens` (`×√1536` E2B / `×62.0` bf16 12B,
+  cf. D12 §7) ET `embed_tokens_per_layer` (`×√256=16`, **sans objet ici : `ple_dim=0`** au 12B —
+  ni PLE ni YOCO, cf. §1) portent chacun un scale (`Gemma4TextScaledWordEmbedding`) ; ne pas
+  en oublier un côté 12B.
 - **10** — attention scaling = 1.0, **pas** de softcap d'attention (softcap uniquement sur
-  les logits finaux, 30.0).
-- **12** — l'oracle HF (checkpoint officiel, transformers 5.14.1) est la source de vérité ;
-  toute divergence moteur/oracle se diagnostique en supposant d'abord l'oracle correct, puis
-  en vérifiant sa propre fidélité (cf. l'historique D12 ci-dessous — l'oracle E2B avait eu
-  2 bugs réels avant validation).
+  les logits finaux, 30.0) ; masque additif, softmax fp32 (repris tel quel du piège d'origine,
+  aucune omission volontaire côté 12B).
+- **12** — « oracle » distingue deux choses à ne pas confondre : le **modèle HF officiel**
+  (`transformers` 5.14.1 sur le checkpoint réel — la référence, **jamais en cause**) vs le
+  **script oracle Python** (réimplémentation/reproduction locale — **peut** avoir des bugs,
+  cf. les 2 bugs oracle E2B documentés en D12 §7). Le piège officiel : dériver le script
+  oracle du code source réel de `modeling_gemma4.py`, **jamais d'une hypothèse** ré-encodée —
+  toute divergence moteur/script-oracle se diagnostique en suspectant d'abord le script, pas
+  le modèle HF.
 - **13** — comparer des logits, pas des argmax seuls (les flips top-1 masquent des dérives
   numériques réelles).
 - **17** — marges/égalités (ties) : la comparaison bit doit gérer les cas de scores à égalité
-  sans faux-négatif.
-- **19** — `sdpa` scale 1.0 obligatoire (ne pas laisser PyTorch recalculer `1/sqrt(head_dim)`
-  par défaut).
+  sans faux-négatif. Piège d'origine formulé en contexte batching (`docs/DOCUMENTATION.md`
+  §8.17) — généralisé ici aux ties de toute comparaison, pas seulement B>1.
+- **19** — `zml.nn.sdpa` scale K par 1/√hd par défaut (`engine.zig:473-478`, `AttnKind.sdpa`)
+  — `.scale = 1.0` obligatoire si ce chemin est un jour activé pour le 12B.
 - **20** — scale-invariance : un contre-test sur `gate_proj` (MLP) doit vérifier que le moteur
   n'est pas invariant à une renormalisation qui masquerait un bug de câblage.
 
