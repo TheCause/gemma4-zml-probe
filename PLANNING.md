@@ -50,12 +50,17 @@
   gagne rien** car son chemin cudnn est du **code mort** (audit upstream
   `docs/ZML_UPSTREAM_AUDIT_2026-07-12.md` → **pas de bump ZML** : les 164 commits d'avance ne
   débloquent rien, FA2/FA3 assertent toujours B==1).
-- [ ] 🌱 **Chantier W4 — poids 4-bit dans ZML → Gemma 4 12B sur la 3090** : spec prête au
-  tiroir (`docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`, approuvée + revue
-  18 juil 2026, exécution différée — décision Régis « graine »). Au réveil : `writing-plans`
-  depuis la spec, **jalon J1 d'abord** (brique W4 sur E2B) ; J2 (12B Unified) re-décidable
-  après J1. ⚠ re-vérifier au réveil : df VM (`/` ≠ `/data`), upstream ZML sans bump,
-  checkpoints QAT dispo.
+- [x] **Chantier W4 — poids 4-bit dans ZML → Gemma 4 12B sur la 3090** : **🏁 J1 LIVRÉ
+  24 juil 2026** (branche `w4-brique`, 6 gates PASS, tags `gate/w4-w0-pass` …
+  `gate/w4-wn-pass`) — brique `dequantW4` (int4 w4a16-ct groupé → bf16 en graphe) prouvée sur
+  E2B : décode GPU **48/48 == HF-même-checkpoint** (40,9 tok/s, pic VRAM réel 10 524 MiB =
+  **−37 % vs bf16**), `engine.zig` **0 octet modifié** (wrapper `W4Step`), finding
+  « scale-invariance des norms » (10/11 familles — le contre-test scale doit cibler
+  gate_proj) — **voir `docs/W4_RESULTS.md`**. **J2 (12B Unified) au tiroir, GO = décision
+  Régis** (règle d'arrêt de la spec
+  `docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md` ; plan exécuté
+  `docs/superpowers/plans/2026-07-24-w4-j1-brique-e2b.md` ; chiffres 12B déjà en poche :
+  328 linears g32, 9,56 GiB, VRAM projetée ~10-12 Go ; ⚠ 8 couches full sans v_proj).
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.

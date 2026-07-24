@@ -168,6 +168,16 @@ La claim « == HF » n'est **pas un artefact fp32**. Protocole complet : [`G2_BF
   safetensors) ; la VRAM réelle est **8 494 MiB** — les ~22 Go vus auparavant étaient la réserve BFC
   (`memory_fraction 0.90`), pas l'usage. Corollaire : le banc GPU tiendrait sur une carte 12 Go.
 
+### 2.3 bis Poids 4-bit w4a16 (E2B) — brique `dequantW4` (chantier W4-J1, 6 gates PASS le 24 juillet 2026)
+
+Le moteur sait consommer un checkpoint **w4a16 compressed-tensors** (int4 groupé g32 symétrique,
+format des checkpoints QAT Google) : la brique `dequantW4` (`w4.zig`) déplie les poids packés en
+bf16 **dans le graphe**, et `gemma4_w4auto` (wrapper `W4Step`, `engine.zig` **0 octet modifié**)
+décode l'E2B-W4 sur GPU **48/48 == HF-même-checkpoint** à 40,9 tok/s, pic VRAM réel
+**10 524 MiB (−37 % vs bf16)**. Coût du dequant par step : ×2,2 (assumé — correctness first,
+la brique vise le 12B où les linears dominent la VRAM). Résultats, format, finding
+scale-invariance et état J2 (12B, au tiroir) : [`W4_RESULTS.md`](W4_RESULTS.md).
+
 ### 2.4 Briques de recherche (au-delà de Gemma)
 
 - **Socle moteur modulaire** (`engine.zig` + `gemma4_engine_e1/e2`) : moteur de decode + briques
@@ -255,9 +265,12 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `48` | **Détokenisation + gate round-trip** (ids → texte prouvé fidèle) |
 | `49` | **Oracle prompt custom** (chat template, `--prompt`, `--n-tokens`) |
 | `50`–`51` | **G2 bf16** : oracle enveloppe (teacher-forcing HF-bf16 vs fp32) + analyse métriques |
+| `52`–`53` | **G2.3** : analyse du sweep par-familles + vérification HLO (comptage des converts vs oracle) |
+| `54`–`59` | **W4 poids 4-bit** : quantize E2B w4a16-ct (recette Google rejouée), export dequant de référence bf16, oracle de génération sur checkpoint W4 (fork du 49), fixtures unpack, oracle GEMM, corruption ciblée de checkpoint (non-vacuité) |
+| `60`–`61` | **Batching** : constitution des oracles par lane (N × script 49) + sweep B protocolaire (attente GPU libre, cause de FAIL logguée) |
 | `30`–`33`, `45`, `spike_hadq`, `measure_k_distribution`, `test_kv_quant_generation` | Piste **TurboQuant** (quantization V, Hadamard) |
 | `smoke.sh` | Build-only des runners clés (toolchain OK sans weights ni RAM) |
-| `regen_fixtures.sh`, `sweep_perf.sh` | Régénération des fixtures ; sweep de perf (CHUNK) |
+| `regen_fixtures.sh`, `sweep_perf.sh`, `g2_3_sweep.sh` | Régénération des fixtures ; sweep de perf (CHUNK) ; orchestration du sweep G2.3 (one-hot par famille) |
 
 ### 5.2 Runners ZML (`zml_runner/`)
 
@@ -275,6 +288,12 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `gemma4_gen_long_gpu.zig` | **Génération longue GPU fp32** (mono-graphe CUDA, 109 tok/s) |
 | `gemma4_g23_sweep.zig` | Sweep bf16 par familles (G2.2/G2.3), moteur `PrecRt` runtime — CLI `<model> <fixture> <logits_out> <familles> [max_steps] [--no-prealloc]`, familles = champs PrecRt ou `none` ; config G2.2 = `qkv_proj,qk_scores,pv_ctx,o_proj,mlp,ple,head` |
 | `gemma4_engine_e1.zig` / `_e2.zig` | Socle modulaire : non-régression HLO / brique TurboQuant |
+| `gemma4_gen_auto.zig` | **Runtime 100 % autonome texte→texte** (tokenizer ZML natif, chat template Zig, early-stop EOS, gardes CUDA/VRAM, gather+topK in-graph depuis L3) |
+| `gemma4_bbatch.zig` | **Génération batchée** : B séquences dans un graphe (moteur shape-polymorphe), fidélité par lane vs fixtures HF, `--replicate`, garde de contention |
+| `gemma4_bbs.zig` | Variante `attn = .sdpa` du runner batché (gates S1–S3 ; `.scale = 1.0` obligatoire, piège 19) |
+| `w4.zig` | **Brique W4** : `W4Lin`/`unpackW4`/`dequantW4` (int4 g32 → bf16 in-graph, extraction logique) + `W4KV`/`W4LayerW`/`W4Model` (YOCO) |
+| `gemma4_w4gate.zig` | Gates W1/W2/W3 : unpack bit-exact, dequant 5 familles de shape, premier GEMM |
+| `gemma4_w4auto.zig` | Clone ciblé de `gen_auto` : `W4Step` assemble un `Model` à poids `dequantW4` et délègue à `forwardStep` inchangé (32 lignes de diff) ; log de marge top1−top2 en mode oracle |
 | `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire |
 
 **Gates unitaires** (une op chacun, conservés comme suite de preuve) : `gemma4_ple_fixture`,
@@ -298,6 +317,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `P5_*.md` | Notes par phase : cartographie YOCO, policy table, attention, closeout, contrat de précision, decode |
 | `ZML_MODULAR_ENGINE_{DESIGN,PLAN}.md` | Socle moteur modulaire (briques comptime) |
 | `TURBOQUANT_ZML_{DESIGN,PLAN,RESULTS}.md` | POC quantization V |
+| `W4_RESULTS.md` | **Poids 4-bit w4a16 (W4-J1)** : format, 6 gates, finding scale-invariance, état J2 |
 | `SESSION_2026-06-27_RAPPORT.md` | Rapport de la session « écrite sans compiler » + audit |
 
 ---
@@ -434,6 +454,17 @@ bash scripts/sweep_perf.sh    # sweep CHUNK (CPU)
 En régime bf16, ZML est plus proche de la vérité fp32 que l'implémentation de référence ne l'est
 d'elle-même.
 
+### 7.3 Poids 4-bit w4a16 (W4-J1, E2B — vs HF sur le même checkpoint W4)
+
+| Étape | Résultat |
+|---|---|
+| Unpack + dequant (W1/W2) | **bit-exact bf16** vs référence compressed-tensors (~42,5 M u16, 5/5 familles de shape) |
+| Premier GEMM (W3, q_proj L0) | max_abs **7.75e-7** (~130× sous le seuil 1e-4) |
+| Décode GPU complet (W4g) | **48/48 == HF-même-checkpoint**, **40,9 tok/s**, pic VRAM réel **10 524 MiB** (−37 % vs 16 658 bf16) |
+| Non-régression (WN) | `engine.zig` 0 octet modifié ; témoin `gen_auto` re-PASS 48/48 (91,7 tok/s) |
+
+Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
+
 ---
 
 ## 8. Pièges et garde-fous (capitalisés — à lire avant de toucher au code)
@@ -516,6 +547,12 @@ d'elle-même.
 19. **`zml.nn.sdpa` scale K par 1/√hd par DÉFAUT** alors que Gemma 4 a un scaling de 1.0 (la
     normalisation passe par `q_norm`) → `.scale = Tensor.scalar(1.0)` **obligatoire**, sinon les
     scores sont silencieusement divisés par 16.
+20. **Invariance d'échelle des norms → un contre-test de scale doit cibler `gate_proj`**
+    (chantier W4) : une corruption UNIFORME de `weight_scale` sur q_proj (×4, ×100) ne flippe
+    pas l'argmax — `q_norm` annule tout facteur uniforme (RMSNorm(c·x) == RMSNorm(x)), idem
+    k/v et o/down/up (sandwich norms). **10 des 11 familles de linears de Gemma 4 sont
+    scale-invariantes par construction** ; seule `gate_proj` traverse une non-linéarité (gelu)
+    avant toute norm — le contre-test retenu (gate_proj L17 ×100) diverge au step gen=4.
 
 ---
 
@@ -531,13 +568,21 @@ d'elle-même.
 
 **Backlog** (ordre du planning courant, cf [`../PLANNING.md`](../PLANNING.md)) :
 
-1. Batching / flash-attention (perf GPU au-delà du mono-séquence).
+1. ~~Batching / flash-attention (perf GPU au-delà du mono-séquence)~~ — **fait 12 juil 2026**
+   (cf §2.2 bis et [`BATCHING_RESULTS.md`](BATCHING_RESULTS.md)) ; le volet flash s'est soldé
+   par « pas de gain » (chemin cudnn de sdpa mort upstream), reste l'option Triton paged
+   attention (bump ZML + refonte cache YOCO, non démarré).
 2. ~~L3 in-graph (boucle de décode dans le graphe, réduire les 7 syncs host/step du CPU)~~ —
    **fait 12 juil 2026** (cf [`L3_INGRAPH_DESIGN.md`](L3_INGRAPH_DESIGN.md) § Résultats).
-3. Runtime 100 % autonome (tokenizer intégré + early-stop EOS).
+3. ~~Runtime 100 % autonome (tokenizer intégré + early-stop EOS)~~ — **fait 10-11 juil 2026**
+   (`gemma4_gen_auto`, cf §2.2).
 4. ~~G2.3 bonus : cartographie de sensibilité bf16 par-op~~ — **PASS 10 juil 2026**
    (cf [`G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md)) : 12/12 familles SAFE, config combinée
    12-familles SAFE à 0.486× l'enveloppe, kv_store bf16 quasi-gratuit.
+5. ~~Chantier W4 jalon J1 : brique poids 4-bit w4a16 sur E2B~~ — **LIVRÉ 24 juil 2026**
+   (6 gates PASS, cf [`W4_RESULTS.md`](W4_RESULTS.md)). **Reste au tiroir : J2 — Gemma 4 12B**
+   (`Gemma4Unified`, checkpoint QAT w4a16-ct, VRAM projetée ~10-12 Go sur 24) ; **GO = décision
+   Régis** (règle d'arrêt de la spec `superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`).
 
 ---
 
@@ -554,6 +599,7 @@ d'elle-même.
 | Pipeline e2e | Scripts 48/49 : prompt libre → texte vérifié | ✅ 28 juin |
 | G2 bf16 | Enveloppe + gemm-bf16 : fidélité tenue en basse précision | ✅ 4 juil |
 | PR → main | Consolidation de la branche `generation-longue` | 🔄 9 juil (PR #3) |
+| W4-J1 | Brique poids 4-bit w4a16 (`dequantW4` in-graph) prouvée sur E2B : 6 gates, 48/48 == HF-même-checkpoint, −37 % VRAM, `engine.zig` intact — J2 (12B) au tiroir | ✅ 24 juil |
 
 Chaque gate a son tag git (`git tag -l 'gate/*' 'p5.*' '*-pass' '*validated*'`) et sa note dans `docs/`.
 
