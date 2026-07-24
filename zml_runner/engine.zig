@@ -13,12 +13,85 @@ const std = @import("std");
 const zml = @import("zml");
 const log = std.log;
 
-pub const NUM_LAYERS: usize = 35;
-pub const FIRST_KV_SHARED: usize = 15;
-pub const SLIDING_WRITER: usize = 13;
-pub const FULL_WRITER: usize = 14;
-pub const SLIDING_WRITER_SLOT: i64 = 11; // slidingSlot(13)
-pub const FULL_WRITER_SLOT: i64 = 2; // fullSlot(14)
+/// Géométrie du modèle — comptime. Défaut = E2B (neutralité prouvée par gate U1, HLO md5).
+/// Portée par EngineCfg (`geom: Geom = e2b`) : les sites du moteur lisent cfg.geom, les alias
+/// publics historiques (ci-dessous) restent exportés avec leurs TYPES d'origine (i64/f64).
+pub const Geom = struct {
+    num_layers: usize,
+    first_kv_shared: usize, // = num_layers si pas de YOCO (aucun reader)
+    sliding_writer: usize,
+    full_writer: usize,
+    d: usize,
+    nh: usize,
+    kvh_sliding: usize, // E2B 1 (MQA), 12B 8 (GQA groupe 2)
+    kvh_full: usize, // 1 partout (MQA)
+    hd_sliding: usize,
+    hd_full: usize,
+    ple_dim: usize, // 0 => bloc PLE comptime-mort
+    full_period: usize, // isFull(i) = (i+1) % full_period == 0  (E2B 5, 12B 6)
+    k_eq_v_full: bool, // 12B : V = v_norm(k_proj brut) sur les couches full
+    rope_theta_sliding: f32,
+    softcap: f32,
+
+    pub fn isFull(comptime g: Geom, comptime i: usize) bool {
+        return (i + 1) % g.full_period == 0;
+    }
+    pub fn isReader(comptime g: Geom, comptime i: usize) bool {
+        return i >= g.first_kv_shared;
+    }
+    /// Dérivations en f64 OBLIGATOIREMENT (les constantes historiques sont f64 ; une dérivation
+    /// f32 changerait le scalaire HLO d'un ULP → md5 U1 FAIL par construction).
+    pub fn embedScale(comptime g: Geom) f64 {
+        return @sqrt(@as(f64, @floatFromInt(g.d)));
+    }
+    pub fn invSqrtHid(comptime g: Geom) f64 {
+        return 1.0 / @sqrt(@as(f64, @floatFromInt(g.d)));
+    }
+    pub fn slidingSlot(comptime g: Geom, comptime i: usize) i64 {
+        comptime var slot: i64 = 0;
+        comptime var j: usize = 0;
+        inline while (j < i) : (j += 1) {
+            if (comptime !g.isFull(j)) slot += 1;
+        }
+        return slot;
+    }
+    pub fn fullSlot(comptime g: Geom, comptime i: usize) i64 {
+        comptime var slot: i64 = 0;
+        comptime var j: usize = 0;
+        inline while (j < i) : (j += 1) {
+            if (comptime g.isFull(j)) slot += 1;
+        }
+        return slot;
+    }
+};
+
+/// Géométrie E2B — les valeurs historiques d'engine.zig, à l'identique (gate U1).
+pub const e2b: Geom = .{
+    .num_layers = 35,
+    .first_kv_shared = 15,
+    .sliding_writer = 13,
+    .full_writer = 14,
+    .d = 1536,
+    .nh = 8,
+    .kvh_sliding = 1,
+    .kvh_full = 1,
+    .hd_sliding = 256,
+    .hd_full = 512,
+    .ple_dim = 256,
+    .full_period = 5,
+    .k_eq_v_full = false,
+    .rope_theta_sliding = 1.0e4,
+    .softcap = 30.0,
+};
+
+// Alias publics conservés AVEC LEURS TYPES D'ORIGINE (i64/f64) — les runners existants
+// (w4.zig, gemma4_w4auto.zig…) compilent sans modification. Valeurs = e2b.
+pub const NUM_LAYERS: usize = e2b.num_layers;
+pub const FIRST_KV_SHARED: usize = e2b.first_kv_shared;
+pub const SLIDING_WRITER: usize = e2b.sliding_writer;
+pub const FULL_WRITER: usize = e2b.full_writer;
+pub const SLIDING_WRITER_SLOT: i64 = e2b.slidingSlot(e2b.sliding_writer); // 11
+pub const FULL_WRITER_SLOT: i64 = e2b.fullSlot(e2b.full_writer); // 2
 
 // B/S ne sont PLUS consommés par le moteur : depuis le gate batch T0, les 5 sites de reshape
 // (q/k/v + les 2 du PLE) dérivent leurs dims batch/seq des SHAPES D'ENTRÉE (`h0.dim(.b)`,
@@ -26,43 +99,29 @@ pub const FULL_WRITER_SLOT: i64 = 2; // fullSlot(14)
 // Déclarations gardées pour les runners existants (qui construisent encore des shapes à 1).
 pub const B: i64 = 1;
 pub const S: i64 = 1;
-pub const D: i64 = 1536;
-pub const NH: i64 = 8;
-pub const KVH: i64 = 1;
-pub const HD_SLIDING: i64 = 256;
-pub const HD_FULL: i64 = 512;
-pub const PLE_DIM: i64 = 256;
+pub const D: i64 = @intCast(e2b.d);
+pub const NH: i64 = @intCast(e2b.nh);
+pub const KVH: i64 = @intCast(e2b.kvh_sliding);
+pub const HD_SLIDING: i64 = @intCast(e2b.hd_sliding);
+pub const HD_FULL: i64 = @intCast(e2b.hd_full);
+pub const PLE_DIM: i64 = @intCast(e2b.ple_dim);
 
 const RMS_EPS: f32 = 1.0e-6;
-const ROPE_THETA_SLIDING: f32 = 1.0e4;
-const EMBED_SCALE: f64 = @sqrt(1536.0);
-const INV_SQRT_HID: f64 = 1.0 / @sqrt(1536.0);
+const ROPE_THETA_SLIDING: f32 = e2b.rope_theta_sliding;
+const EMBED_SCALE: f64 = e2b.embedScale();
+const INV_SQRT_HID: f64 = e2b.invSqrtHid();
 const SQRT_PLE: f64 = 16.0;
 const INV_SQRT_2: f64 = 0.7071067811865476;
 const SOFTCAP: f64 = 30.0;
 const INV_SOFTCAP: f64 = 1.0 / 30.0;
 
+/// Wrappers historiques (géométrie E2B) — API préservée pour les runners existants ; le moteur,
+/// lui, lit cfg.geom (méthodes Geom, comptime).
 pub fn isFull(i: usize) bool {
-    return (i + 1) % 5 == 0;
+    return (i + 1) % e2b.full_period == 0;
 }
 pub fn isReader(i: usize) bool {
     return i >= FIRST_KV_SHARED;
-}
-fn slidingSlot(i: usize) i64 {
-    var slot: i64 = 0;
-    var j: usize = 0;
-    while (j < i) : (j += 1) {
-        if (!isFull(j)) slot += 1;
-    }
-    return slot;
-}
-fn fullSlot(i: usize) i64 {
-    var slot: i64 = 0;
-    var j: usize = 0;
-    while (j < i) : (j += 1) {
-        if (isFull(j)) slot += 1;
-    }
-    return slot;
 }
 
 // NB : l'upcast prec-aware est `cvt(t, dt)` file-scope, dtype passé EXPLICITEMENT (G2.3 : prec est
@@ -113,9 +172,9 @@ fn rmsScaleP(x: zml.Tensor, w: zml.Tensor) zml.Tensor {
 /// RoPE sliding prec-aware (famille rope). zml.nn.rope NATIF : ses cos/sin internes sont générés
 /// en f32 puis convertis au dtype de x (cf zml nn.zig:rope) → arrondir x arrondit AUSSI cos/sin
 /// (contrat : q/k ET cos/sin), sans patcher l'intérieur de zml. fam=null : identique + no-op convert.
-fn slidingRope(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, pos: zml.Tensor) zml.Tensor {
+fn slidingRope(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, pos: zml.Tensor, theta: f32) zml.Tensor {
     const xi = inPrec(fam, x);
-    return zml.nn.rope(xi, pos, .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = ROPE_THETA_SLIDING } } }).convert(compute);
+    return zml.nn.rope(xi, pos, .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = theta } } }).convert(compute);
 }
 /// RoPE full prec-aware (famille rope) : q/k ET cos/sin arrondis en entrée, sortie re-upcastée.
 /// fam=null : ops identiques à l'ancien manualRope + no-op convert.
@@ -127,11 +186,12 @@ fn manualRope(fam: ?zml.DataType, compute: zml.DataType, x: zml.Tensor, cos: zml
     const rh = zml.Tensor.concatenate(&.{ halves[1].negate(), halves[0] }, .hd);
     return xi.mul(cosi.broad(xi.shape())).add(rh.mul(sini.broad(xi.shape()))).convert(compute);
 }
-/// Softcap 30·tanh(x/30) prec-aware (famille softcap) : entrée arrondie, sortie re-upcastée.
+/// Softcap cap·tanh(x/cap) prec-aware (famille softcap) : entrée arrondie, sortie re-upcastée.
 /// `scale` émet sa constante au dtype du tensor (cf tensor.zig) → le chemin bf16 reste homogène.
-/// fam=null : émission identique à `raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP)`.
-fn softcapPrec(fam: ?zml.DataType, compute: zml.DataType, raw: zml.Tensor) zml.Tensor {
-    return inPrec(fam, raw).scale(INV_SOFTCAP).tanh().scale(SOFTCAP).convert(compute);
+/// `cap` vient de geom.softcap (f32 → f64 exact pour 30.0) : émission identique à l'historique
+/// `raw.scale(INV_SOFTCAP).tanh().scale(SOFTCAP)` (gate U1).
+fn softcapPrec(fam: ?zml.DataType, compute: zml.DataType, raw: zml.Tensor, cap: f64) zml.Tensor {
+    return inPrec(fam, raw).scale(1.0 / cap).tanh().scale(cap).convert(compute);
 }
 
 /// Contexte (runtime) passé à un point d'extension, pour info/extensibilité. `is_full` n'y est PAS :
@@ -320,6 +380,10 @@ fn pickStep(t: zml.Tensor, step: zml.Tensor) zml.Tensor {
 /// les tailles de fenêtre. `kmax_sliding` n'est utilisé que comme scalaire du modulo ring (la dim `.k`
 /// du cache, elle, est inférée de la fixture).
 pub const EngineCfg = struct {
+    // Géométrie du modèle (comptime). Défaut e2b = comportement historique à l'identique
+    // (gate U1 : HLO byte-identique). ⚠ piège 4 : le struct dans la VALEUR cfg allonge le
+    // @typeName des instanciations — parade pré-enregistrée si quota pjrt : GeomTag enum.
+    geom: Geom = e2b,
     ring: bool = false, // scatter sliding circulaire pos % kmax_sliding
     two_masks: bool = false, // masque par type de couche (sliding/full) au lieu d'un masque unique
     kmax_sliding: i64 = 8, // modulo du ring-buffer sliding
@@ -397,16 +461,20 @@ fn dotPrec(fam: ?zml.DataType, compute: zml.DataType, a: zml.Tensor, b: zml.Tens
 /// comptime : ses branches inactives ne sont pas émises (neutralité HLO en config défaut).
 /// `prec` est RUNTIME (G2.3) : la valeur au moment du traçage décide des converts émis.
 fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: PrecRt, hidden: zml.Tensor, ple_i: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor, mask: zml.Tensor, pos_s: zml.Tensor, pos_u: zml.Tensor, cache: *Cache, brick: anytype) zml.Tensor {
-    const full = isFull(i);
-    const reader = isReader(i);
-    const hd: i64 = if (full) HD_FULL else HD_SLIDING;
+    const geom = cfg.geom;
+    const full = comptime geom.isFull(i);
+    const reader = comptime geom.isReader(i);
+    const hd: i64 = if (full) @intCast(geom.hd_full) else @intCast(geom.hd_sliding);
     const half: i64 = @divExact(hd, 2);
+    const nh: i64 = @intCast(geom.nh);
+    // D5 (GQA 12B) : kvh par TYPE de couche — E2B : 1 partout (MQA), même HLO (gate U1).
+    const kvh: i64 = if (full) @intCast(geom.kvh_full) else @intCast(geom.kvh_sliding);
 
     const h0 = rmsScaleDPrec(prec.norms, prec.compute, hidden, layer.input_layernorm);
 
-    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), NH, hd }).withTags(.{ .b, .s, .nh, .hd });
+    var q = dotPrec(prec.qkv_proj, prec.compute, h0, layer.q_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), nh, hd }).withTags(.{ .b, .s, .nh, .hd });
     q = rmsScaleHdPrec(prec.norms, prec.compute, q, layer.q_norm);
-    q = if (full) manualRope(prec.rope, prec.compute, q, cos, sin, half) else slidingRope(prec.rope, prec.compute, q, pos_s);
+    q = if (full) manualRope(prec.rope, prec.compute, q, cos, sin, half) else slidingRope(prec.rope, prec.compute, q, pos_s, geom.rope_theta_sliding);
     const q_final = q.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .q });
 
     const so = zml.Tensor.ScatterOpts{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override };
@@ -414,27 +482,35 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
     var cache_v: zml.Tensor = undefined;
     if (reader) {
         if (full) {
-            cache_k = cache.fl_k.choose1d(.slot, FULL_WRITER_SLOT);
-            cache_v = cache.fl_v.choose1d(.slot, FULL_WRITER_SLOT);
+            cache_k = cache.fl_k.choose1d(.slot, comptime geom.fullSlot(geom.full_writer));
+            cache_v = cache.fl_v.choose1d(.slot, comptime geom.fullSlot(geom.full_writer));
         } else {
-            cache_k = cache.sl_k.choose1d(.slot, SLIDING_WRITER_SLOT);
-            cache_v = cache.sl_v.choose1d(.slot, SLIDING_WRITER_SLOT);
+            cache_k = cache.sl_k.choose1d(.slot, comptime geom.slidingSlot(geom.sliding_writer));
+            cache_v = cache.sl_v.choose1d(.slot, comptime geom.slidingSlot(geom.sliding_writer));
         }
     } else {
-        var k = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
-        k = rmsScaleHdPrec(prec.norms, prec.compute, k, layer.k_norm);
-        k = if (full) manualRope(prec.rope, prec.compute, k, cos, sin, half) else slidingRope(prec.rope, prec.compute, k, pos_s);
+        // k_raw = k_proj brut post-reshape, capturé AVANT k_norm/rope — consommé par la branche
+        // k_eq_v_full (D4) ci-dessous, comptime-morte pour E2B (même ordre d'émission qu'avant).
+        const k_raw = dotPrec(prec.qkv_proj, prec.compute, h0, layer.k_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), kvh, hd }).withTags(.{ .b, .s, .nh, .hd });
+        var k = rmsScaleHdPrec(prec.norms, prec.compute, k_raw, layer.k_norm);
+        k = if (full) manualRope(prec.rope, prec.compute, k, cos, sin, half) else slidingRope(prec.rope, prec.compute, k, pos_s, geom.rope_theta_sliding);
         const k_new = k.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
-        var v = dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), KVH, hd }).withTags(.{ .b, .s, .nh, .hd });
+        // D4 (12B) : couches full sans v_proj — V part du k_proj BRUT (avant k_norm/rope), puis
+        // v_norm + post_v_norm inchangés. `LayerW.v_proj` de ces couches = placeholder [1] jamais
+        // consommé (toute consommation accidentelle casse au compile). Branche comptime : pour
+        // E2B (k_eq_v_full=false) le chemin v_proj est émis à l'identique (gate U1).
+        var v = if (comptime geom.k_eq_v_full and geom.isFull(i))
+            k_raw
+        else
+            dotPrec(prec.qkv_proj, prec.compute, h0, layer.v_proj, .d).reshape(.{ h0.dim(.b), h0.dim(.s), kvh, hd }).withTags(.{ .b, .s, .nh, .hd });
         // v_norm n'a PAS de poids : entrée encadrée seulement, sortie re-upcastée (famille norms).
         v = zml.nn.rmsNorm(inPrec(prec.norms, v), .hd, RMS_EPS).convert(prec.compute);
         // === point d'extension post_v_norm (V post-v_norm, pré-cache) ===
         // comptime-mort pour une brique sans cette méthode (ex: struct{}) → V inchangé → bit-exact decode4.
         if (@hasDecl(@TypeOf(brick), "post_v_norm")) {
-            // is_full passé en COMPTIME (la brique sélectionne une constante par shape) ; `comptime isFull(i)`
-            // car `i` est comptime mais `full` est un const runtime. ctx = info runtime.
-            v = brick.post_v_norm(v, comptime isFull(i), LayerCtx{ .layer_idx = i });
+            // is_full passé en COMPTIME (la brique sélectionne une constante par shape). ctx = info runtime.
+            v = brick.post_v_norm(v, comptime geom.isFull(i), LayerCtx{ .layer_idx = i });
         }
         const v_new = v.transpose(.{ .b, .nh, .s, .hd }).rename(.{ .nh = .h, .s = .k });
 
@@ -442,20 +518,20 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
         // stockage AVANT scatterSlices (le cache est déclaré au dtype du header fixture, mécanisme b
         // — l'update d'un scatter doit matcher l'opérande). fam=null : inPrec = `return x`, zéro op.
         if (full) {
-            const slot = zml.Tensor.scalar(@as(u32, @intCast(fullSlot(i))), .u32);
+            const slot = zml.Tensor.scalar(@as(u32, @intCast(comptime geom.fullSlot(i))), .u32);
             cache.fl_k = cache.fl_k.scatterSlices(.{ .slot = slot, .k = pos_u }, inPrec(prec.kv_store, k_new), so);
             cache.fl_v = cache.fl_v.scatterSlices(.{ .slot = slot, .k = pos_u }, inPrec(prec.kv_store, v_new), so);
-            cache_k = cache.fl_k.choose1d(.slot, fullSlot(i));
-            cache_v = cache.fl_v.choose1d(.slot, fullSlot(i));
+            cache_k = cache.fl_k.choose1d(.slot, comptime geom.fullSlot(i));
+            cache_v = cache.fl_v.choose1d(.slot, comptime geom.fullSlot(i));
         } else {
-            const slot = zml.Tensor.scalar(@as(u32, @intCast(slidingSlot(i))), .u32);
+            const slot = zml.Tensor.scalar(@as(u32, @intCast(comptime geom.slidingSlot(i))), .u32);
             // ring-buffer sliding : écriture circulaire à pos % kmax_sliding. `cfg.ring` est comptime →
             // en défaut (false) la branche `remainder` n'est PAS analysée ni émise → HLO == decode4.
             const write_k = if (cfg.ring) pos_u.remainder(zml.Tensor.scalar(@as(u32, @intCast(cfg.kmax_sliding)), .u32)) else pos_u;
             cache.sl_k = cache.sl_k.scatterSlices(.{ .slot = slot, .k = write_k }, inPrec(prec.kv_store, k_new), so);
             cache.sl_v = cache.sl_v.scatterSlices(.{ .slot = slot, .k = write_k }, inPrec(prec.kv_store, v_new), so);
-            cache_k = cache.sl_k.choose1d(.slot, slidingSlot(i));
-            cache_v = cache.sl_v.choose1d(.slot, slidingSlot(i));
+            cache_k = cache.sl_k.choose1d(.slot, comptime geom.slidingSlot(i));
+            cache_v = cache.sl_v.choose1d(.slot, comptime geom.slidingSlot(i));
         }
     }
 
@@ -500,10 +576,14 @@ fn runLayerGen(layer: LayerW, comptime i: usize, comptime cfg: EngineCfg, prec: 
     const mlp_out = dotPrec(prec.mlp, prec.compute, dotPrec(prec.mlp, prec.compute, xff, layer.gate_proj, .d).gelu().mul(dotPrec(prec.mlp, prec.compute, xff, layer.up_proj, .d)), layer.down_proj, .f);
     const h2 = h1.add(rmsScaleDPrec(prec.norms, prec.compute, mlp_out, layer.post_feedforward_layernorm));
 
-    var g = dotPrec(prec.ple, prec.compute, h2, layer.per_layer_input_gate, .d).gelu();
-    g = g.mul(ple_i);
-    g = dotPrec(prec.ple, prec.compute, g, layer.per_layer_projection, .p);
-    const h3 = h2.add(rmsScaleDPrec(prec.norms, prec.compute, g, layer.post_per_layer_input_norm));
+    // Bloc PLE comptime-mort si geom.ple_dim == 0 (12B) : `ple_i` reste dans la signature,
+    // inutilisé (licite en Zig). Pour E2B (ple_dim=256) : émission identique (gate U1).
+    const h3 = if (comptime geom.ple_dim > 0) blk: {
+        var g = dotPrec(prec.ple, prec.compute, h2, layer.per_layer_input_gate, .d).gelu();
+        g = g.mul(ple_i);
+        g = dotPrec(prec.ple, prec.compute, g, layer.per_layer_projection, .p);
+        break :blk h2.add(rmsScaleDPrec(prec.norms, prec.compute, g, layer.post_per_layer_input_norm));
+    } else h2;
 
     return h3.mul(cvt(layer.layer_scalar, prec.compute).asScalar());
 }
@@ -529,7 +609,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// Crée les poids (symboliques) depuis `base` (checkpoint) et assemble le model avec la brique
         /// fournie. Helper partagé par `init` (brique vide, E1) et `initBrick` (brique chargée, E2).
         fn initWith(allocator: std.mem.Allocator, base: zml.io.TensorStore.View, brick: Brick) !Self {
-            const layers = try allocator.alloc(LayerW, NUM_LAYERS);
+            const layers = try allocator.alloc(LayerW, cfg.geom.num_layers);
             const layers_base = base.withPrefix("layers");
             for (layers, 0..) |*layer, i| layer.* = LayerW.init(layers_base.withLayer(i));
             return .{
@@ -562,10 +642,10 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const prec = self.prec;
             const token_identity = embptl_slice
                 .scale(SQRT_PLE).convert(.f32)
-                .reshape(.{ embptl_slice.dim(.b), embptl_slice.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .reshape(.{ embptl_slice.dim(.b), embptl_slice.dim(.s), cfg.geom.num_layers, cfg.geom.ple_dim }).withTags(.{ .b, .s, .layer, .p });
             const context = dotPrec(prec.ple, prec.compute, embeds, self.per_layer_model_projection, .d)
-                .scale(INV_SQRT_HID)
-                .reshape(.{ embeds.dim(.b), embeds.dim(.s), NUM_LAYERS, PLE_DIM }).withTags(.{ .b, .s, .layer, .p });
+                .scale(comptime cfg.geom.invSqrtHid())
+                .reshape(.{ embeds.dim(.b), embeds.dim(.s), cfg.geom.num_layers, cfg.geom.ple_dim }).withTags(.{ .b, .s, .layer, .p });
             const context_norm = rmsScaleP(context, cvt(self.per_layer_projection_norm, prec.compute));
             return context_norm.add(token_identity).scale(INV_SQRT_2);
         }
@@ -588,22 +668,23 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
 
-            const embeds = embed_slice.convert(.f32).scale(EMBED_SCALE);
-            const ple = self.perLayerInputs(embptl_slice, embeds);
+            const embeds = embed_slice.convert(.f32).scale(comptime cfg.geom.embedScale());
+            // PLE comptime-mort si geom.ple_dim == 0 (12B) : ple/ple_i valent embeds, jamais consommés.
+            const ple = if (comptime cfg.geom.ple_dim > 0) self.perLayerInputs(embptl_slice, embeds) else embeds;
             var hidden = embeds;
             var cache = cache_in;
-            inline for (0..NUM_LAYERS) |i| {
-                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+            inline for (0..cfg.geom.num_layers) |i| {
+                const ple_i = if (comptime cfg.geom.ple_dim > 0) ple.choose1d(.layer, @as(i64, @intCast(i))) else ple;
                 // sélection du masque par type de couche (comptime). En défaut : mask_single (== decode4).
                 const mask = if (cfg.two_masks)
-                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                    (if (comptime cfg.geom.isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
             }
             const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
             const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-            const logits = softcapPrec(prec.softcap, prec.compute, raw);
+            const logits = softcapPrec(prec.softcap, prec.compute, raw, cfg.geom.softcap);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
 
@@ -627,14 +708,14 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
 
-            const embeds = pickStep(p.embeds, step).convert(.f32).scale(EMBED_SCALE);
-            const ple = self.perLayerInputs(embptl_slice, embeds);
+            const embeds = pickStep(p.embeds, step).convert(.f32).scale(comptime cfg.geom.embedScale());
+            const ple = if (comptime cfg.geom.ple_dim > 0) self.perLayerInputs(embptl_slice, embeds) else embeds;
             var hidden = if (first) embeds else hidden_in;
             var cache = cache_in;
             inline for (start..end) |i| {
-                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+                const ple_i = if (comptime cfg.geom.ple_dim > 0) ple.choose1d(.layer, @as(i64, @intCast(i))) else ple;
                 const mask = if (cfg.two_masks)
-                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                    (if (comptime cfg.geom.isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
@@ -643,7 +724,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const out_first = if (last) blk: {
                 const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
                 const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-                break :blk softcapPrec(prec.softcap, prec.compute, raw);
+                break :blk softcapPrec(prec.softcap, prec.compute, raw, cfg.geom.softcap);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
@@ -670,14 +751,14 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
 
-            const embeds = embeds_step.convert(.f32).scale(EMBED_SCALE);
-            const ple = self.perLayerInputs(embptls_step, embeds);
+            const embeds = embeds_step.convert(.f32).scale(comptime cfg.geom.embedScale());
+            const ple = if (comptime cfg.geom.ple_dim > 0) self.perLayerInputs(embptls_step, embeds) else embeds;
             var hidden = embeds;
             var cache = cache_in;
-            inline for (0..NUM_LAYERS) |i| {
-                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+            inline for (0..cfg.geom.num_layers) |i| {
+                const ple_i = if (comptime cfg.geom.ple_dim > 0) ple.choose1d(.layer, @as(i64, @intCast(i))) else ple;
                 const mask = if (cfg.two_masks)
-                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                    (if (comptime cfg.geom.isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
@@ -685,7 +766,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
 
             const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
             const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-            const logits = softcapPrec(prec.softcap, prec.compute, raw);
+            const logits = softcapPrec(prec.softcap, prec.compute, raw, cfg.geom.softcap);
             return .{ logits, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }
 
@@ -708,14 +789,14 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
 
-            const embeds = embeds_step.convert(.f32).scale(EMBED_SCALE);
-            const ple = self.perLayerInputs(embptls_step, embeds);
+            const embeds = embeds_step.convert(.f32).scale(comptime cfg.geom.embedScale());
+            const ple = if (comptime cfg.geom.ple_dim > 0) self.perLayerInputs(embptls_step, embeds) else embeds;
             var hidden = if (first) embeds else hidden_in;
             var cache = cache_in;
             inline for (start..end) |i| {
-                const ple_i = ple.choose1d(.layer, @as(i64, @intCast(i)));
+                const ple_i = if (comptime cfg.geom.ple_dim > 0) ple.choose1d(.layer, @as(i64, @intCast(i))) else ple;
                 const mask = if (cfg.two_masks)
-                    (if (comptime isFull(i)) mask_full else mask_sliding)
+                    (if (comptime cfg.geom.isFull(i)) mask_full else mask_sliding)
                 else
                     mask_single;
                 hidden = runLayerGen(self.layers[i], i, cfg, prec, hidden, ple_i, cos, sin, mask, pos_s, pos_u, &cache, self.brick);
@@ -723,7 +804,7 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
             const out_first = if (last) blk: {
                 const last_hidden = rmsScaleDPrec(prec.norms, prec.compute, hidden, self.final_norm);
                 const raw = dotPrec(prec.head, prec.compute, last_hidden, self.embed_tokens, .d);
-                break :blk softcapPrec(prec.softcap, prec.compute, raw);
+                break :blk softcapPrec(prec.softcap, prec.compute, raw, cfg.geom.softcap);
             } else hidden;
             return .{ out_first, cache.sl_k, cache.sl_v, cache.fl_k, cache.fl_v };
         }

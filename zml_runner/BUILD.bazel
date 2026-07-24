@@ -496,6 +496,16 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# J2 (plan docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md) — gates U1b→U7 CPU du 12B
+# Unified (Geom g12). Nom 14c : quota comptime @typeName pjrt structSize (piège 4).
+zig_binary(
+    name = "gemma4_g12gate",
+    main = "gemma4_g12gate.zig",
+    srcs = ["g12.zig", "w4.zig", "engine.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # W4 — runner décode E2B-W4 complet (GPU). Clone ciblé de gemma4_gen_auto (duplication assumée,
 # précédent bbs) : seuls Model/StepTok/init changent, engine.zig INTACT.
 zig_binary(
