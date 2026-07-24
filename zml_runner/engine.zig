@@ -19,8 +19,8 @@ const log = std.log;
 pub const Geom = struct {
     num_layers: usize,
     first_kv_shared: usize, // = num_layers si pas de YOCO (aucun reader)
-    sliding_writer: usize,
-    full_writer: usize,
+    sliding_writer: usize, // idx couche sliding qui écrit le K/V partagé YOCO ; ignoré si first_kv_shared == num_layers
+    full_writer: usize, // idem pour la couche full (les readers lisent son slot)
     d: usize,
     nh: usize,
     kvh_sliding: usize, // E2B 1 (MQA), 12B 8 (GQA groupe 2)
