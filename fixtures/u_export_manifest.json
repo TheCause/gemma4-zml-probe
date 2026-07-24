@@ -1,0 +1,34 @@
+{
+  "source": "63_u_dequant_export.py (Task 1b, plan J2 amend\u00e9 2026-07-24)",
+  "snapshot_sha": "1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0+cu130",
+    "compressed_tensors": "0.17.1"
+  },
+  "export": {
+    "n_keys": 678,
+    "total_bytes": 25932726368,
+    "shards": [
+      {
+        "file": "model-00001-of-00002.safetensors",
+        "bytes": 13982479404
+      },
+      {
+        "file": "model-00002-of-00002.safetensors",
+        "bytes": 11950246964
+      }
+    ],
+    "quantization_config_removed": true
+  },
+  "deviation": "11 cl\u00e9s multimodales CONSERV\u00c9ES (~105 Mo) : le mod\u00e8le les instancie sans liste d'ignore -> les exclure rendrait le census 0-missing infaisable ; le census strict 0/0 prime.",
+  "selfchecks": {
+    "official_ct_bit_exact": "328/328",
+    "census": {
+      "missing": 0,
+      "unexpected": 0,
+      "mismatched": 0
+    }
+  },
+  "verdict": "PASS"
+}
