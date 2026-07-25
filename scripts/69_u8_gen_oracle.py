@@ -66,6 +66,32 @@ def anon_path(p: str) -> str:
     return "<oracle-host>" + p[len(home):] if home not in ("~", "/") and p.startswith(home) else p
 
 
+def install_fp32_hooks(backbone, extra=()) -> int:
+    """--compute-fp32 : calcul fp32 sur STOCKAGE bf16 (parité oracles J1 46/56 « poids fp32,
+    oracle = source de vérité », impossible en chargement monolithique 12B : ~48 Go > 32 Gio M4).
+    Chaque sous-module passe en fp32 le temps de SON forward (pré-hook) puis revient en bf16
+    (post-hook) — bf16→fp32→bf16 est sans perte, pic RAM = +1 copie de couche (~1 Go).
+    Les activations restent fp32 de bout en bout (les post-hooks ne touchent que les poids).
+    `extra` : modules hors backbone (lm_head) — hooks transitoires AUSSI, car en tied (D7)
+    une conversion permanente serait annulée par le post-hook d'embed_tokens au forward suivant.
+    Granularité : tout module à PARAMÈTRES DIRECTS (Linear/Norm/Embedding), structure-agnostique
+    (les DecoderLayers du 12B Unified ne sont pas des enfants directs de model.model — appris
+    au smoke 16 ids : q_proj bf16 face à des activations fp32)."""
+    mods = [m for m in backbone.modules() if any(True for _ in m.parameters(recurse=False))]
+    mods.extend(extra)
+
+    def pre(mod, _inp):
+        mod.to(torch.float32)
+
+    def post(mod, _inp, _out):
+        mod.to(torch.bfloat16)
+
+    for m in mods:
+        m.register_forward_pre_hook(pre)
+        m.register_forward_hook(post)
+    return len(mods)
+
+
 def load_model_and_tok(dq: str):
     """Chargement commun (chemin U0b-décode/U7) : sha template asserté, modèle réel bf16 mmap."""
     import transformers
@@ -211,6 +237,13 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
     full = torch.cat([prompt_ids.to(torch.long), gen[:-1]]).unsqueeze(0)
     T = int(full.shape[1])
 
+    compute_dtype = "bfloat16"
+    if args.compute_fp32:
+        n_hooked = install_fp32_hooks(model.model, extra=(model.lm_head,))
+        compute_dtype = "float32"
+        print(f"calcul fp32 armé : {n_hooked} sous-modules hookés dont lm_head "
+              f"(stockage bf16 intact, activations fp32)", flush=True)
+
     # --- témoin fenêtre (D10/plan Step 10.3) : à T > sliding_window le masque sliding HF doit
     # DIFFÉRER du causal (fenêtre mordante) — même mécanique réelle que le témoin du 68.
     cfg_t = model.config.get_text_config()
@@ -243,13 +276,22 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
         lg = model.lm_head(h)
         return torch.tanh(lg / cap) * cap
 
-    # --- self-check tête manuelle == forward HF complet (préfixe court, torch.equal) ---
+    # --- self-check tête manuelle == forward HF complet (préfixe court) ---
+    # bf16 : torch.equal (l'arrondi bf16 final gomme l'ordre d'accumulation BLAS).
+    # fp32 : max|d| ≤ 1e-3 — l'accumulation fp32 dépend de la forme du matmul
+    # (logits_to_keep=1 slice AVANT lm_head), bruit ~1e-4 mesuré (précédent E2B P4.3 :
+    # même classe, 1.5e-5) ; le bit-exact inter-formes n'existe pas en fp32.
     with torch.no_grad():
         want = model(input_ids=full[:, :8], logits_to_keep=1).logits[0, -1, :]
         got = head(model.model(input_ids=full[:, :8], use_cache=False).last_hidden_state)[0, -1, :]
-    assert torch.equal(got, want), \
-        f"self-check tête manuelle != forward HF (max|d|={float((got.float() - want.float()).abs().max())})"
-    print("self-check tête : manuelle == forward HF (bit-égal, préfixe 8)", flush=True)
+    if args.compute_fp32:
+        d = float((got.float() - want.float()).abs().max())
+        assert d <= 1e-3, f"self-check tête manuelle != forward HF (max|d|={d} > 1e-3)"
+        print(f"self-check tête : manuelle == forward HF (fp32, max|d|={d:.2e} ≤ 1e-3, préfixe 8)", flush=True)
+    else:
+        assert torch.equal(got, want), \
+            f"self-check tête manuelle != forward HF (max|d|={float((got.float() - want.float()).abs().max())})"
+        print("self-check tête : manuelle == forward HF (bit-égal, préfixe 8)", flush=True)
 
     # --- balayage au fil de l'eau : positions S-1 .. T-1 prédisent gen[0..N-1] ---
     t2 = time.monotonic()
@@ -283,8 +325,12 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
 
     report = {
         "source": "69_u8_gen_oracle.py (mode --teacher-force — Task 10 Step 10.3, plan J2, D10)",
-        "oracle": "UN prefill HF CPU bf16 de [prompt templaté ++ ids[:-1]] ; tête lm_head+softcap "
-                  "par chunks (miroir modeling_gemma4.py, self-check bit-égal câblé)",
+        "oracle": f"UN prefill HF CPU (calcul {compute_dtype}, stockage bf16) de [prompt templaté "
+                  "++ ids[:-1]] ; tête lm_head+softcap par chunks (miroir modeling_gemma4.py, "
+                  "self-check bit-égal câblé)"
+                  + (" ; --compute-fp32 : hooks par-couche, parité oracles J1 46/56"
+                     if args.compute_fp32 else ""),
+        "compute_dtype": compute_dtype,
         "prompt": args.prompt, "prompt_ids": prompt_ids.tolist(), "seq_len": S,
         "ids_fixture": anon_path(args.teacher_force), "n_ids": N, "prefill_len": T,
         "window": {"sliding_window": sw, "bites_in_prefill": window_bites},
@@ -315,9 +361,15 @@ def main() -> None:
     ap.add_argument("--teacher-force", default=None, metavar="IDS_SAFETENSORS",
                     help="U9-iv : safetensors clé 'ids' (i32, --out-ids du runner) — UN prefill, "
                          "argmax+top-5 par position au fil de l'eau")
+    ap.add_argument("--compute-fp32", action="store_true",
+                    help="teacher-force uniquement : calcul fp32 sur stockage bf16 (hooks "
+                         "par-couche) — restaure la parité d'instrument avec les oracles J1 "
+                         "(46/56 : poids fp32) que le 12B monolithique interdit (RAM)")
     ap.add_argument("--host-label", default="M4",
                     help="étiquette chrono D6 (M4|VM) — JAMAIS le hostname réel (anonymisation)")
     args = ap.parse_args()
+    if args.compute_fp32 and not args.teacher_force:
+        ap.error("--compute-fp32 n'existe qu'en --teacher-force (le mode décode U8 reste bf16 tel que consigné)")
 
     model, tok, tpl_sha, t_load, versions = load_model_and_tok(args.weights)
     if args.teacher_force:
