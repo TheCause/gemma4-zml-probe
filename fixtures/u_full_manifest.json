@@ -35,7 +35,7 @@
     "u5_stage_c_max_abs": 0.0001,
     "discriminability_min_on_output": 0.001,
     "tripwire_max_abs": 0.001,
-    "note": "seuils f32 (§3/Amendement 2) — comparaisons f32, PAS bit-exact ; discriminabilité : critère sur la SORTIE (option B, plan 04eaa8d)"
+    "note": "seuils f32 (§3/Amendement 2) — comparaisons f32, PAS bit-exact ; discriminabilité : critère sur la SORTIE (décision B, plan 04eaa8d)"
   },
   "checkpoint_fact_uniform_full_norms": {
     "k_norm_L5_n_unique": 1,
@@ -43,7 +43,7 @@
     "q_norm_L5_n_unique": 1,
     "q_norm_L5_value": 1.03125,
     "k_norm_spread": 0.0,
-    "note": "les 8 couches full (5,11,...,47) ont q/k_norm uniformes (mesuré 25 juil : k_norm ∈ {0.060546875..0.0654296875}, q_norm ∈ {0.953125..1.03125} selon la couche, n_unique=1 partout, contre-vérifié sur le packé officiel) — artefact QAT ; le discriminant v_norm résiduel = rupture de scale-invariance par l'eps du RMSNorm, x7,4 seuil à S=8 -> critère déplacé sur la sortie (option B)"
+    "note": "les 8 couches full (5,11,...,47) ont q/k_norm uniformes (mesuré 25 juil : k_norm ∈ {0.060546875..0.0654296875}, q_norm ∈ {0.953125..1.03125} selon la couche, n_unique=1 partout, contre-vérifié sur le packé officiel) — artefact QAT ; le discriminant v_norm résiduel = rupture de scale-invariance par l'eps du RMSNorm, x7,4 seuil à S=8 -> critère déplacé sur la sortie (décision B)"
   },
   "sanity_prope": {
     "pos0_identity_strict": true,
@@ -61,7 +61,7 @@
         "note": "couche full : causal pur, pas de fenetre"
       },
       "discriminability": {
-        "criterion": "SORTIE d'attention (étage qui gate) — option B ratifiée (plan 04eaa8d)",
+        "criterion": "SORTIE d'attention (étage qui gate) — décision B ratifiée (plan 04eaa8d)",
         "out_max_abs_vs_wrong_hypothesis": 0.0024433135986328125,
         "threshold": 0.001,
         "v_norm_max_abs_vs_wrong_hypothesis_documentaire": 0.0007390975952148438,
@@ -112,7 +112,7 @@
         "note": "couche full : causal pur, pas de fenetre"
       },
       "discriminability": {
-        "criterion": "SORTIE d'attention (étage qui gate) — option B ratifiée (plan 04eaa8d)",
+        "criterion": "SORTIE d'attention (étage qui gate) — décision B ratifiée (plan 04eaa8d)",
         "out_max_abs_vs_wrong_hypothesis": 0.0019311904907226562,
         "threshold": 0.001,
         "v_norm_max_abs_vs_wrong_hypothesis_documentaire": 0.0013141632080078125,
@@ -157,7 +157,7 @@
       }
     }
   },
-  "pass": "gate u5 (Amendement 2, périmètre U5 explicite) : gating S=8 étages a/b/v aux seuils max_abs<=1e-4 mean_abs<=1e-6 ; sanity p-RoPE pos 0 identité STRICTE (oracle : cos/sin HF ; gate : cos/sin host) ; tripwire positions {708,1030} borne 1e-3 (cos/sin host vs HF + étages ropés a/b à ces positions, informatif, sans mean_abs) ; étage (c) attention complète S=8 ET S=1040 max_abs<=1e-4 ; discriminabilité K=V >= 10x seuil sur la SORTIE, câblée ICI (exit 1 sinon — option B ratifiée, plan 04eaa8d), témoin structurel bit-exact entrée v_norm == kp asserté",
+  "pass": "gate u5 (Amendement 2, périmètre U5 explicite) : gating S=8 étages a/b/v aux seuils max_abs<=1e-4 mean_abs<=1e-6 ; sanity p-RoPE pos 0 identité STRICTE (oracle : cos/sin HF ; gate : cos/sin host) ; tripwire positions {708,1030} borne 1e-3 (cos/sin host vs HF + étages ropés a/b à ces positions, informatif, sans mean_abs) ; étage (c) attention complète S=8 ET S=1040 max_abs<=1e-4 ; discriminabilité K=V >= 10x seuil sur la SORTIE, câblée ICI (exit 1 sinon — décision B ratifiée, plan 04eaa8d), témoin structurel bit-exact entrée v_norm == kp asserté",
   "versions": {
     "transformers": "5.14.1",
     "torch": "2.13.0+cu130"

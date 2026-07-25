@@ -20,7 +20,7 @@ Intermédiaires capturés par HOOKS sur le module réel — JAMAIS recomposés (
   (c) sortie attention complète — forward hook sur `module.o_proj`, [B,S,3840].
 Témoins du chemin eager : wrapper sur `eager_attention_forward` + `attn_weights is not None`.
 
-TEST DE DISCRIMINABILITÉ CÂBLÉ (non-vacuité R3 — option B ratifiée par Régis, plan commit
+TEST DE DISCRIMINABILITÉ CÂBLÉ (non-vacuité R3 — décision B ratifiée par Régis, plan commit
 04eaa8d) : la fixture K=V doit POUVOIR échouer. Le critère se mesure sur la SORTIE d'attention
 (l'étage qui gate) : le module réel est re-forwardé avec l'hypothèse FAUSSE historique
 (V = v_norm(k_norm(kp)), bug R3) injectée dans v_norm, et
@@ -118,7 +118,7 @@ def main() -> None:
     mod = mod.float()  # bf16 -> f32 EXACT (flux moteur dotPrec fam=null, même choix que U3)
     mod.train(False)
 
-    # FAIT de checkpoint (découvert au 1er run, consigné au plan avec l'option B) : les poids
+    # FAIT de checkpoint (découvert au 1er run, consigné au plan avec la décision B) : les poids
     # q_norm/k_norm des 8 couches full sont UNIFORMES (n_unique=1, artefact QAT, vérifié sur le
     # packé officiel) — le mécanisme « non-uniformité de k_norm » du critère initial est mort ;
     # d'où le critère sur la SORTIE. Valeurs exactes consignées au manifest.
@@ -135,7 +135,7 @@ def main() -> None:
                 "k_norm ∈ {0.060546875..0.0654296875}, q_norm ∈ {0.953125..1.03125} selon la "
                 "couche, n_unique=1 partout, contre-vérifié sur le packé officiel) — artefact "
                 "QAT ; le discriminant v_norm résiduel = rupture de scale-invariance par l'eps "
-                "du RMSNorm, x7,4 seuil à S=8 -> critère déplacé sur la sortie (option B)",
+                "du RMSNorm, x7,4 seuil à S=8 -> critère déplacé sur la sortie (décision B)",
     }
 
     rotary = mg.Gemma4TextRotaryEmbedding(cfg)
@@ -221,7 +221,7 @@ def main() -> None:
             out = cap["out"]
             assert torch.equal(out, attn_out), "hook o_proj != sortie module"
 
-            # === TEST DE DISCRIMINABILITÉ CÂBLÉ (option B ratifiée, plan 04eaa8d) ===
+            # === TEST DE DISCRIMINABILITÉ CÂBLÉ (décision B ratifiée, plan 04eaa8d) ===
             # Le critère x10 se mesure sur la SORTIE d'attention (l'étage qui gate) : re-forward
             # du module RÉEL avec l'hypothèse FAUSSE historique (bug R3 : V = v_norm(k_norm(kp)))
             # injectée dans v_norm. La mesure au niveau v_norm est CONSERVÉE, documentaire.
@@ -266,7 +266,7 @@ def main() -> None:
                 "mask_counts": {"masked": n_masked, "causal_pure": causal,
                                 "note": "couche full : causal pur, pas de fenetre"},
                 "discriminability": {
-                    "criterion": "SORTIE d'attention (étage qui gate) — option B ratifiée (plan 04eaa8d)",
+                    "criterion": "SORTIE d'attention (étage qui gate) — décision B ratifiée (plan 04eaa8d)",
                     "out_max_abs_vs_wrong_hypothesis": discrim_out, "threshold": DISCRIM_THR,
                     "v_norm_max_abs_vs_wrong_hypothesis_documentaire": discrim_vnorm,
                     "verdict": "DISCRIMINANTE"},
@@ -319,7 +319,7 @@ def main() -> None:
                        "discriminability_min_on_output": DISCRIM_THR,
                        "tripwire_max_abs": 1.0e-3,
                        "note": "seuils f32 (§3/Amendement 2) — comparaisons f32, PAS bit-exact ; "
-                               "discriminabilité : critère sur la SORTIE (option B, plan 04eaa8d)"},
+                               "discriminabilité : critère sur la SORTIE (décision B, plan 04eaa8d)"},
         "checkpoint_fact_uniform_full_norms": uniform_norms_fact,
         "sanity_prope": {"pos0_identity_strict": True, "nope_384_identity_all_pos": True,
                          "inv_freq_active": 64, "inv_freq_zeros": 192, "attention_scaling": 1.0},
@@ -331,7 +331,7 @@ def main() -> None:
                 "borne 1e-3 (cos/sin host vs HF + étages ropés a/b à ces positions, informatif, "
                 "sans mean_abs) ; étage (c) attention complète S=8 ET S=1040 max_abs<=1e-4 ; "
                 "discriminabilité K=V >= 10x seuil sur la SORTIE, câblée ICI (exit 1 sinon — "
-                "option B ratifiée, plan 04eaa8d), témoin structurel bit-exact entrée "
+                "décision B ratifiée, plan 04eaa8d), témoin structurel bit-exact entrée "
                 "v_norm == kp asserté",
         "versions": {"transformers": transformers.__version__, "torch": torch.__version__},
     }

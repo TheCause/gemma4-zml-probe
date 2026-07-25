@@ -589,7 +589,7 @@ const U5_TRIP_THR: f64 = 1.0e-3;
 
 /// Régime EXPLICITE par S (revue Task 4) : stages_gated=true => étages a/b/v aux seuils §3
 /// pleins ; false => étages a/b restreints aux positions tripwire, borne 1e-3 sans mean_abs.
-/// L'étage (c) est gaté au seuil plein 1e-4 aux DEUX S (périmètre : « c'est l'output qui gate »).
+/// L'étage (c) est gaté au seuil plein 1e-4 aux DEUX S (l'output gate — cf. Amendement 2, périmètre U5).
 const U5Case = struct { s: i64, stages_gated: bool };
 const U5_CASES = [_]U5Case{ .{ .s = 8, .stages_gated = true }, .{ .s = 1040, .stages_gated = false } };
 
