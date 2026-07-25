@@ -688,6 +688,7 @@ const Top5 = struct { idx: [5]usize, val: [5]f32 };
 // + prefill + génération 999 steps, fixture A2) : pic observé = 16658 MiB ≈ 16,27 GiB. Seuil
 // final = ceil(pic_GiB / 0.90) + 1 = ceil(16,27 / 0,90) + 1 = ceil(18,08) + 1 = 20 GiB — couvre
 // la réserve BFC réelle (0.90×) avec 1 GiB de marge. Pas de flag de réglage (YAGNI).
+// ⚠ Seuil hérité de w4auto (J1), PAS re-mesuré pour G12 — dette U10.
 const MIN_FREE_VRAM_GIB: u64 = 20;
 
 // Parse `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` : première ligne =
@@ -975,7 +976,7 @@ pub fn main(init: std.process.Init) !void {
 
     // === Task 4 (plan L3) : --selftest-gather — mode GPU désormais (gather in-graph, spec
     // docs/L3_INGRAPH_DESIGN.md §5 SG) : dispatché ICI, APRÈS la garde VRAM + Platform.init +
-    // garde CUDA dure + sharding, AVANT le chargement du modèle complet (SG ne charge que les 2
+    // garde CUDA dure + sharding, AVANT le chargement du modèle complet (SG ne charge que
     // la table emb via SgTabs, pas `Model`). Conséquence mécanique du déplacement : ce point est
     // en aval du check --prompt (cf `prompt_text` plus haut) — un --prompt factice est donc REQUIS (cf `usage`), et
     // --allow-cpu/--force-vram s'appliquent à SG exactement comme au run normal (aucun cas spécial).
