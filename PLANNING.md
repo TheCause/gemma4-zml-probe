@@ -68,7 +68,7 @@
   exactement à q=1024). **Fidélité : == HF-fp32-même-checkpoint STRICT — 48/48 (U8 re-fondé) et
   1150/1150 (U9-iv), zéro requalification.** L'événement du chantier = **Amendement 3 (recadrage
   Régis)** : l'oracle bf16 (quantum 0.125) fabriquait des ties artificiels → requalifications en
-  cascade (U8 `a4a6a3e` SUPERSEDED) ; réparation = oracle **fp32 sur stockage bf16** (script 69
+  cascade (requalification U8 du 25 juil SUPERSEDED) ; réparation = oracle **fp32 sur stockage bf16** (script 69
   `--compute-fp32`, 626 hooks par-module — stockage ≠ arithmétique), 5× plus rapide que le bf16
   émulé. Moteur : Geom comptime, neutralité E2B **HLO byte-identique** (`gate/j2-u1-pass`).
   Contre-test gate_proj ×100 conforme (A1Mismatch, logits ×200). Findings : 12B hétérogène

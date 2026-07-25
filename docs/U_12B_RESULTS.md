@@ -24,7 +24,7 @@ des verdicts **stricts**, parce que le problème était dans l'instrument, pas d
   = ~48 Go, au-dessus de la RAM de l'hôte oracle). Quantum bf16 = 0,125 sur des logits ~25 →
   l'oracle fabrique des ties artificiels sur ~1 % des steps (48 quasi-ties mesurés sur 1150).
 - **Les symptômes** : U8 brut 42/48 (« tie bf16 exact à gen=39 », requalifié différentiel,
-  décision `a4a6a3e`) ; puis U9-iv brut 1139/1150 — 11 « divergences », toutes des paires
+  décision ratifiée — commit « plan(j2): U8 REQUALIFICATION DIFFÉRENTIELLE RATIFIÉE », 25 juil) ; puis U9-iv brut 1139/1150 — 11 « divergences », toutes des paires
   top1/top2 inversées à 0-2 ULP bf16, et un menu de requalification dont le critère glissait
   déjà (« marge ≤ 1e-3 » → « ≤ 2 ULP »).
 - **Le recadrage** (Régis, 25 juil au soir) : « fausse route sur les gates précédentes […]
@@ -43,7 +43,8 @@ des verdicts **stricts**, parce que le problème était dans l'instrument, pas d
 
 Leçon capitalisée (mémoire) : *l'instrument dégradé fabrique des requalifications en cascade —
 2e requalification du même type = STOP, diff l'instrument ; stockage ≠ arithmétique.*
-La requalification U8 d'origine reste dans l'historique (`a4a6a3e`/`58d30f1`), **SUPERSEDED**
+La requalification U8 d'origine reste dans l'historique (commits « plan(j2)/gate(j2) U8
+requalification », 25 juil après-midi), **SUPERSEDED**
 sans réécriture.
 
 ## 2. Gates — verdicts
@@ -58,7 +59,7 @@ sans réécriture.
 | U5 | Couche full L5 : K=V, p-RoPE, MQA | Discriminabilité **câblée et mesurée sur la sortie d'attention : ×24 (S=8) / ×19 (S=1040)** ≥ 10× seuil ; fait de checkpoint découvert par le STOP câblé : q_norm/k_norm des 8 couches full **UNIFORMES** (scalaires broadcastés, k_norm L5 = 0.0605, probable artefact QAT) ; étage (c) attention complète ≤ 1e-4 aux deux S | `gate/j2-u5-pass` |
 | U6 | Couche 0 + chaîne L0→L5 par `runLayerGen`/`Geom.g12` | max_abs ≤ 1e-3 (resserrable, jamais élargissable) ; branche moteur K=V réellement exercée (D4, placeholder v_proj `[1]` prouvé non consommé par compile) ; distribution des 48 layer_scalar consignée | `gate/j2-u6-pass` |
 | U7 | Prefill 48 couches + softcap | Top-5 ensemble+ordre+marges == oracle (12.560 vs 12.5625) ; softcap mordant (>25 quelque part, ≤30 partout) ; max_abs 0.376 sous garde-fou 0.5 vs oracle bf16 (Amendement 2) — resserrable à ~1e-4 via l'oracle fp32, voie ouverte | `gate/j2-u7-pass` |
-| U8 | Décode court GPU vs HF-même-checkpoint | Brut vs oracle bf16 : 42/48 (requalifié `a4a6a3e`, SUPERSEDED) → **re-fondé oracle fp32 : 48/48 STRICT** ; contre-test câblé : gate_proj L24 ×100 → `A1Mismatch`, divergence logits ×200 le bruit | `gate/j2-u8-pass` |
+| U8 | Décode court GPU vs HF-même-checkpoint | Brut vs oracle bf16 : 42/48 (requalification du 25 juil, SUPERSEDED) → **re-fondé oracle fp32 : 48/48 STRICT** ; contre-test câblé : gate_proj L24 ×100 → `A1Mismatch`, divergence logits ×200 le bruit | `gate/j2-u8-pass` |
 | U9 | Décode long 1150 | (i) 1150 tok stables, 0 NaN, texte cohérent ; (ii) morsure fenêtre **in-process même binaire** : logits bit-identiques q ≤ 1023, première divergence **exactement à q=1024** (max_abs 6.3e-2) ; (iv) teacher-forcing **fp32 1150/1150 STRICT** | `gate/j2-u9-pass` |
 | U10 | Observations perf/VRAM | Voir §3 | `gate/j2-u10-pass` |
 
@@ -120,4 +121,6 @@ les buffers de prefill.
   `gemma4_g12auto.zig` (décode autonome, flags `--dump-top5 --out-ids --window-vacuity
   --no-prealloc --oracle`).
 - Commits clés : contrat `gate/j2-u0-pass` → … → `gate/j2-u10-pass` ; instrument fp32
-  `f9e04fb` ; Amendement 3 `b7d77b1`.
+  « feat(j2): oracle --compute-fp32 » ; Amendement 3 « plan(j2): AMENDEMENT 3 RATIFIÉ ».
+  (Les sujets de commit et les tags font référence — la branche a été réécrite pour
+  anonymisation le 25 juil au soir, les SHA antérieurs ne résolvent plus.)
