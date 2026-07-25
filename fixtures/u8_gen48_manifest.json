@@ -172,11 +172,33 @@
     "note": "D6 — token 0 = prefill (mmap+warm-up), médiane 2-4 = la mesure"
   },
   "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
-  "weights": "<m1-home>/ml-data/weights_12b_dq",
+  "weights": "<oracle-host>/ml-data/weights_12b_dq",
   "fixture_keys_lues_par_le_runner": [
     "positions",
     "fed"
   ],
+  "requalification": {
+    "verdict_brut": "42/48 argmax-match (A1 FAIL, error.A1Mismatch)",
+    "step_fautif": {
+      "gen": 39,
+      "nature": "tie bf16 EXACT côté oracle (954 et 1018 tous deux à 19.75 bf16)",
+      "marge_oracle": 0.0,
+      "marge_runner_f32": 0.094933
+    },
+    "cascade": "mismatches {39,40,41,45,46,47} — 40-47 = contextes divergents, re-sync 42-44",
+    "statut": "REQUALIFIÉ DIFFÉRENTIEL — décision Régis, commit plan a4a6a3e",
+    "conditions_j1": {
+      "1_marge_le_1e-3_au_step_fautif": "tenue (0.000000)",
+      "2_re_run_meme_binaire": "tenue (verdict et séquence argmax identiques, bruit f32 max 0.014159, 0 flip)",
+      "3_decision_regis_consignee": "tenue (a4a6a3e)"
+    }
+  },
+  "contre_test_d11": {
+    "checkpoint": "layers.24.mlp.gate_proj.weight_scale x100 (70_u8_corrupt.py, patch in-place vérifié)",
+    "sortie": "error.A1Mismatch (RC=1, pas un crash), flip argmax @ gen=39 (bonus)",
+    "divergence_logits_top5": "dès gen=0 (0.8633) ; 32/40 steps > enveloppe 0.5 ; max 2.8334 ; bruit run-to-run sain 0.014159 (x200 sous la divergence)",
+    "note": "le critère A1Mismatch est devenu non-discriminant (le run propre sort aussi en A1Mismatch à 42/48) — c’est la moitié divergence-logits qui porte le verdict (×200 le bruit, non vide) ; réserve si le gate est re-exercé."
+  },
   "versions": {
     "transformers": "5.14.1",
     "torch": "2.13.0"

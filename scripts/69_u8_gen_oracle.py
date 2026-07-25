@@ -58,6 +58,14 @@ TOPK = 5
 HEAD_CHUNK = 64  # teacher-force : positions par chunk (64 × 262144 × bf16 ≈ 32 Mo)
 
 
+def anon_path(p: str) -> str:
+    """Anonymisation (règle repo public — feedback revue U8) : le préfixe HOME de l'hôte oracle
+    ne doit JAMAIS apparaître dans un manifest committable — même mécanique que --host-label.
+    Les chemins /data/... (VM) sont déjà publics dans le repo, laissés tels quels."""
+    home = os.path.expanduser("~")
+    return "<oracle-host>" + p[len(home):] if home not in ("~", "/") and p.startswith(home) else p
+
+
 def load_model_and_tok(dq: str):
     """Chargement commun (chemin U0b-décode/U7) : sha template asserté, modèle réel bf16 mmap."""
     import transformers
@@ -182,7 +190,7 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
                      "median_tokens_2_4": round(med_2_4, 2), "host": args.host_label,
                      "note": "D6 — token 0 = prefill (mmap+warm-up), médiane 2-4 = la mesure"},
         "chat_template_sha256": tpl_sha,
-        "weights": args.weights,
+        "weights": anon_path(args.weights),
         "fixture_keys_lues_par_le_runner": ["positions", "fed"],
         "versions": versions,
     }
@@ -278,7 +286,7 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
         "oracle": "UN prefill HF CPU bf16 de [prompt templaté ++ ids[:-1]] ; tête lm_head+softcap "
                   "par chunks (miroir modeling_gemma4.py, self-check bit-égal câblé)",
         "prompt": args.prompt, "prompt_ids": prompt_ids.tolist(), "seq_len": S,
-        "ids_fixture": args.teacher_force, "n_ids": N, "prefill_len": T,
+        "ids_fixture": anon_path(args.teacher_force), "n_ids": N, "prefill_len": T,
         "window": {"sliding_window": sw, "bites_in_prefill": window_bites},
         "verdict_data": {"n_match": n_match, "n_total": N, "mismatches": mismatches,
                          "note": "N<total : protocole de marge J1 par position — décision Régis, "
@@ -287,7 +295,7 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
         "top5_per_pos": top5_all,
         "chrono_s": {"load": round(t_load, 1), "prefill_backbone": round(t_fwd, 1),
                      "head_sweep": round(t_head, 1), "host": args.host_label},
-        "chat_template_sha256": tpl_sha, "weights": args.weights,
+        "chat_template_sha256": tpl_sha, "weights": anon_path(args.weights),
         "versions": versions,
     }
     with open(args.out, "w") as fh:
