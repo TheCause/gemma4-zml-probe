@@ -53,7 +53,18 @@
 //         MOTEUR (arbitrage contrôleur 23618bb), voir l'en-tête de la section u6 ci-dessous.
 //         Seuil §3 U6 : max_abs <= 2e-4 par couche ET chaîne — resserré depuis 1e-3 au vu de
 //         l'oracle (décision contrôleur 25 juil, Amendement 2 point 5) ; JAMAIS élargissable.
-//         Mode u7 : Task 7.
+//   u7 <weights_12b/model.safetensors> <fixtures/u_prefill.safetensors>
+//       — U7 : le forward 12B COMPLET (prefill prompt canonique + logits + softcap) —
+//         généralisation du pattern u6 à Geom.g12 PLEIN (48 couches, stage-major CHUNKÉ
+//         8x6 — repli prescrit du plan après 2 murs : 31e compileFn (K=1) et OOM (graphe
+//         complet), cf U7Chunk), embed
+//         chemin 12B du mode u2 (gather + scale bf16 62.0, D12), head du MOTEUR
+//         (forwardStageGen last=true : final_norm + lm_head tied + softcapPrec tanh 30).
+//         Comparaison §3-U7 sur les logits de la DERNIÈRE position : softcap exercé
+//         (max|logits| <= 30 ET > 25 quelque part), top-5 en ENSEMBLE + tie rule
+//         (écart de rang toléré ssi |Δlogit| < 1e-4, piège 17), max_abs documentaire
+//         sous garde-fou 0.5 (Amendement 2 §U7, requalifié décision Régis 25 juil).
+//         DEUX pièges de la revue U6 corrigés dans la généralisation (voir section u7).
 //
 // ⚠ IMPÉRATIF modes futurs (u3-u7) : tout mode lisant le PACKÉ passe par openStores /
 // registryFromFile — JAMAIS TensorRegistry.fromPath (realPath traverse les symlinks HF vers
@@ -70,7 +81,7 @@ const g12 = @import("g12.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-const usage = "Usage: gemma4_g12gate <w2-12b|u2|u3|u4|u5|u6> <model.safetensors> <fixture.safetensors>";
+const usage = "Usage: gemma4_g12gate <w2-12b|u2|u3|u4|u5|u6|u7> <model.safetensors> <fixture.safetensors>";
 
 const load_opts = .{ .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 };
 
@@ -1248,6 +1259,496 @@ fn gateU6(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     log.info("PASS u6 — couche 0 complète (layer_scalar consommé du checkpoint) + chaîne L0→L5 via le MOTEUR (forwardStageGen/Geom tronqué, branche D4 en graphe, placeholder v_proj [1] prouvé par compile) : chaîne max_abs={e:.3} <= {e:.1}", .{ chain.max_abs, U6_MAX_ABS });
 }
 
+// ---------------------------------------------------------------------------- u7 (prefill 48 couches + head softcap — MOTEUR)
+
+// U7 — le forward 12B COMPLET : généralisation du pattern u6 à la géométrie PLEINE Geom.g12
+// (48 couches), en stage-major CHUNKÉ — 8 chunks forwardStageGen de 6 couches, le dernier
+// avec LAST=TRUE — VOIE DÉCLARÉE (itération 4 : le repli « forwardStageGen chunké si mur
+// RAM » prescrit par le plan Task 7 ; historique des 3 runs crashés à l'en-tête de U7Chunk),
+// PLUS le chemin head du MOTEUR : final_norm + lm_head tied (dot sur embed_tokens — même
+// chemin que le forward E2B, engine.zig:724-727) + softcap (softcapPrec fam=null :
+// raw.scale(1/30).tanh().scale(30)) — aucune op head recomposée ici.
+//
+// DEUX PIÈGES identifiés par la revue U6, corrigés dans CETTE généralisation (6 -> 48) :
+//   (a) `vs` dimensionné num_layers - num_layers/full_period = 48 - 8 = 40 (8 couches full
+//       sans v_proj) — PAS `num_layers - 1`, qui ne valait en u6 que parce que le Geom
+//       tronqué n'a qu'UNE couche full ;
+//   (b) l'indexation des v_proj passe par slidingSlot(j) (== nombre de couches non-full < j) —
+//       les couches full s'entrelacent tous les 6 : `vs[j]` brut lirait la MAUVAISE arête EN
+//       SILENCE dès la couche 6 (le v_proj « numéro 6 » appartient à la couche 7, la couche 5
+//       étant full). Le remplissage de U7W.init itère les couches dans l'ordre en n'ajoutant
+//       que les sliding : l'index séquentiel == slidingSlot par construction, ASSERTÉ.
+//
+// Embed : chemin 12B du mode u2 (D12) — gather + scale bf16 62.0 dans un graphe DÉDIÉ
+// (U2.forward réutilisé tel quel), résultat bf16 -> f32 host (exact) = hidden d'entrée du
+// stage 0 (first=false : le scale √3840 f64 du moteur est émis mais MORT — hidden=hidden_in,
+// ple_dim=0). engine.zig intouché (D12 : jamais le downcast bf16 dans le moteur — md5 U1).
+//
+// Masque : two_masks=false, UNE table causale — licite au S du prompt : l'oracle 68 ASSERTE
+// bit-égalité masque sliding HF == causal HF (S << fenêtre 1024, même témoin que u6).
+// cos/sin full : host (ropeFullHost, même fn que u5/u6). Cache mock zéro KMAX=S, slots
+// PLEINS : 40 sliding + 8 full (fullSlot/slidingSlot du Geom plein).
+//
+// Verdict (§3-U7, périmètre Amendement 2) sur les logits de la DERNIÈRE position :
+// softcap exercé côté ZML aussi (max|logits| <= 30 ET > 25 quelque part), top-5 en ENSEMBLE
+// + tie rule |Δlogit| < 1e-4 mesurée sur les logits HF de la fixture (la référence — piège
+// 12 ; l'écart côté ZML est consigné au log), max_abs DOCUMENTAIRE sous garde-fou 0.5
+// (Amendement 2 §U7, requalifié décision Régis 25 juil : l'oracle est le modèle bf16 RÉEL,
+// enveloppe G2 0.1-0.4 — le garde-fou reste CÂBLÉ, un dépassement = FAIL,
+// chiffres au log ; marges top1-top2 et rang5-rang6 lues AVANT tout verdict, piège 17).
+
+const N12: usize = g12.g12.num_layers; // 48
+const N12_FULL: usize = N12 / g12.g12.full_period; // 8
+const N12_SLIDING: usize = N12 - N12_FULL; // 40 — piège revue U6 (a)
+const U7Model = engine.EngineModel(struct {}, .{ .geom = g12.g12 });
+const U7_MAX_ABS: f64 = 5.0e-1; // garde-fou documentaire (Amendement 2 §U7, requalifié décision Régis 25 juil : critère discriminant = top-5 ensemble+ordre+marges + softcap ; enveloppe G2 bf16-réel, mesuré 0.376 — CÂBLÉ : dépassement = FAIL)
+const U7_TIE: f64 = 1.0e-4; // tie rule §3-U7 (piège 17)
+const U7_SOFTCAP: f64 = 30.0;
+const U7_SOFTCAP_BITE: f64 = 25.0;
+const VOC_12B: i64 = 262144;
+
+/// Poids du modèle COMPLET au format packé : 48 couches (champs communs, U6LayW réutilisé) +
+/// v_proj des 40 couches sliding + embed_tokens (tied lm_head, D7) + final_norm.
+const U7W = struct {
+    embed_tokens: zml.Tensor, // {voc,d} bf16 NON quantifié (D9) — gather embed ET head tied
+    final_norm: zml.Tensor, // {d}
+    layers: []U6LayW, // 48
+    vs: []w4.W4Lin, // 40 — sliding SEULEMENT, indexé slidingSlot (piège revue U6 (b))
+
+    fn init(allocator: std.mem.Allocator, base: zml.io.TensorStore.View) !U7W {
+        const layers = try allocator.alloc(U6LayW, N12);
+        const vs = try allocator.alloc(w4.W4Lin, N12_SLIDING);
+        const lb = base.withPrefix("layers");
+        var vi: usize = 0;
+        inline for (0..N12) |i| {
+            layers[i] = U6LayW.init(lb.withLayer(i));
+            if (comptime !g12.g12.isFull(i)) {
+                // piège (b) : l'ordre d'ajout DOIT coïncider avec slidingSlot(i) — asserté.
+                const slot_i = comptime blk: {
+                    @setEvalBranchQuota(100_000); // slidingSlot = boucle comptime O(i) x 48 couches
+                    break :blk @as(usize, @intCast(g12.g12.slidingSlot(i)));
+                };
+                if (vi != slot_i) return error.GateFailed;
+                vs[vi] = .init(lb.withLayer(i).withPrefix("self_attn"), "v_proj");
+                vi += 1;
+            }
+        }
+        if (vi != N12_SLIDING) return error.GateFailed; // piège (a) : 40 exactement
+        return .{
+            .embed_tokens = base.createTensor("embed_tokens.weight", .{ .voc, .d }, null),
+            .final_norm = base.createTensor("norm.weight", .{.d}, null),
+            .layers = layers,
+            .vs = vs,
+        };
+    }
+};
+
+/// Assemblage par VALEUR d'un engine.LayerW (généralise u6LayerW aux 48 couches, avec les
+/// deux corrections de la revue U6) : full -> placeholder v_proj [1] (D4, inconsommable) ;
+/// sliding -> vs[slidingSlot(j)] (JAMAIS vs[j] : entrelacement tous les 6, dès L6 vs[j] brut
+/// lirait la mauvaise arête EN SILENCE — le v_proj « numéro 6 » appartient à la couche 7).
+fn u7LayerW(w: U7W, comptime j: usize) engine.LayerW {
+    const lw = w.layers[j];
+    return .{
+        .input_layernorm = lw.input_layernorm,
+        .q_proj = lw.q.toW(.{ .o, .d }),
+        .q_norm = lw.q_norm,
+        .k_proj = lw.k.toW(.{ .o, .d }),
+        .k_norm = lw.k_norm,
+        .v_proj = if (comptime g12.g12.isFull(j))
+            lw.layer_scalar // placeholder [1] (D4) — toute consommation casse au compile
+        else
+            w.vs[comptime blk: {
+                @setEvalBranchQuota(100_000); // slidingSlot = boucle comptime O(j) x 48 couches
+                break :blk @as(usize, @intCast(g12.g12.slidingSlot(j)));
+            }].toW(.{ .o, .d }),
+        .o_proj = lw.o.toW(.{ .d, .m }),
+        .post_attention_layernorm = lw.post_attention_layernorm,
+        .pre_feedforward_layernorm = lw.pre_feedforward_layernorm,
+        .gate_proj = lw.gate.toW(.{ .f, .d }),
+        .up_proj = lw.up.toW(.{ .f, .d }),
+        .down_proj = lw.down.toW(.{ .d, .f }),
+        .post_feedforward_layernorm = lw.post_feedforward_layernorm,
+        .per_layer_input_gate = lw.layer_scalar, // placeholders [1] — bloc PLE comptime-mort
+        .per_layer_projection = lw.layer_scalar,
+        .post_per_layer_input_norm = lw.layer_scalar,
+        .layer_scalar = lw.layer_scalar,
+    };
+}
+
+/// VOIE D'EXÉCUTION RETENUE (itération 4 — le repli PRESCRIT PAR LE PLAN, Task 7 : « repli
+/// pattern `forwardStageGen` chunké si mur RAM ») : stage-major CHUNKÉ, 8 chunks de 6
+/// couches alignés full_period (chaque chunk = 5 sliding + 1 full ; L0-5, L6-11, …, L42-47),
+/// soit 9 compiles au total (embed inclus). Le DERNIER chunk (last=true) émet le chemin head
+/// du moteur (final_norm + lm_head tied sur embed_tokens + softcapPrec tanh 30) — sa 1re
+/// sortie est alors les LOGITS {b,s,voc}.
+///
+/// Historique des voies (3 runs crashés, causes DIAGNOSTIQUÉES) :
+///   - stage-major K=1 (48 compiles, pattern u6) : segfault REPRODUCTIBLE au 31e compileFn
+///     du process (runs 1 et 3, crash à la compile du stage L29 = 31e compile embed inclus,
+///     memcpy dans l'émission MLIR de manualRope) — épuisement d'une ressource interne
+///     zml/pjrt par compile (PAS la RAM : swap 30 Go quasi vide au crash) ; la réduction
+///     48x de la trace par compile (itération 1) n'y change rien. Run 2 : variante à frame
+///     géante, stack overflow distinct (corrigé — ulimit 64 Mo conservé par prudence).
+///   - graphe complet 1 compile (run 4) : compile OK et 20/25 steps OK, puis OOM-kill
+///     kernel (anon-rss 23,6 Go, total-vm 114 Go) — le « mur RAM » anticipé par le plan :
+///     l'exécutable 48-couches matérialise trop de dequants f32 simultanés par call.
+/// Le chunké borne les DEUX ressources : 9 compiles << 31, transients par call ~6 couches.
+const U7_CHUNK: usize = g12.g12.full_period; // 6 — aligné : 1 couche full par chunk
+const N12_CHUNKS: usize = N12 / U7_CHUNK; // 8
+fn U7Chunk(comptime ci: usize) type {
+    return struct {
+        pub fn forward(w: U7W, hidden_in: zml.Tensor, p: engine.Packed(false), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            @setEvalBranchQuota(1_000_000); // slidingSlot comptime x couches du chunk
+            const start = ci * U7_CHUNK;
+            const end = start + U7_CHUNK;
+            var layers: [N12]engine.LayerW = undefined;
+            // Seules les couches DU CHUNK sont assemblées (leurs dequants émis) ; les slots
+            // hors chunk — JAMAIS lus par forwardStageGen(start, end) — reçoivent la LayerW
+            // de la 1re couche du chunk (aucune émission supplémentaire, mêmes Tensors).
+            inline for (start..end) |j| layers[j] = u7LayerW(w, j);
+            inline for (0..N12) |j| {
+                if (comptime (j < start or j >= end)) layers[j] = layers[start];
+            }
+            const m: U7Model = .{
+                .embed_tokens = w.embed_tokens, // consommé par le head tied (last) SEULEMENT
+                .per_layer_model_projection = w.layers[0].layer_scalar, // placeholders [1]
+                .per_layer_projection_norm = w.layers[0].layer_scalar,
+                .final_norm = w.final_norm,
+                .layers = &layers,
+                .brick = .{},
+                .prec = .{}, // baseline f32 (fam=null)
+            };
+            const out, const slk, const slv, const flk, const flv = m.forwardStageGen(start, end, false, end == N12, p, cache, hidden_in, ctrl);
+            return .{ out, slk, slv, flk, flv };
+        }
+    };
+}
+
+/// Top-6 host d'un vecteur de logits (tri par insertion, valeurs strictement décroissantes ;
+/// à égalité de valeur le plus petit index gagne — même convention que torch.topk).
+fn top6(logits: []const f32) struct { ids: [6]usize, vals: [6]f32 } {
+    var ids: [6]usize = @splat(0);
+    var vals: [6]f32 = @splat(-std.math.floatMax(f32));
+    for (logits, 0..) |v, i| {
+        if (v > vals[5]) {
+            var r: usize = 5;
+            while (r > 0 and v > vals[r - 1]) : (r -= 1) {}
+            var m: usize = 5;
+            while (m > r) : (m -= 1) {
+                vals[m] = vals[m - 1];
+                ids[m] = ids[m - 1];
+            }
+            vals[r] = v;
+            ids[r] = i;
+        }
+    }
+    return .{ .ids = ids, .vals = vals };
+}
+
+fn gateU7(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    log.info("u7 (U7) — forward 12B COMPLET via le MOTEUR : embed u2 (D12) -> 48 couches (stage-major CHUNKÉ 8x6, Geom.g12 plein) -> head moteur (final_norm + lm_head tied + softcap 30)", .{});
+    log.info("  pièges revue U6 corrigés : vs[{d}] (48 - {d} full) + indexation slidingSlot ; verdict §3-U7 requalifié (décision Régis 25 juil) : softcap mordant, top-5 ENSEMBLE + tie |Δ|<1e-4, max_abs documentaire garde-fou 0.5", .{ N12_SLIDING, N12_FULL });
+
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+
+    // --- Poids packés du modèle COMPLET (checkpoint, D9) ---
+    const base = st.store_ck.view().withPrefix("model").withPrefix("language_model");
+    const u7w: U7W = try .init(arena, base);
+    if (u7w.embed_tokens.dim(.voc) != VOC_12B or u7w.embed_tokens.dim(.d) != D_12B or u7w.embed_tokens.dtype() != .bf16) {
+        log.err("u7 : embed_tokens inattendu {d}x{d} {s}", .{ u7w.embed_tokens.dim(.voc), u7w.embed_tokens.dim(.d), @tagName(u7w.embed_tokens.dtype()) });
+        return error.GateFailed;
+    }
+    log.info("  chargement des poids packés 48 couches + 40 v_proj + embed 2 Go + final_norm ...", .{});
+    const t_all: std.Io.Timestamp = .now(io, .awake); // pattern chrono prouvé gen_auto (.untilNow)
+    const u7w_buf = try zml.io.load(U7W, &u7w, arena, io, platform, &st.store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    log.info("  poids chargés en {d} ms", .{@divTrunc(t_all.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_ms)});
+
+    // --- Fixture (script 68) : ids + logits dernière position + top-5 HF ---
+    const ids_sym: OneT = .{ .t = st.store_fx.view().createTensor("ids", .{.s}, null) };
+    const s_i: i64 = ids_sym.t.dim(.s);
+    if (s_i < 4 or s_i > 512 or ids_sym.t.dtype() != .i32) {
+        log.err("u7 : fixture ids incohérente (S={d}, {s})", .{ s_i, @tagName(ids_sym.t.dtype()) });
+        return error.VacuousGate;
+    }
+    const logits_sym: OneT = .{ .t = st.store_fx.view().createTensor("logits", .{.voc}, null) };
+    const t5i_sym: OneT = .{ .t = st.store_fx.view().createTensor("top5_ids", .{.k}, null) };
+    const t5v_sym: OneT = .{ .t = st.store_fx.view().createTensor("top5_vals", .{.k}, null) };
+    if (logits_sym.t.dim(.voc) != VOC_12B or t5i_sym.t.dim(.k) != 5 or t5v_sym.t.dim(.k) != 5) {
+        log.err("u7 : fixture logits/top5 incohérente", .{});
+        return error.VacuousGate;
+    }
+    const ids_buf = try zml.io.load(OneT, &ids_sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    const logits_fx_buf = try zml.io.load(OneT, &logits_sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    const t5i_buf = try zml.io.load(OneT, &t5i_sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    const t5v_buf = try zml.io.load(OneT, &t5v_sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+    const su: usize = @intCast(s_i);
+    const d_us: usize = @intCast(D_12B);
+    const voc_us: usize = @intCast(VOC_12B);
+    log.info("  prompt fixture : S={d} (prompt canonique templaté, oracle 68)", .{su});
+
+    // --- Embed : chemin 12B du mode u2 (gather + scale bf16 62.0, D12), graphe DÉDIÉ ---
+    var emb_exe = try platform.compileFn(allocator, io, U2.forward, .{ u7w.embed_tokens, ids_sym.t }, .{ .shardings = &.{sharding} });
+    var emb_args = try emb_exe.args(allocator);
+    var emb_results = try emb_exe.results(allocator);
+    emb_args.set(.{ u7w_buf.embed_tokens, ids_buf.t });
+    emb_exe.call(emb_args, &emb_results);
+    var r_emb = emb_results.get(zml.Buffer);
+    var emb_s = try r_emb.toSliceAlloc(allocator, io);
+    const emb_bf16 = emb_s.items(u16);
+    const n_all = su * d_us;
+    if (emb_bf16.len != n_all) {
+        log.err("u7 : embed — {d} bf16 != {d}", .{ emb_bf16.len, n_all });
+        return error.GateFailed;
+    }
+    const hid_host = try arena.alloc(f32, n_all);
+    for (emb_bf16, 0..) |hu, i| hid_host[i] = @bitCast(@as(u32, hu) << 16); // bf16 -> f32 EXACT
+    emb_s.free(allocator);
+    r_emb.deinit();
+    emb_results.deinit(allocator);
+    emb_args.deinit(allocator);
+    emb_exe.deinit();
+    log.info("  embed 12B (gather + scale bf16 62.0) : {d} x {d} f32 (chemin u2, D12)", .{ su, d_us });
+
+    // --- Tables host Packed (pattern u6, S runtime) ---
+    const hd_f_us: usize = @intCast(HD_F);
+    const cos_host = try arena.alloc(f32, su * hd_f_us);
+    const sin_host = try arena.alloc(f32, su * hd_f_us);
+    for (0..su) |p| ropeFullHost(@intCast(p), cos_host[p * hd_f_us .. (p + 1) * hd_f_us], sin_host[p * hd_f_us .. (p + 1) * hd_f_us]);
+    // Masque causal UNIQUE (two_masks=false) — licite : l'oracle 68 ASSERTE sliding == causal à ce S.
+    const mask_host = try arena.alloc(f32, su * su);
+    for (0..su) |p| {
+        for (0..su) |k| mask_host[p * su + k] = if (k <= p) 0 else MASK_MIN;
+    }
+    const pos_host = try arena.alloc(i32, su);
+    for (pos_host, 0..) |*x, p| x.* = @intCast(p);
+    const emb_zero = try arena.alloc(u8, su * d_us * 2); // bf16 zéros — NON consommé (first=false)
+    @memset(emb_zero, 0);
+    const eptl_zero = try arena.alloc(u8, su * 2); // {S,1,1,1} bf16 — NON consommé (ple_dim=0)
+    @memset(eptl_zero, 0);
+
+    // Cache mock zéro : slots PLEINS du Geom g12 (40 sliding + 8 full), KMAX=S, f32.
+    const sl_slots: i64 = @intCast(N12_SLIDING);
+    const fl_slots: i64 = @intCast(N12_FULL);
+    const kvh_sl: i64 = @intCast(g12.g12.kvh_sliding);
+    const kvh_fl: i64 = @intCast(g12.g12.kvh_full);
+    const sl_bytes = @as(usize, @intCast(sl_slots)) * @as(usize, @intCast(kvh_sl)) * su * @as(usize, @intCast(HD_S)) * 4;
+    const fl_bytes = @as(usize, @intCast(fl_slots)) * @as(usize, @intCast(kvh_fl)) * su * hd_f_us * 4;
+    const cache_sl_zero = try arena.alloc(u8, sl_bytes);
+    @memset(cache_sl_zero, 0);
+    const cache_fl_zero = try arena.alloc(u8, fl_bytes);
+    @memset(cache_fl_zero, 0);
+
+    // --- Symboliques (pattern u6, S runtime) ---
+    const packed_sym = engine.Packed(false){
+        .embeds = zml.Tensor.init(.{ s_i, 1, 1, D_12B }, .bf16).withTags(.{ .step, .b, .s, .d }),
+        .embptls = zml.Tensor.init(.{ s_i, 1, 1, 1 }, .bf16).withTags(.{ .step, .b, .s, .lf }),
+        .cos_full = zml.Tensor.init(.{ s_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .sin_full = zml.Tensor.init(.{ s_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .masks = zml.Tensor.init(.{ s_i, 1, 1, 1, s_i }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
+        .positions = zml.Tensor.init(.{s_i}, .i32).withTags(.{.step}),
+    };
+    const cache_sym = engine.Cache{
+        .sl_k = zml.Tensor.init(.{ sl_slots, 1, kvh_sl, s_i, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .sl_v = zml.Tensor.init(.{ sl_slots, 1, kvh_sl, s_i, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_k = zml.Tensor.init(.{ fl_slots, 1, kvh_fl, s_i, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_v = zml.Tensor.init(.{ fl_slots, 1, kvh_fl, s_i, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+    };
+    const ctrl_sym: engine.Ctrl = .initSymbolic();
+    const hidden_sym = zml.Tensor.init(.{ 1, 1, D_12B }, .f32).withTags(.{ .b, .s, .d });
+    try cache_sym.checkDtype(.{}); // prec par défaut => cache f32 attendu — témoin
+
+    const pk_buf = zml.Bufferized(engine.Packed(false)){
+        .embeds = try zml.Buffer.fromBytes(io, platform, packed_sym.embeds.shape(), sharding, emb_zero),
+        .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, eptl_zero),
+        .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(cos_host)),
+        .sin_full = try zml.Buffer.fromBytes(io, platform, packed_sym.sin_full.shape(), sharding, std.mem.sliceAsBytes(sin_host)),
+        .masks = try zml.Buffer.fromBytes(io, platform, packed_sym.masks.shape(), sharding, std.mem.sliceAsBytes(mask_host)),
+        .positions = try zml.Buffer.fromBytes(io, platform, packed_sym.positions.shape(), sharding, std.mem.sliceAsBytes(pos_host)),
+    };
+    var cache_buf = zml.Bufferized(engine.Cache){
+        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, cache_sl_zero),
+        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, cache_sl_zero),
+        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, cache_fl_zero),
+        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, cache_fl_zero),
+    };
+
+    // --- STAGE-MAJOR CHUNKÉ (voie retenue, itération 4 — le repli PRESCRIT PAR LE PLAN
+    // « repli pattern forwardStageGen chunké si mur RAM », cf. en-tête U7Chunk pour
+    // l'historique des 3 runs crashés) : 8 chunks de 6 couches, S steps par chunk, chaîne
+    // hidden via host entre chunks (pattern u6), logits au (dernier chunk, dernier step). ---
+    const logits_zml = try arena.alloc(f32, voc_us);
+    const hid_next = try arena.alloc(f32, n_all);
+    inline for (0..N12_CHUNKS) |ci| {
+        const is_last_chunk = comptime (ci == N12_CHUNKS - 1);
+        const t_c0: std.Io.Timestamp = .now(io, .awake);
+        var exe = try platform.compileFn(allocator, io, U7Chunk(ci).forward, .{ u7w, hidden_sym, packed_sym, cache_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
+        defer exe.deinit();
+        const t_compile_ms = @divTrunc(t_c0.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_ms);
+        const t_r0: std.Io.Timestamp = .now(io, .awake);
+        for (0..su) |step| {
+            var hidden_buf = try zml.Buffer.fromBytes(io, platform, hidden_sym.shape(), sharding, std.mem.sliceAsBytes(hid_host[step * d_us .. (step + 1) * d_us]));
+            var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
+            const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
+
+            var call_args = try exe.args(allocator);
+            var call_results = try exe.results(allocator);
+            call_args.set(.{ u7w_buf, hidden_buf, pk_buf, cache_buf, ctrl_buf });
+            exe.call(call_args, &call_results);
+            var r_out, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer });
+
+            var old_cache = cache_buf;
+            cache_buf = zml.Bufferized(engine.Cache){ .sl_k = r_slk, .sl_v = r_slv, .fl_k = r_flk, .fl_v = r_flv };
+            old_cache.sl_k.deinit();
+            old_cache.sl_v.deinit();
+            old_cache.fl_k.deinit();
+            old_cache.fl_v.deinit();
+
+            if (comptime !is_last_chunk) {
+                // Sortie du chunk {1,1,d} : hidden du chunk suivant (chaîne via host, f32).
+                var got_s = try r_out.toSliceAlloc(allocator, io);
+                defer got_s.free(allocator);
+                const got = got_s.items(f32);
+                if (got.len != d_us) {
+                    log.err("u7 : chunk {d} step {d} — {d} f32 != {d}", .{ ci, step, got.len, d_us });
+                    return error.GateFailed;
+                }
+                @memcpy(hid_next[step * d_us .. (step + 1) * d_us], got);
+            } else if (step == su - 1) {
+                // DERNIER chunk, DERNIÈRE position : logits {1,1,voc} du chemin head moteur
+                // (final_norm + lm_head tied + softcap) — la seule sortie comparée (§3-U7).
+                var got_s = try r_out.toSliceAlloc(allocator, io);
+                defer got_s.free(allocator);
+                const got = got_s.items(f32);
+                if (got.len != voc_us) {
+                    log.err("u7 : logits — {d} f32 != {d}", .{ got.len, voc_us });
+                    return error.GateFailed;
+                }
+                @memcpy(logits_zml, got);
+            }
+
+            r_out.deinit();
+            hidden_buf.deinit();
+            step_buf.deinit();
+            call_args.deinit(allocator);
+            call_results.deinit(allocator);
+        }
+        if (comptime !is_last_chunk) @memcpy(hid_host, hid_next);
+        log.info("  chunk {d}/{d} (L{d}-L{d}, 5 sliding + 1 full K=V branche D4) : compile {d} ms, {d} steps en {d} ms{s}", .{ ci, N12_CHUNKS - 1, ci * U7_CHUNK, ci * U7_CHUNK + U7_CHUNK - 1, t_compile_ms, su, @divTrunc(t_r0.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_ms), if (is_last_chunk) " — HEAD moteur (final_norm+lm_head tied+softcap)" else "" });
+    }
+    cache_buf.sl_k.deinit();
+    cache_buf.sl_v.deinit();
+    cache_buf.fl_k.deinit();
+    cache_buf.fl_v.deinit();
+    log.info("  forward complet : {d} chunks x {d} steps en {d} s au total depuis le chargement (stage-major chunké 6 couches, repli prescrit du plan — voie déclarée)", .{ N12_CHUNKS, su, @divTrunc(t_all.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_s) });
+
+    // --- Expected host : logits HF + top-5 HF (cohérence interne assertée) ---
+    var exp_s = try logits_fx_buf.t.toSliceAlloc(allocator, io);
+    defer exp_s.free(allocator);
+    const logits_hf = exp_s.items(f32);
+    var t5i_s = try t5i_buf.t.toSliceAlloc(allocator, io);
+    defer t5i_s.free(allocator);
+    const hf_top5_ids = t5i_s.items(i32);
+    var t5v_s = try t5v_buf.t.toSliceAlloc(allocator, io);
+    defer t5v_s.free(allocator);
+    const hf_top5_vals = t5v_s.items(f32);
+    if (logits_hf.len != voc_us) {
+        log.err("u7 : logits HF — {d} f32 != {d}", .{ logits_hf.len, voc_us });
+        return error.VacuousGate;
+    }
+    for (hf_top5_ids, hf_top5_vals) |ti, tv| {
+        if (logits_hf[@intCast(ti)] != tv) {
+            log.err("u7 : fixture incohérente — top5_vals[{d}]={e:.6} != logits[{d}]", .{ ti, tv, ti });
+            return error.VacuousGate;
+        }
+    }
+
+    // --- Softcap exercé côté ZML (§3-U7) : max|logits| <= 30 ET > 25 quelque part ---
+    var max_abs_logit: f64 = 0;
+    var n_over_25: usize = 0;
+    for (logits_zml) |v| {
+        const a = @abs(@as(f64, v));
+        if (a > max_abs_logit) max_abs_logit = a;
+        if (a > U7_SOFTCAP_BITE) n_over_25 += 1;
+    }
+    if (max_abs_logit > U7_SOFTCAP) {
+        log.err("u7 : softcap VIOLÉ côté ZML — max|logits|={e:.4} > {d}", .{ max_abs_logit, U7_SOFTCAP });
+        return error.GateFailed;
+    }
+    if (n_over_25 == 0) {
+        log.err("u7 : softcap ne MORD pas côté ZML — aucun |logit| > {d} (max={e:.4})", .{ U7_SOFTCAP_BITE, max_abs_logit });
+        return error.VacuousGate;
+    }
+    log.info("  softcap ZML exercé : max|logits|={d:.4} <= 30, {d} logits > 25 en |.|", .{ max_abs_logit, n_over_25 });
+
+    // --- Marges lues AVANT tout verdict (piège 17) ---
+    const tz = top6(logits_zml);
+    const th = top6(logits_hf);
+    log.info("  top-6 ZML : ids={any} vals={any}", .{ tz.ids, tz.vals });
+    log.info("  top-6 HF  : ids={any} vals={any}", .{ th.ids, th.vals });
+    log.info("  marges ZML : top1-top2={e:.6}, rang5-rang6={e:.6} ; HF : top1-top2={e:.6}, rang5-rang6={e:.6}", .{ tz.vals[0] - tz.vals[1], tz.vals[4] - tz.vals[5], th.vals[0] - th.vals[1], th.vals[4] - th.vals[5] });
+
+    // --- max_abs logits dernière position : DOCUMENTAIRE, garde-fou 0.5 (requalifié) ---
+    var max_abs: f64 = 0;
+    var max_i: usize = 0;
+    var sum_abs: f64 = 0;
+    for (logits_zml, logits_hf, 0..) |gv, e, i| {
+        const dd = @abs(@as(f64, gv) - @as(f64, e));
+        sum_abs += dd;
+        if (dd > max_abs) {
+            max_abs = dd;
+            max_i = i;
+        }
+    }
+    const mean_abs = sum_abs / @as(f64, @floatFromInt(voc_us));
+    log.info("  logits dernière position : max_abs={e:.3} (id {d} : zml={e:.6} hf={e:.6}) mean_abs={e:.3}", .{ max_abs, max_i, logits_zml[max_i], logits_hf[max_i], mean_abs });
+
+    // --- Top-5 en ENSEMBLE + tie rule (§3-U7, piège 17) : rang par rang, un écart de rang
+    // est toléré ssi |Δlogit| < 1e-4 entre les deux candidats, mesuré sur les logits HF (la
+    // référence — décision d'interprétation consignée) ; l'écart côté ZML est loggé. ---
+    var n_rank_diff: usize = 0;
+    var tie_ok = true;
+    for (0..5) |r| {
+        const zi = tz.ids[r];
+        const hi: usize = @intCast(hf_top5_ids[r]);
+        if (zi != hi) {
+            n_rank_diff += 1;
+            const d_hf = @abs(@as(f64, logits_hf[hi]) - @as(f64, logits_hf[zi]));
+            const d_zml = @abs(@as(f64, logits_zml[hi]) - @as(f64, logits_zml[zi]));
+            if (d_hf < U7_TIE) {
+                log.warn("  rang {d} : ZML id {d} != HF id {d} — TIE toléré (|Δlogit| HF={e:.3} < 1e-4 ; ZML={e:.3})", .{ r, zi, hi, d_hf, d_zml });
+            } else {
+                log.err("  rang {d} : ZML id {d} != HF id {d} — |Δlogit| HF={e:.3} >= 1e-4 (ZML={e:.3}) : PAS un tie", .{ r, zi, hi, d_hf, d_zml });
+                tie_ok = false;
+            }
+        }
+    }
+    // Ensemble : chaque id du top-5 HF doit être dans le top-5 ZML (et réciproquement),
+    // sauf tie de frontière déjà couvert par la règle rang-par-rang ci-dessus.
+    var set_eq = true;
+    for (0..5) |r| {
+        const hi: usize = @intCast(hf_top5_ids[r]);
+        var found = false;
+        for (0..5) |q| {
+            if (tz.ids[q] == hi) found = true;
+        }
+        if (!found) set_eq = false;
+    }
+
+    if (!tie_ok) {
+        log.err("u7 : FAIL top-5 — écart de rang hors tie rule (§3-U7)", .{});
+        return error.GateFailed;
+    }
+    if (max_abs > U7_MAX_ABS) {
+        log.err("u7 : FAIL max_abs={e:.3} > garde-fou {e:.1} (Amendement 2 §U7 requalifié — le garde-fou documentaire reste CÂBLÉ, un dépassement = FAIL ; top-5 ensemble={}, écarts de rang={d})", .{ max_abs, U7_MAX_ABS, set_eq, n_rank_diff });
+        return error.GateFailed;
+    }
+    log.info("PASS u7 — prefill 12B 48 couches + head moteur : softcap mordant (max|logits|={d:.4}, {d} > 25), top-5 ensemble={} (écarts de rang tolérés par tie : {d}), max_abs documentaire={e:.3} <= garde-fou 0.5 (bf16-réel requalifié, décision Régis 25 juil)", .{ max_abs_logit, n_over_25, set_eq, n_rank_diff, max_abs });
+}
+
 // ---------------------------------------------------------------------------- main
 
 pub fn main(init: std.process.Init) !void {
@@ -1303,6 +1804,12 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingArgument;
         }
         try gateU6(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
+    } else if (std.mem.eql(u8, mode, "u7")) {
+        if (process_args.len < 4) {
+            log.err("{s}", .{usage});
+            return error.MissingArgument;
+        }
+        try gateU7(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
     } else {
         log.err("mode inconnu '{s}' — {s}", .{ mode, usage });
         return error.MissingArgument;

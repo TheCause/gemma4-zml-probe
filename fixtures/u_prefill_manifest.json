@@ -1,0 +1,86 @@
+{
+  "source": "68_u7_prefill_oracle.py --u7 (Task 7, plan J2 — Amendement 2 §U7)",
+  "oracle": "forward HF CPU COMPLET (AutoModelForCausalLM sur l'export dq, bf16, low_cpu_mem_usage/mmap) — le modèle réel de bout en bout, PAS de .float() (contrairement aux oracles unitaires 65-67) ; logits de la DERNIÈRE position (bf16 -> f32 exact dans la fixture)",
+  "prompt": "What is the capital of France? Answer in one word.",
+  "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "seq_len": 25,
+  "ids": [
+    2,
+    105,
+    2364,
+    107,
+    3689,
+    563,
+    506,
+    5279,
+    529,
+    7001,
+    236881,
+    25685,
+    528,
+    886,
+    3658,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    100,
+    45518,
+    107,
+    101
+  ],
+  "softcap": {
+    "cap": 30.0,
+    "max_abs_logit": 26.375,
+    "n_abs_over_25": 10,
+    "asserted": "max|logits| <= 30 ET > 25 quelque part (§3-U7)"
+  },
+  "top5": {
+    "ids": [
+      50429,
+      100,
+      132599,
+      236774,
+      9079
+    ],
+    "tokens": [
+      "Paris",
+      "<|channel>",
+      " hn",
+      "T",
+      " Paris"
+    ],
+    "vals": [
+      26.25,
+      13.6875,
+      13.5625,
+      13.25,
+      12.9375
+    ]
+  },
+  "margins": {
+    "top1_top2": 12.5625,
+    "rank5_rank6_gap": 0.5625,
+    "note": "piège 17 — marges consignées AVANT tout verdict gate"
+  },
+  "chrono_s": {
+    "load": 25.7,
+    "forward_prefill": 226.4,
+    "host": "VM",
+    "note": "donnée D6"
+  },
+  "thresholds": {
+    "u7_max_abs_guard": 0.5,
+    "tie_dlogit": 0.0001,
+    "note": "§3-U7 REQUALIFIÉ (Amendement 2 §U7, décision Régis 25 juil) : critère discriminant = top-5 en ENSEMBLE + ordre + marges (tie rule |dlogit| < 1e-4) + softcap ; max_abs documentaire sous garde-fou 0.5 CÂBLÉ (enveloppe G2 bf16-réel, dépassement = FAIL) — appliqués côté gate Zig (mode u7)",
+    "anomalie_zml_consignee": "crash reproductible du gate au 31e compileFn du process (stage-major K=1, runs 1/3 : segfault émission MLIR manualRope, swap quasi vide) + OOM du graphe complet 48 couches en exécution (run 4, anon-rss 23,6 Go) -> voie retenue : stage-major CHUNKÉ 8x6 (repli prescrit du plan Task 7) ; à investiguer côté socle ZML"
+  },
+  "seed": "sans objet (forward déterministe, aucun tirage)",
+  "dtype": "bf16 (modèle réel) ; fixture logits f32",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0+cu130"
+  }
+}
