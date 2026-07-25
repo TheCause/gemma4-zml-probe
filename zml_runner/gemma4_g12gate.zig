@@ -51,7 +51,8 @@
 //       — U6 : couche décodeur COMPLÈTE (sandwich norms + attention + MLP + layer_scalar) puis
 //         chaîne L0→L5 (5 sliding + 1 full) vs modules réels (script 67) — EN PASSANT PAR LE
 //         MOTEUR (arbitrage contrôleur 23618bb), voir l'en-tête de la section u6 ci-dessous.
-//         Seuil §3 U6 : max_abs <= 1e-3 par couche ET chaîne — resserrable, JAMAIS élargissable.
+//         Seuil §3 U6 : max_abs <= 2e-4 par couche ET chaîne — resserré depuis 1e-3 au vu de
+//         l'oracle (décision contrôleur 25 juil, Amendement 2 point 5) ; JAMAIS élargissable.
 //         Mode u7 : Task 7.
 //
 // ⚠ IMPÉRATIF modes futurs (u3-u7) : tout mode lisant le PACKÉ passe par openStores /
@@ -897,7 +898,7 @@ fn gateU5(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
 // à S=8 : l'oracle 67 ASSERTE bit-égalité masque sliding HF == masque causal HF (fenêtre
 // 1024 non mordante).
 
-const U6_MAX_ABS: f64 = 1.0e-3; // §3 U6 — resserrable au vu de l'oracle, JAMAIS élargissable
+const U6_MAX_ABS: f64 = 2.0e-4; // §3 U6 — resserré au vu de l'oracle (1e-3 → 2e-4), décision contrôleur 25 juil — jamais élargissable
 const U6_STEPS: usize = 8; // S=8 (périmètre Amendement 2 : « S=8 explicite »), positions 0-7
 const D_12B: i64 = @intCast(g12.g12.d); // 3840
 const MASK_MIN: f32 = -std.math.floatMax(f32); // == torch.finfo(float32).min (masque additif HF)
@@ -916,7 +917,7 @@ const U6_SL_SLOTS: i64 = 5; // couches 0-4 sliding → slidingSlot 0..4
 const U6_FL_SLOTS: i64 = 1; // couche 5 full → fullSlot 0
 
 /// Table de RÉGIME EXPLICITE (pattern U3Case/U5Case) : 6 profondeurs de chaîne, TOUTES gatées
-/// au seuil §3 U6 (max_abs <= 1e-3), S=8 seul ; la chaîne == profondeur 5 (sortie L5).
+/// au seuil §3 U6 (max_abs <= U6_MAX_ABS, resserré 2e-4), S=8 seul ; la chaîne == profondeur 5 (sortie L5).
 const U6Lay = struct { idx: usize, kind: []const u8 };
 const U6_LAYERS = [_]U6Lay{
     .{ .idx = 0, .kind = "sliding GQA 8x256 — « couche 0 seule » (entrée = hidden oracle)" },
@@ -1044,7 +1045,7 @@ const U6Stat = struct {
 
 fn gateU6(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
     log.info("u6 (U6) — couche complète + chaîne L0→L5 via le MOTEUR (arbitrage 23618bb) : Geom tronqué {d} couches + forwardStageGen (runLayerGen), branche D4 k_eq_v_full DANS le graphe (L5), v_proj L5 = placeholder [1]", .{G12U6.num_layers});
-    log.info("  S={d} (positions 0-{d}), seuil §3 U6 : max_abs <= {e:.1} par couche ET chaîne — resserrable, JAMAIS élargissable", .{ U6_STEPS, U6_STEPS - 1, U6_MAX_ABS });
+    log.info("  S={d} (positions 0-{d}), seuil §3 U6 : max_abs <= {e:.1} par couche ET chaîne — resserré depuis 1e-3 au vu de l'oracle (décision contrôleur 25 juil), JAMAIS élargissable", .{ U6_STEPS, U6_STEPS - 1, U6_MAX_ABS });
 
     var st: Stores = undefined;
     try openStores(&st, allocator, io, ckpt_path, fixture_path);

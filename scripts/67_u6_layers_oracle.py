@@ -22,7 +22,8 @@ Distribution des 48 layer_scalar : safe_open (via load_dq_weights) sur les 48 cl
 `model.language_model.layers.{i}.layer_scalar` → valeurs au manifest (tous 1.0 ?).
 
 S=8 (périmètre U6, Amendement 2 : « S=8 explicite (couche 0 seule ET chaîne L0→L5) ») ;
-seuil gate max_abs ≤ 1e-3 — resserrable au vu de l'oracle, JAMAIS élargissable.
+seuil gate max_abs ≤ 2e-4 — resserré depuis 1e-3 au vu de l'oracle (décision contrôleur
+25 juil, Amendement 2 point 5), JAMAIS élargissable.
 Témoin masques S=8 : le masque sliding HF == masque causal HF (fenêtre 1024 non
 mordante, asserté bit) — le gate moteur (two_masks=false) utilise UNE table causale.
 
@@ -52,7 +53,7 @@ S = 8  # périmètre U6 (Amendement 2) : S=8 explicite
 N_CHAIN = 6  # L0→L5 : 5 sliding + 1 full (L5)
 FULL_LAYER = 5
 N_TOTAL_LAYERS = 48  # distribution layer_scalar sur les 48 couches
-MAX_ABS_THR = 1.0e-3  # §3 U6 — resserrable au vu de l'oracle, JAMAIS élargissable
+MAX_ABS_THR = 2.0e-4  # §3 U6 — resserré au vu de l'oracle (1e-3 → 2e-4), décision contrôleur 25 juil — jamais élargissable
 
 LN_NAMES = ("input_layernorm", "post_attention_layernorm",
             "pre_feedforward_layernorm", "post_feedforward_layernorm")
@@ -215,8 +216,9 @@ def main() -> None:
         },
         "seed": SEED, "seq_len": S,
         "thresholds": {"u6_max_abs": MAX_ABS_THR,
-                       "note": "§3 U6 : max_abs <= 1e-3 par couche ET chaîne — resserrable au vu "
-                               "de l'oracle, JAMAIS élargissable ; un dépassement = FAIL"},
+                       "note": "§3 U6 : max_abs <= 2e-4 par couche ET chaîne — resserré depuis "
+                               "1e-3 au vu de l'oracle (décision contrôleur 25 juil, Amendement 2 "
+                               "point 5), JAMAIS élargissable ; un dépassement = FAIL"},
         "layer_scalar_distribution": {
             "n": N_TOTAL_LAYERS, "values": ls_vals,
             "min": min(ls_vals), "max": max(ls_vals), "all_ones": all_ones,
@@ -230,7 +232,7 @@ def main() -> None:
         "pass": "gate u6 (MOTEUR — arbitrage 23618bb) : chaîne via forwardStageGen/Geom tronqué "
                 "6 couches (runLayerGen partagé), branche k_eq_v_full DANS le graphe sur L5, "
                 "placeholder v_proj [1] non consommé (preuve = compile) ; comparaison par couche "
-                "(profondeur de chaîne) + chaîne au seuil 1e-3",
+                "(profondeur de chaîne) + chaîne au seuil 2e-4 (resserré, décision contrôleur)",
         "versions": {"transformers": transformers.__version__, "torch": torch.__version__},
     }
     with open(os.path.join(FX, "u_layers_manifest.json"), "w") as fh:
