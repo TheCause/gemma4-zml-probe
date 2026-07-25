@@ -53,8 +53,9 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import torch
-from safetensors import safe_open
 from safetensors.torch import save_file
+
+from _oracle_common import load_dq_weights  # module partagé, extrait au 3e usage (67, Task 6)
 
 ROOT = "/data/gemma4-zml-probe"
 DQ = os.path.join(ROOT, "weights_12b_dq")  # export dq (D8/D9) — PAS le packé
@@ -66,20 +67,6 @@ LAYER = 5
 PREFIX = f"model.language_model.layers.{LAYER}.self_attn."
 MAX_ABS_THR, MEAN_ABS_THR = 1.0e-4, 1.0e-6  # §3 U5 (étage c : max_abs seul)
 DISCRIM_THR = 10.0 * MAX_ABS_THR  # >= 10x le seuil, sinon fixture non-discriminante
-
-
-def load_dq_weights(keys):
-    """Lit les clés depuis l'export dq 2-shards via l'index JSON (safe_open par shard)."""
-    with open(os.path.join(DQ, "model.safetensors.index.json")) as fh:
-        wmap = json.load(fh)["weight_map"]
-    out, by_shard = {}, {}
-    for k in keys:
-        by_shard.setdefault(wmap[k], []).append(k)
-    for shard, ks in by_shard.items():
-        with safe_open(os.path.join(DQ, shard), framework="pt") as f:
-            for k in ks:
-                out[k] = f.get_tensor(k)
-    return out
 
 
 def main() -> None:

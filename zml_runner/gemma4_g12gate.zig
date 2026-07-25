@@ -47,7 +47,12 @@
 //         positions — même famille ULP que U3 : pow f32 host vs HF, Δangle ∝ position) ;
 //         étage (c) attention complète S=8 ET S=1040 au seuil plein 1e-4 (l'output gate).
 //         La discriminabilité K=V (>= 10x seuil, sinon exit 1) est CÂBLÉE dans l'oracle 66.
-//         Modes u6/u7 : Tasks 6-7.
+//   u6 <weights_12b/model.safetensors> <fixtures/u_layers.safetensors>
+//       — U6 : couche décodeur COMPLÈTE (sandwich norms + attention + MLP + layer_scalar) puis
+//         chaîne L0→L5 (5 sliding + 1 full) vs modules réels (script 67) — EN PASSANT PAR LE
+//         MOTEUR (arbitrage contrôleur 23618bb), voir l'en-tête de la section u6 ci-dessous.
+//         Seuil §3 U6 : max_abs <= 1e-3 par couche ET chaîne — resserrable, JAMAIS élargissable.
+//         Mode u7 : Task 7.
 //
 // ⚠ IMPÉRATIF modes futurs (u3-u7) : tout mode lisant le PACKÉ passe par openStores /
 // registryFromFile — JAMAIS TensorRegistry.fromPath (realPath traverse les symlinks HF vers
@@ -58,12 +63,13 @@
 const std = @import("std");
 const log = std.log;
 const zml = @import("zml");
+const engine = @import("engine.zig"); // moteur (mode u6 : forwardStageGen/Geom tronqué)
 const w4 = @import("w4.zig");
 const g12 = @import("g12.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-const usage = "Usage: gemma4_g12gate <w2-12b|u2|u3|u4|u5> <model.safetensors> <fixture.safetensors>";
+const usage = "Usage: gemma4_g12gate <w2-12b|u2|u3|u4|u5|u6> <model.safetensors> <fixture.safetensors>";
 
 const load_opts = .{ .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 };
 
@@ -859,6 +865,388 @@ fn gateU5(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     log.info("PASS u5 — MQA K=V p-RoPE : étages a/b/v S=8 aux seuils §3, sanity pos 0 stricte, tripwire {{708,1030}} sous 1e-3, étage c S=8+S=1040 max_abs<=1e-4", .{});
 }
 
+// ---------------------------------------------------------------------------- u6 (couche complète + chaîne L0→L5 — MOTEUR)
+
+// U6 passe par le MOTEUR (arbitrage contrôleur 23618bb : le mode u5 vérifie par ops miroir —
+// la branche moteur D4 `k_eq_v_full` de runLayerGen n'était donc pas encore exercée ; U6 doit
+// l'exercer via runLayerGen/Geom.g12). `runLayerGen` n'est PAS `pub` (engine.zig:463) et
+// engine.zig est INTOUCHABLE ici (le md5 U1 est en jeu) — la voie DÉCLARÉE est le Geom
+// TRONQUÉ : `G12U6` = g12.g12 réduit à `num_layers=6, first_kv_shared=6` (donne exactement
+// L0-L5 avec la couche 5 full : (5+1)%6==0 ; aucun reader ; slots dérivés corrects — sliding
+// 0..4, full 0), moteur invoqué par `forwardStageGen(i, i+1, first=false, last=false)`
+// (runLayerGen partagé, engine.zig:698) : un stage par couche, 8 steps moteur par stage
+// (positions 0-7, prefill S=8 step-par-step, cache mock zéro threadé — pattern P5.3 /
+// w4auto HostInputs). L'ordre est stage-major : la couche j consomme aux 8 positions le
+// hidden produit par la couche j-1 (chaîne bit-préservée via host, f32) et SON cache écrit
+// aux steps précédents — mêmes dépendances que le decode réel.
+//
+// Branche D4 DANS le graphe : la couche 5 est full et G12U6.k_eq_v_full=true → runLayerGen
+// émet `v_raw = k_raw` (k_proj BRUT avant k_norm/rope) + v_norm sans poids. Son
+// `LayerW.v_proj` = PLACEHOLDER de shape inconsommable [1] (le tenseur layer_scalar, tags
+// {.one}) — JAMAIS k_proj recyclé (D4 : un placeholder shape-compatible consommé par erreur
+// donnerait v_norm(kp) correct par accident). Toute consommation accidentelle casserait au
+// compile (dot sur .d impossible sur {.one}[1]) : le compile du stage 5 EST la preuve de
+// non-consommation. Champs PLE (per_layer_input_gate/projection/post_per_layer_input_norm)
+// et champs modèle non consommés (embed_tokens/final_norm/plmp/pl_norm — last=false,
+// ple_dim=0) : même placeholder [1], branches comptime-mortes.
+//
+// Assemblage des engine.LayerW par VALEUR (pattern W4Step, gemma4_w4auto.zig:730-756) :
+// poids packés du checkpoint → w4.W4Lin.toW(tags) in-graph, forwardStageGen inchangé.
+// cos/sin full : ENTRÉES du graphe (Packed) — calculés host par ropeFullHost (formule du
+// runner, même fn que le tripwire u5). Masque : two_masks=false, UNE table causale — licite
+// à S=8 : l'oracle 67 ASSERTE bit-égalité masque sliding HF == masque causal HF (fenêtre
+// 1024 non mordante).
+
+const U6_MAX_ABS: f64 = 1.0e-3; // §3 U6 — resserrable au vu de l'oracle, JAMAIS élargissable
+const U6_STEPS: usize = 8; // S=8 (périmètre Amendement 2 : « S=8 explicite »), positions 0-7
+const D_12B: i64 = @intCast(g12.g12.d); // 3840
+const MASK_MIN: f32 = -std.math.floatMax(f32); // == torch.finfo(float32).min (masque additif HF)
+
+/// Géométrie TRONQUÉE (voie déclarée) : g12 réduit aux couches 0-5 — seuls num_layers et
+/// first_kv_shared changent, tout le reste (d, têtes, hd, kvh, k_eq_v_full, full_period 6,
+/// theta, softcap) est EXACTEMENT g12.g12 — la chaîne exerce les couches réelles du 12B.
+const G12U6: engine.Geom = blk: {
+    var g = g12.g12;
+    g.num_layers = 6;
+    g.first_kv_shared = 6; // aucun reader : chaque couche écrit son slot (pattern g12, pas de YOCO)
+    break :blk g;
+};
+const U6Model = engine.EngineModel(struct {}, .{ .geom = G12U6 });
+const U6_SL_SLOTS: i64 = 5; // couches 0-4 sliding → slidingSlot 0..4
+const U6_FL_SLOTS: i64 = 1; // couche 5 full → fullSlot 0
+
+/// Table de RÉGIME EXPLICITE (pattern U3Case/U5Case) : 6 profondeurs de chaîne, TOUTES gatées
+/// au seuil §3 U6 (max_abs <= 1e-3), S=8 seul ; la chaîne == profondeur 5 (sortie L5).
+const U6Lay = struct { idx: usize, kind: []const u8 };
+const U6_LAYERS = [_]U6Lay{
+    .{ .idx = 0, .kind = "sliding GQA 8x256 — « couche 0 seule » (entrée = hidden oracle)" },
+    .{ .idx = 1, .kind = "sliding GQA 8x256" },
+    .{ .idx = 2, .kind = "sliding GQA 8x256" },
+    .{ .idx = 3, .kind = "sliding GQA 8x256" },
+    .{ .idx = 4, .kind = "sliding GQA 8x256" },
+    .{ .idx = 5, .kind = "full MQA 1x512 K=V (branche D4 moteur, v_proj placeholder [1])" },
+};
+
+/// Poids d'UNE couche 12B au format packé — champs COMMUNS aux 6 couches (SANS v_proj : la
+/// couche 5 n'en a pas au checkpoint ; pattern « deux structs distincts » w4.W4LayerW/W4KV,
+/// zml.io.load exige des champs Tensor, pas d'optionnel).
+const U6LayW = struct {
+    input_layernorm: zml.Tensor,
+    q: w4.W4Lin,
+    q_norm: zml.Tensor,
+    k: w4.W4Lin,
+    k_norm: zml.Tensor,
+    o: w4.W4Lin,
+    post_attention_layernorm: zml.Tensor,
+    pre_feedforward_layernorm: zml.Tensor,
+    gate: w4.W4Lin,
+    up: w4.W4Lin,
+    down: w4.W4Lin,
+    post_feedforward_layernorm: zml.Tensor,
+    layer_scalar: zml.Tensor, // [1] bf16 — consommé en fin de couche ET placeholder [1] (D4/PLE)
+
+    fn init(v: zml.io.TensorStore.View) U6LayW {
+        const sa = v.withPrefix("self_attn");
+        const mlp = v.withPrefix("mlp");
+        return .{
+            .input_layernorm = v.createTensor("input_layernorm.weight", .{.d}, null),
+            .q = .init(sa, "q_proj"),
+            .q_norm = sa.createTensor("q_norm.weight", .{.hd}, null),
+            .k = .init(sa, "k_proj"),
+            .k_norm = sa.createTensor("k_norm.weight", .{.hd}, null),
+            .o = .init(sa, "o_proj"),
+            .post_attention_layernorm = v.createTensor("post_attention_layernorm.weight", .{.d}, null),
+            .pre_feedforward_layernorm = v.createTensor("pre_feedforward_layernorm.weight", .{.d}, null),
+            .gate = .init(mlp, "gate_proj"),
+            .up = .init(mlp, "up_proj"),
+            .down = .init(mlp, "down_proj"),
+            .post_feedforward_layernorm = v.createTensor("post_feedforward_layernorm.weight", .{.d}, null),
+            .layer_scalar = v.createTensor("layer_scalar", .{.one}, null),
+        };
+    }
+};
+
+/// Les 6 couches + les v_proj des 5 couches sliding (miroir w4.W4Model : layers[] + kv[]).
+const U6W = struct {
+    layers: []U6LayW, // 6 (champs communs)
+    vs: []w4.W4Lin, // 5 (v_proj des couches sliding 0-4 — la couche 5 full n'en a PAS)
+
+    fn init(allocator: std.mem.Allocator, base: zml.io.TensorStore.View) !U6W {
+        const layers = try allocator.alloc(U6LayW, G12U6.num_layers);
+        const vs = try allocator.alloc(w4.W4Lin, G12U6.num_layers - 1);
+        const lb = base.withPrefix("layers");
+        for (layers, 0..) |*l, i| l.* = U6LayW.init(lb.withLayer(i));
+        for (vs, 0..) |*x, i| x.* = .init(lb.withLayer(i).withPrefix("self_attn"), "v_proj");
+        return .{ .layers = layers, .vs = vs };
+    }
+};
+
+/// Assemblage par VALEUR d'un engine.LayerW (pattern W4Step / w4.toLayerW) : dequantW4
+/// in-graph via toW(tags des sites moteur). Couche full (comptime) : v_proj = PLACEHOLDER [1]
+/// (layer_scalar) — la branche k_eq_v_full du moteur ne le consomme pas, preuve par compile.
+fn u6LayerW(w: U6W, comptime j: usize) engine.LayerW {
+    const lw = w.layers[j];
+    return .{
+        .input_layernorm = lw.input_layernorm,
+        .q_proj = lw.q.toW(.{ .o, .d }),
+        .q_norm = lw.q_norm,
+        .k_proj = lw.k.toW(.{ .o, .d }),
+        .k_norm = lw.k_norm,
+        .v_proj = if (comptime G12U6.isFull(j)) lw.layer_scalar else w.vs[j].toW(.{ .o, .d }),
+        .o_proj = lw.o.toW(.{ .d, .m }),
+        .post_attention_layernorm = lw.post_attention_layernorm,
+        .pre_feedforward_layernorm = lw.pre_feedforward_layernorm,
+        .gate_proj = lw.gate.toW(.{ .f, .d }),
+        .up_proj = lw.up.toW(.{ .f, .d }),
+        .down_proj = lw.down.toW(.{ .d, .f }),
+        .post_feedforward_layernorm = lw.post_feedforward_layernorm,
+        .per_layer_input_gate = lw.layer_scalar, // placeholders [1] — bloc PLE comptime-mort (ple_dim=0)
+        .per_layer_projection = lw.layer_scalar,
+        .post_per_layer_input_norm = lw.layer_scalar,
+        .layer_scalar = lw.layer_scalar,
+    };
+}
+
+/// Stage moteur de la couche `li` : assemble le U6Model par valeur et invoque forwardStageGen
+/// (li, li+1, first=false — hidden vient de l'entrée, PAS des embeds ; last=false — pas de
+/// head). Le graphe émis pour la couche li est EXACTEMENT runLayerGen (engine.zig:463).
+fn U6Stage(comptime li: usize) type {
+    return struct {
+        pub fn forward(w: U6W, hidden_in: zml.Tensor, p: engine.Packed(false), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            var layers: [G12U6.num_layers]engine.LayerW = undefined;
+            inline for (0..G12U6.num_layers) |j| layers[j] = u6LayerW(w, j);
+            const m: U6Model = .{
+                // Champs modèle NON consommés (last=false, ple_dim=0) : placeholder [1].
+                .embed_tokens = w.layers[0].layer_scalar,
+                .per_layer_model_projection = w.layers[0].layer_scalar,
+                .per_layer_projection_norm = w.layers[0].layer_scalar,
+                .final_norm = w.layers[0].layer_scalar,
+                .layers = &layers,
+                .brick = .{},
+                .prec = .{}, // baseline f32 (fam=null) — le flux comparé par l'oracle 67
+            };
+            const out, const slk, const slv, const flk, const flv = m.forwardStageGen(li, li + 1, false, false, p, cache, hidden_in, ctrl);
+            return .{ out, slk, slv, flk, flv };
+        }
+    };
+}
+
+/// Stat d'une profondeur de chaîne (agrégée sur les 8 steps x 3840).
+const U6Stat = struct {
+    max_abs: f64 = 0,
+    sum_abs: f64 = 0,
+    n: usize = 0,
+    max_step: usize = 0,
+    max_i: usize = 0,
+    got: f32 = 0,
+    exp: f32 = 0,
+};
+
+fn gateU6(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, ckpt_path: []const u8, fixture_path: []const u8) !void {
+    log.info("u6 (U6) — couche complète + chaîne L0→L5 via le MOTEUR (arbitrage 23618bb) : Geom tronqué {d} couches + forwardStageGen (runLayerGen), branche D4 k_eq_v_full DANS le graphe (L5), v_proj L5 = placeholder [1]", .{G12U6.num_layers});
+    log.info("  S={d} (positions 0-{d}), seuil §3 U6 : max_abs <= {e:.1} par couche ET chaîne — resserrable, JAMAIS élargissable", .{ U6_STEPS, U6_STEPS - 1, U6_MAX_ABS });
+
+    var st: Stores = undefined;
+    try openStores(&st, allocator, io, ckpt_path, fixture_path);
+    defer st.deinit();
+
+    // --- Poids packés des 6 couches (checkpoint, D9) ---
+    const base = st.store_ck.view().withPrefix("model").withPrefix("language_model");
+    const u6w: U6W = try .init(arena, base);
+    const u6w_buf = try zml.io.load(U6W, &u6w, arena, io, platform, &st.store_ck, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+
+    // --- Fixture (script 67) : hidden bf16 + les 6 sorties de couche f32 — vers le HOST ---
+    const s_i: i64 = @intCast(U6_STEPS);
+    const hid_sym: OneT = .{ .t = st.store_fx.view().createTensor("hidden", .{ .b, .s, .d }, null) };
+    if (hid_sym.t.dim(.b) != 1 or hid_sym.t.dim(.s) != s_i or hid_sym.t.dim(.d) != D_12B or hid_sym.t.dtype() != .bf16) {
+        log.err("u6 : fixture hidden incohérente ({d}x{d}x{d} {s}, attendu 1x{d}x{d} bf16)", .{ hid_sym.t.dim(.b), hid_sym.t.dim(.s), hid_sym.t.dim(.d), @tagName(hid_sym.t.dtype()), s_i, D_12B });
+        return error.VacuousGate;
+    }
+    const hid_buf = try zml.io.load(OneT, &hid_sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+    var hid_bf16_s = try hid_buf.t.toSliceAlloc(allocator, io);
+    defer hid_bf16_s.free(allocator);
+    const hid_bf16 = hid_bf16_s.items(u16);
+
+    const d_us: usize = @intCast(D_12B);
+    const n_row = d_us; // éléments par (step) : {b=1,s=1,d}
+    const n_all = U6_STEPS * n_row;
+
+    var exp_host: [G12U6.num_layers][]f32 = undefined;
+    inline for (0..G12U6.num_layers) |li| {
+        const name = std.fmt.comptimePrint("out_l{d}", .{li});
+        const sym: OneT = .{ .t = st.store_fx.view().createTensor(name, .{ .b, .s, .d }, null) };
+        if (sym.t.dim(.s) != s_i or sym.t.dim(.d) != D_12B or sym.t.dtype() != .f32) {
+            log.err("u6 : fixture {s} incohérente", .{name});
+            return error.VacuousGate;
+        }
+        const b = try zml.io.load(OneT, &sym, arena, io, platform, &st.store_fx, .{ .shardings = &.{sharding}, .parallelism = load_opts.parallelism, .dma_chunks = load_opts.dma_chunks, .dma_chunk_size = load_opts.dma_chunk_size });
+        var sl = try b.t.toSliceAlloc(allocator, io);
+        defer sl.free(allocator);
+        exp_host[li] = try arena.dupe(f32, sl.items(f32));
+        if (exp_host[li].len != n_all) {
+            log.err("u6 : {s} — {d} f32 != {d}", .{ name, exp_host[li].len, n_all });
+            return error.VacuousGate;
+        }
+    }
+
+    // --- hid_host : hidden f32 courant de la chaîne (init = fixture bf16 -> f32 EXACT) ---
+    const hid_host = try arena.alloc(f32, n_all);
+    const hid_next = try arena.alloc(f32, n_all);
+    if (hid_bf16.len != n_all) {
+        log.err("u6 : hidden — {d} bf16 != {d}", .{ hid_bf16.len, n_all });
+        return error.VacuousGate;
+    }
+    for (hid_bf16, 0..) |hu, i| hid_host[i] = @bitCast(@as(u32, hu) << 16);
+
+    // --- Tables host Packed (pattern w4auto HostInputs, tronquées à 8 steps) ---
+    const hd_f_us: usize = @intCast(HD_F);
+    const cos_host = try arena.alloc(f32, U6_STEPS * hd_f_us);
+    const sin_host = try arena.alloc(f32, U6_STEPS * hd_f_us);
+    for (0..U6_STEPS) |p| ropeFullHost(@intCast(p), cos_host[p * hd_f_us .. (p + 1) * hd_f_us], sin_host[p * hd_f_us .. (p + 1) * hd_f_us]);
+    // Masque causal UNIQUE (two_masks=false) : ligne du step p = 0 pour k<=p, MASK_MIN sinon —
+    // licite à S=8 : l'oracle 67 asserte bit-égalité masque sliding HF == causal HF (1024 > 8).
+    const mask_host = try arena.alloc(f32, U6_STEPS * U6_STEPS);
+    for (0..U6_STEPS) |p| {
+        for (0..U6_STEPS) |k| mask_host[p * U6_STEPS + k] = if (k <= p) 0 else MASK_MIN;
+    }
+    const pos_host = try arena.alloc(i32, U6_STEPS);
+    for (pos_host, 0..) |*x, p| x.* = @intCast(p);
+    const emb_zero = try arena.alloc(u8, U6_STEPS * d_us * 2); // bf16 zéros — NON consommé (first=false)
+    @memset(emb_zero, 0);
+    const eptl_zero = try arena.alloc(u8, U6_STEPS * 2); // {8,1,1,1} bf16 — NON consommé (ple_dim=0)
+    @memset(eptl_zero, 0);
+    // Cache mock zéro (pattern P5.3 / w4auto) : shapes réelles Geom tronqué, KMAX=8, f32
+    // (prec.kv_store=null => dtype compute — cohérence Cache.checkDtype).
+    const sl_bytes = @as(usize, @intCast(U6_SL_SLOTS)) * @as(usize, @intCast(g12.g12.kvh_sliding)) * U6_STEPS * @as(usize, @intCast(HD_S)) * 4;
+    const fl_bytes = @as(usize, @intCast(U6_FL_SLOTS)) * @as(usize, @intCast(g12.g12.kvh_full)) * U6_STEPS * hd_f_us * 4;
+    const cache_sl_zero = try arena.alloc(u8, sl_bytes);
+    @memset(cache_sl_zero, 0);
+    const cache_fl_zero = try arena.alloc(u8, fl_bytes);
+    @memset(cache_fl_zero, 0);
+
+    // --- Symboliques (pattern w4auto : Tensor.init à la main, mêmes shapes que Packed/Cache) ---
+    const steps_i: i64 = @intCast(U6_STEPS);
+    const packed_sym = engine.Packed(false){
+        .embeds = zml.Tensor.init(.{ steps_i, 1, 1, D_12B }, .bf16).withTags(.{ .step, .b, .s, .d }),
+        .embptls = zml.Tensor.init(.{ steps_i, 1, 1, 1 }, .bf16).withTags(.{ .step, .b, .s, .lf }),
+        .cos_full = zml.Tensor.init(.{ steps_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .sin_full = zml.Tensor.init(.{ steps_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
+        .masks = zml.Tensor.init(.{ steps_i, 1, 1, 1, steps_i }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
+        .positions = zml.Tensor.init(.{steps_i}, .i32).withTags(.{.step}),
+    };
+    const kvh_sl: i64 = @intCast(g12.g12.kvh_sliding);
+    const kvh_fl: i64 = @intCast(g12.g12.kvh_full);
+    const cache_sym = engine.Cache{
+        .sl_k = zml.Tensor.init(.{ U6_SL_SLOTS, 1, kvh_sl, steps_i, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .sl_v = zml.Tensor.init(.{ U6_SL_SLOTS, 1, kvh_sl, steps_i, HD_S }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_k = zml.Tensor.init(.{ U6_FL_SLOTS, 1, kvh_fl, steps_i, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+        .fl_v = zml.Tensor.init(.{ U6_FL_SLOTS, 1, kvh_fl, steps_i, HD_F }, .f32).withTags(.{ .slot, .b, .h, .k, .hd }),
+    };
+    const ctrl_sym: engine.Ctrl = .initSymbolic();
+    const hidden_sym = zml.Tensor.init(.{ 1, 1, D_12B }, .f32).withTags(.{ .b, .s, .d });
+    try cache_sym.checkDtype(.{}); // prec par défaut (kv_store=null) => cache f32 attendu — témoin
+
+    const pk_buf = zml.Bufferized(engine.Packed(false)){
+        .embeds = try zml.Buffer.fromBytes(io, platform, packed_sym.embeds.shape(), sharding, emb_zero),
+        .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, eptl_zero),
+        .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(cos_host)),
+        .sin_full = try zml.Buffer.fromBytes(io, platform, packed_sym.sin_full.shape(), sharding, std.mem.sliceAsBytes(sin_host)),
+        .masks = try zml.Buffer.fromBytes(io, platform, packed_sym.masks.shape(), sharding, std.mem.sliceAsBytes(mask_host)),
+        .positions = try zml.Buffer.fromBytes(io, platform, packed_sym.positions.shape(), sharding, std.mem.sliceAsBytes(pos_host)),
+    };
+    var cache_buf = zml.Bufferized(engine.Cache){
+        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, cache_sl_zero),
+        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, cache_sl_zero),
+        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, cache_fl_zero),
+        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, cache_fl_zero),
+    };
+
+    // --- Chaîne stage-major : couche par couche (compile 1 stage moteur), 8 steps par stage ---
+    var stats: [G12U6.num_layers]U6Stat = @splat(.{});
+    inline for (0..G12U6.num_layers) |li| {
+        log.info("  stage L{d} ({s}) : compile forwardStageGen({d},{d}) ...", .{ li, U6_LAYERS[li].kind, li, li + 1 });
+        var exe = try platform.compileFn(allocator, io, U6Stage(li).forward, .{ u6w, hidden_sym, packed_sym, cache_sym, ctrl_sym }, .{ .shardings = &.{sharding} });
+        defer exe.deinit();
+        if (comptime G12U6.isFull(li)) {
+            log.info("    branche k_eq_v_full ÉMISE (L{d} full) — v_proj placeholder [1] NON consommé : le compile ci-dessus est la preuve (D4)", .{li});
+        }
+
+        for (0..U6_STEPS) |step| {
+            var hidden_buf = try zml.Buffer.fromBytes(io, platform, hidden_sym.shape(), sharding, std.mem.sliceAsBytes(hid_host[step * n_row .. (step + 1) * n_row]));
+            var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
+            const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
+
+            var call_args = try exe.args(allocator);
+            var call_results = try exe.results(allocator);
+            call_args.set(.{ u6w_buf, hidden_buf, pk_buf, cache_buf, ctrl_buf });
+            exe.call(call_args, &call_results);
+            var r_hid, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer });
+
+            // cache swap (motif w4auto) : le cache grandi remplace l'ancien.
+            var old_cache = cache_buf;
+            cache_buf = zml.Bufferized(engine.Cache){ .sl_k = r_slk, .sl_v = r_slv, .fl_k = r_flk, .fl_v = r_flv };
+            old_cache.sl_k.deinit();
+            old_cache.sl_v.deinit();
+            old_cache.fl_k.deinit();
+            old_cache.fl_v.deinit();
+
+            // D2H : sortie de couche à cette position — comparée à l'oracle, et hidden de la
+            // couche suivante (chaîne : le moteur consomme SA propre sortie, roundtrip f32 exact).
+            var got_s = try r_hid.toSliceAlloc(allocator, io);
+            defer got_s.free(allocator);
+            const got = got_s.items(f32);
+            if (got.len != n_row) {
+                log.err("u6 : stage L{d} step {d} — {d} f32 != {d}", .{ li, step, got.len, n_row });
+                return error.GateFailed;
+            }
+            const exp_row = exp_host[li][step * n_row .. (step + 1) * n_row];
+            for (got, exp_row, 0..) |g, e, i| {
+                const d = @abs(@as(f64, g) - @as(f64, e));
+                stats[li].sum_abs += d;
+                if (d > stats[li].max_abs) {
+                    stats[li].max_abs = d;
+                    stats[li].max_step = step;
+                    stats[li].max_i = i;
+                    stats[li].got = g;
+                    stats[li].exp = e;
+                }
+            }
+            stats[li].n += n_row;
+            @memcpy(hid_next[step * n_row .. (step + 1) * n_row], got);
+
+            r_hid.deinit();
+            hidden_buf.deinit();
+            step_buf.deinit();
+            call_args.deinit(allocator);
+            call_results.deinit(allocator);
+        }
+        @memcpy(hid_host, hid_next);
+    }
+    cache_buf.sl_k.deinit();
+    cache_buf.sl_v.deinit();
+    cache_buf.fl_k.deinit();
+    cache_buf.fl_v.deinit();
+
+    // --- Verdicts par couche (profondeur de chaîne) + chaîne (== L5) ---
+    var failed = false;
+    inline for (0..G12U6.num_layers) |li| {
+        const st_li = stats[li];
+        const mean_abs = st_li.sum_abs / @as(f64, @floatFromInt(st_li.n));
+        if (st_li.max_abs <= U6_MAX_ABS) {
+            log.info("    L{d} ({s}) : max_abs={e:.3} mean_abs={e:.3} ({d} f32) OK", .{ li, U6_LAYERS[li].kind, st_li.max_abs, mean_abs, st_li.n });
+        } else {
+            log.err("    L{d} ({s}) : FAIL max_abs={e:.3} > seuil {e:.1} (mean_abs={e:.3}) — pire écart step {d} idx {d} : got={e:.6} expected={e:.6}", .{ li, U6_LAYERS[li].kind, st_li.max_abs, U6_MAX_ABS, mean_abs, st_li.max_step, st_li.max_i, st_li.got, st_li.exp });
+            failed = true;
+        }
+    }
+    const chain = stats[G12U6.num_layers - 1];
+    if (failed or chain.max_abs > U6_MAX_ABS) {
+        log.err("u6 : FAIL — un dépassement du seuil {e:.1} est un FAIL, pas une renégociation (§3 U6)", .{U6_MAX_ABS});
+        return error.GateFailed;
+    }
+    log.info("PASS u6 — couche 0 complète (layer_scalar consommé du checkpoint) + chaîne L0→L5 via le MOTEUR (forwardStageGen/Geom tronqué, branche D4 en graphe, placeholder v_proj [1] prouvé par compile) : chaîne max_abs={e:.3} <= {e:.1}", .{ chain.max_abs, U6_MAX_ABS });
+}
+
 // ---------------------------------------------------------------------------- main
 
 pub fn main(init: std.process.Init) !void {
@@ -908,6 +1296,12 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingArgument;
         }
         try gateU5(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
+    } else if (std.mem.eql(u8, mode, "u6")) {
+        if (process_args.len < 4) {
+            log.err("{s}", .{usage});
+            return error.MissingArgument;
+        }
+        try gateU6(allocator, arena.allocator(), io, platform, sharding, process_args[2], process_args[3]);
     } else {
         log.err("mode inconnu '{s}' — {s}", .{ mode, usage });
         return error.MissingArgument;

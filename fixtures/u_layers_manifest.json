@@ -1,0 +1,115 @@
+{
+  "source": "67_u6_layers_oracle.py (Task 6, plan J2 — Amendement 2 + arbitrage 23618bb)",
+  "oracle": "6x Gemma4TextDecoderLayer(text_config, layer_idx=0..5) RÉELS, poids export dq (D9), modules f32 (flux moteur bf16->f32, précédent déclaré U3/U5) ; expected = SORTIE de chaque couche, ENCHAÎNÉE (out_l{i} = entrée de la couche i+1) ; couche 0 seule == premier maillon (même entrée : hidden) ; chaîne == out_l5 ; layer_scalar chargé du checkpoint par load_state_dict strict et appliqué par le module réel (hidden *= layer_scalar, fin de couche)",
+  "mask": "create_sliding_window_causal_mask / create_causal_mask (transformers 5.14, mask_kwargs du forward Gemma4TextModel) — S=8 : sliding == causal BIT-ÉGAL (asserté ; fenêtre 1024 non mordante) => le gate moteur two_masks=false (une table causale) est licite",
+  "layouts": {
+    "hidden": "[1,8,3840] bf16 (graine consignée, modules nourris en f32)",
+    "out_l0..out_l5": "[1,8,3840] f32 — sortie de couche i de la CHAÎNE (layer_scalar inclus)"
+  },
+  "geometry": {
+    "chain": "L0-L4 sliding (GQA 8KVx256 groupe 2, rope default 1e4) + L5 full (MQA 1KVx512 K=V, p-RoPE proportional 1e6 partial 0.25)",
+    "layer_scalar": "buffer [1] bf16 par couche, applique en sortie de couche",
+    "ple": 0,
+    "moe": false,
+    "d": 3840,
+    "inter": 15360
+  },
+  "seed": 1337,
+  "seq_len": 8,
+  "thresholds": {
+    "u6_max_abs": 0.001,
+    "note": "§3 U6 : max_abs <= 1e-3 par couche ET chaîne — resserrable au vu de l'oracle, JAMAIS élargissable ; un dépassement = FAIL"
+  },
+  "layer_scalar_distribution": {
+    "n": 48,
+    "values": [
+      0.054443359375,
+      0.18359375,
+      0.283203125,
+      0.52734375,
+      0.40625,
+      0.365234375,
+      0.357421875,
+      0.3203125,
+      0.234375,
+      0.1376953125,
+      0.13671875,
+      0.0037384033203125,
+      0.6953125,
+      0.65625,
+      0.8984375,
+      0.625,
+      0.73828125,
+      0.73828125,
+      0.70703125,
+      0.765625,
+      0.62109375,
+      0.734375,
+      0.7421875,
+      0.73046875,
+      0.80859375,
+      0.84375,
+      0.68359375,
+      0.69140625,
+      0.6484375,
+      0.58984375,
+      0.71875,
+      0.71484375,
+      0.5859375,
+      0.6328125,
+      0.73046875,
+      0.75,
+      0.80078125,
+      0.8515625,
+      0.80078125,
+      0.83984375,
+      0.78515625,
+      0.78515625,
+      0.87890625,
+      0.87109375,
+      0.84765625,
+      0.80078125,
+      0.71875,
+      0.049560546875
+    ],
+    "min": 0.0037384033203125,
+    "max": 0.8984375,
+    "all_ones": false,
+    "n_not_one": 48,
+    "used_by_chain_l0_l5": [
+      0.054443359375,
+      0.18359375,
+      0.283203125,
+      0.52734375,
+      0.40625,
+      0.365234375
+    ]
+  },
+  "points_fixes": {
+    "out_l0[0,0,:3]": [
+      3.4404032230377197,
+      0.05661148577928543,
+      4.759835243225098
+    ],
+    "out_l0[0,7,:3]": [
+      1.1446083784103394,
+      0.7567577958106995,
+      6.126290321350098
+    ],
+    "out_l5[0,0,:3]": [
+      0.006940539460629225,
+      -0.030324751511216164,
+      -0.36582615971565247
+    ],
+    "out_l5[0,7,:3]": [
+      -0.01599075086414814,
+      0.38493892550468445,
+      -0.7023385763168335
+    ]
+  },
+  "pass": "gate u6 (MOTEUR — arbitrage 23618bb) : chaîne via forwardStageGen/Geom tronqué 6 couches (runLayerGen partagé), branche k_eq_v_full DANS le graphe sur L5, placeholder v_proj [1] non consommé (preuve = compile) ; comparaison par couche (profondeur de chaîne) + chaîne au seuil 1e-3",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0+cu130"
+  }
+}
