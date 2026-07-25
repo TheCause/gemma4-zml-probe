@@ -516,6 +516,17 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# J2 Task 8 — runner décode 12B complet (GPU). Clone ciblé de gemma4_w4auto (duplication
+# assumée, précédent bbs) : G12Model deux-slices (g12.zig), K=V full (D4), cache linéaire
+# L_MAX=1280, fenêtre par masque (R10). Nom 14c : quota comptime @typeName pjrt (piège 4).
+zig_binary(
+    name = "gemma4_g12auto",
+    main = "gemma4_g12auto.zig",
+    srcs = ["engine.zig", "mem_probe.zig", "w4.zig", "g12.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",
