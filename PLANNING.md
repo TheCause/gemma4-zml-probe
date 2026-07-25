@@ -61,18 +61,22 @@
   `docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md` ; plan exécuté
   `docs/superpowers/plans/2026-07-24-w4-j1-brique-e2b.md` ; chiffres 12B déjà en poche :
   328 linears g32, 9,56 GiB, VRAM projetée ~10-12 Go ; ⚠ 8 couches full sans v_proj).
-- [x] **Chantier W4-J2 — 12B `Gemma4Unified` : EXÉCUTÉ JUSQU'AU GATE FINAL U8 (24-25 juil 2026,
-  branche `w4-j2-12b` locale, meute)** : 17 gates verts (`gate/j2-u0-pass` … `gate/j2-u8-pass`) —
-  **Gemma 4 12B décode sur la 3090** : U8 = 42/48 brut **requalifié différentiel** (tie bf16 EXACT
-  gen=39 marge oracle 0.000000, 3 conditions J1, décision Régis `a4a6a3e` ; précédents A2/G2.0) ;
-  contre-test gate_proj ×100 conforme (A1Mismatch, divergence logits ×200 le bruit). Moteur : Geom
-  comptime (défauts e2b), neutralité E2B **HLO byte-identique** + témoins 48/48 (`gate/j2-u1-pass`).
-  Runner `gemma4_g12auto` : 18 tok/s, compile GPU 37,7 s, VRAM pic 16,7 GiB, template 12B (canal
-  thought). Oracle M4 CPU sur export dq (328/328 bit-exacts). Voie GPU-HF morte (Amendement 1) ;
-  protocole subagents durci (Amendement 2). Findings : q/k_norm full uniformes (QAT), ULP rope ∝
-  position s'annulant en relatif, layer_scalar ≠ 1, anomalie zml 31e compileFn. Plan + amendements :
-  `docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md`. **Reste : U9 (décode long — flags prêts),
-  U10 + `U_12B_RESULTS.md` + erratum spec + checklist §5.4 + PR (~1 session).**
+- [x] **Chantier W4-J2 — 12B `Gemma4Unified` : CLOS, 11 gates U0→U10 PASS (24-25 juil 2026,
+  branche `w4-j2-12b`, PR en cours)** — **Gemma 4 12B décode sur la 3090** : 1150 tokens stables
+  à **9,0 tok/s**, pic VRAM réel **16 680 MiB** (`--no-prealloc`, pic indépendant de la longueur ;
+  bf16 infaisable : 24 Go de poids seuls), fenêtre 1024 mordante prouvée in-process (divergence
+  exactement à q=1024). **Fidélité : == HF-fp32-même-checkpoint STRICT — 48/48 (U8 re-fondé) et
+  1150/1150 (U9-iv), zéro requalification.** L'événement du chantier = **Amendement 3 (recadrage
+  Régis)** : l'oracle bf16 (quantum 0.125) fabriquait des ties artificiels → requalifications en
+  cascade (U8 `a4a6a3e` SUPERSEDED) ; réparation = oracle **fp32 sur stockage bf16** (script 69
+  `--compute-fp32`, 626 hooks par-module — stockage ≠ arithmétique), 5× plus rapide que le bf16
+  émulé. Moteur : Geom comptime, neutralité E2B **HLO byte-identique** (`gate/j2-u1-pass`).
+  Contre-test gate_proj ×100 conforme (A1Mismatch, logits ×200). Findings : 12B hétérogène
+  (sliding GQA 16/8×256, full MQA 1×512 K=V sans v_proj — erratum spec §4.2), q/k_norm full
+  uniformes (QAT), leçon « instrument dégradé → requalifications en cascade » (mémoire + piège 21).
+  **Voir `docs/U_12B_RESULTS.md`** ; plan + 3 amendements :
+  `docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md`. Restes ouverts (backlog §9 : resserrer
+  U7 à l'oracle fp32 ; arène XLA ~6 Go).
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
