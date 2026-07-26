@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-26-masques-ingraph-design.md` (approuvée revue 2).
 
-**Référence gates :** M0 = mécanisme U1 (md5 HLO `before_optimizations`, module principal pré-désigné, comparaison exit code — recette dans le plan J2 Step 2.1 et l'historique 3090). M1/M2 = critères PR #13. Vacuité = mécanisme U9-ii adapté (rebind `window`).
+**Référence gates :** M0 = preuve HLO ENGINE_LOG:92 (`diff -rq` des dumps `--xla_dump_to`, 2 diffs bénins tolérés : `debug_options` + noms SSA `.ll` alpha-équivalents). M1/M2 = critères PR #13. Vacuité = mécanisme U9-ii adapté (rebind `window`).
 
 ---
 
@@ -38,7 +38,7 @@ Le code de la branche == main (seuls des docs ont été committés). Les témoin
 - [ ] **1.2** `Packed(comptime mode: MaskMode)` : `.single` = ancien `Packed(false)` inchangé ; `.tables` = ancien `Packed(true)` inchangé ; `.ingraph` = `.tables` sans `masks_sliding`/`masks_full`, avec `window: zml.Tensor` (`{}` i32) — `init` : `.window = v.createTensor("window", .{}, null)` (même si les runners 12B assemblent à la main, garder la symétrie), `load` identique.
 - [ ] **1.3** `EngineCfg` : `ingraph_masks: bool = false` + helper `pub fn maskMode(comptime cfg: EngineCfg) MaskMode` (`ingraph_masks` → `.ingraph`, sinon `two_masks` → `.tables`, sinon `.single`) + `@compileError` comptime si `ingraph_masks and !two_masks`.
 - [ ] **1.4** Remplacer `Packed(cfg.two_masks)` par `Packed(cfg.maskMode())` dans les 4 signatures forward (`:655,698,742,780`) et adapter les extractions `mask_single`/`mask_sliding`/`mask_full` en branches comptime à 3 cas (le cas `.ingraph` renvoie `{}` pour l'instant — génération en Task 2).
-- [ ] **1.5** Migration call-sites : `Packed(false)` → `Packed(.single)` (e1, e2, g12gate), `Packed(true)` → `Packed(.tables)` (bench, bbatch, g23_sweep, g12auto). Vérif : `grep -rn "Packed(true)\|Packed(false)" zml_runner/` = 0.
+- [ ] **1.5** Migration call-sites : `Packed(false)` → `Packed(.single)` (les 8 sites `.single` de la liste Files), `Packed(true)` → `Packed(.tables)` (les 13 fichiers `.tables` de la liste Files). Vérif : `grep -rn "Packed(true)\|Packed(false)" zml_runner/` = 0.
 - [ ] **1.6** `gemma4_g12auto.zig` : remplacer le `MASK_MIN` local par `engine.MASK_MIN` (une source).
 - [ ] **1.7** Commit : `feat(engine): Packed(MaskMode) — 3e variant .ingraph (window scalaire runtime), migration mécanique des call-sites`.
 
@@ -93,7 +93,7 @@ fn ingraphMaskLines(comptime kmax_sl: i64, comptime kmax_fl: i64, positions: zml
 - [ ] **3.1** Deploy (mêmes précautions que 0.2), rebuild les 4 cibles témoins (e1, e2 `.single` ; g12auto, gen_auto `.tables`) avec dump HLO → `m0_hlo_after/` ; comparaison `diff -rq` before/after par cible — seuls les 2 diffs bénins documentés tolérés (ENGINE_LOG:92). Tout fichier HLO qui bouge = FAIL M0 → STOP (règle d'arrêt spec §5).
 - [ ] **3.2** Builds verts de **TOUS** les runners migrés (R3 spec : « tous les runners two_masks avant merge ») : `gemma4_engine_e1`, `gemma4_engine_e2`, `gemma4_g12gate`, `gemma4_bench`, `gemma4_bbatch`, `gemma4_g23_sweep`, `gemma4_g12auto`, `gemma4_g12a4k`, `gemma4_gen_auto`, `gemma4_gchunk_auto`, `gemma4_gchunk`, `gemma4_gchunk_vacuity`, `gemma4_gchunk_ring`, `gemma4_gen_long`, `gemma4_gen_long_gpu`, `gemma4_vacuity_logits`, `gemma4_w4auto` (cuda=true pour les cibles GPU).
 - [ ] **3.2b** Runs bon marché du chemin `.single` : e1 et e2 (CPU) re-PASS — valide `.single` au-delà du HLO.
-- [ ] **3.3** Commit + tag `gate/mi-m0-pass` (message avec les md5).
+- [ ] **3.3** Commit + tag `gate/mi-m0-pass` (message avec le verdict `diff -rq` par cible).
 
 ## Task 4 : Bascule g12auto en ingraph
 
