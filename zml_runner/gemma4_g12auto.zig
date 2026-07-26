@@ -5,10 +5,12 @@
 // Le forward compilé = `G12Step.forward` : assemble PAR VALEUR un Model moteur (48 couches,
 // g12.G12Model.toLayerW — dequantW4 in-graph, v_proj full = placeholder [1] D4), embed = gather
 // + scale bf16 62.0 (chemin 12B, D12 — JAMAIS le scale moteur √3840), puis délègue à
-// `forwardStageGen(0, 48, first=false, last=true)` INCHANGÉ + topK — engine.zig est INTACT (0 octet).
-// Cache sliding LINÉAIRE .k=L_MAX (R10 : kmax_sliding est un champ mort sans ring=true,
-// engine.zig:530 — un cache court ferait des scatters hors bornes SILENCIEUX à p >= 1024) ;
-// la fenêtre 1024 est portée par le MASQUE seul (maskRows SW=1024).
+// `forwardStageGen(0, 48, first=false, last=true)` + topK.
+// Cache sliding LINÉAIRE .k=L_MAX (R10 : kmax_sliding sert le modulo ring ET les shapes des
+// masques in-graph — un cache court ferait des scatters hors bornes SILENCIEUX à p >= 1024) ;
+// la fenêtre 1024 est portée par le MASQUE seul, GÉNÉRÉ IN-GRAPH depuis positions[step] + le
+// scalaire runtime `window` (engine.ingraphMaskLines, spec 2026-07-26 — les tables host
+// {L_MAX,L_MAX} quadratiques sont SUPPRIMÉES ; maskRows ne sert plus qu'au selftest).
 //
 // CLI : gemma4_g12auto <model.safetensors (12B w4a16-ct, weights_12b)> <tokenizer.json> --prompt "..."
 //       [--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram]
@@ -16,8 +18,8 @@
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 // Mode --oracle : loggue en plus la marge top1−top2 par step de génération (protocole de flip W4g).
 // --dump-top5 : top-5 par step aussi en mode LIBRE (requis U9). --out-ids : ids générés →
-// safetensors (requis U9-ii/iv). --window-vacuity : replay teacher-forcé in-process, masque
-// sliding élargi rebindé en DONNÉES (U9-ii, pattern gemma4_vacuity_logits). --no-prealloc :
+// safetensors (requis U9-ii/iv). --window-vacuity : replay teacher-forcé in-process, fenêtre
+// élargie par rebind du scalaire `window` ← L_MAX en DONNÉES (U9-ii adapté in-graph). --no-prealloc :
 // preallocate=false pour mesure VRAM réelle (U10, mécanisme gemma4_gen_long_gpu).
 // ⚠ GPU : lancer avec `--@zml//platforms:cuda=true` sinon repli CPU silencieux.
 const std = @import("std");
@@ -29,12 +31,15 @@ const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit d
 
 pub const std_options: std.Options = .{ .log_level = .info };
 // ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
-// shapes du cache, des masques {L_MAX,L_MAX} et des tables RoPE — elle change le graphe tracé).
-// Pattern « paramètre comptime explicite » du couple bbs/bbatch (piège 18 : PAS de
-// @import("root") — la variante 4k importe ce fichier, root refermerait la boucle).
-// Défaut 1280 (U9 : 1150 gen + prompt). Variante 4k : gemma4_g12a4k.zig → G12Auto(4096).
-// Coût 4096 (probe 26 juil, == HF-fp32 4000/4000) : pic VRAM 22 234 MiB (masques quadratiques
-// — 8k infaisable avec ce design), 8,2 tok/s (−9 %).
+// shapes du cache, des masques in-graph {k=L_MAX} et des tables RoPE — elle change le graphe
+// tracé). Pattern « paramètre comptime explicite » du couple bbs/bbatch (piège 18 : PAS de
+// @import("root") — les variantes 4k/8k importent ce fichier, root refermerait la boucle).
+// Défaut 1280 (U9 : 1150 gen + prompt). Variantes : gemma4_g12a4k.zig → G12Auto(4096),
+// gemma4_g12a8k.zig → G12Auto(8192).
+// Coût 4096 ère TABLES (probe 26 juil, == HF-fp32 4000/4000) : pic VRAM 22 234 MiB, 8,2 tok/s
+// (−9 %) — les masques {L_MAX,L_MAX} quadratiques rendaient 8k infaisable ; depuis la spec
+// masques in-graph (2026-07-26), TOUT est linéaire en L_MAX (chiffres à jour : résultats du
+// chantier masks-ingraph).
 pub fn G12Auto(comptime L_MAX: i64) type {
 return struct {
 
@@ -58,8 +63,8 @@ const NUM_FULL_SLOTS: usize = blk: {
     @setEvalBranchQuota(100_000);
     break :blk @intCast(g12.g12.fullSlot(g12.g12.num_layers)); // 8
 };
-const Model = engine.EngineModel(struct {}, .{ .geom = g12.g12, .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const Model = engine.EngineModel(struct {}, .{ .geom = g12.g12, .two_masks = true, .ingraph_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
+const PackedLong = engine.Packed(.ingraph);
 
 // BOS (id 2) : PRÉFIXÉ explicitement — l'encoder ZML (iree, cf zml/tokenizer/tokenizer.zig)
 // n'ajoute AUCUN token spécial (constat Task 0 : ids ZML == ids HF sans template, modulo ce préfixe).
@@ -213,8 +218,10 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
 // ============================================================================================
 
 // Masques additifs f32 : 0 = visible, -floatMax = masqué (== torch.finfo(float32).min — même
-// valeur binaire : le plus grand f32 fini, négé, des deux côtés).
-const MASK_MIN: f32 = -std.math.floatMax(f32);
+// valeur binaire : le plus grand f32 fini, négé, des deux côtés). Source unique : engine.MASK_MIN
+// (les masques du RUNTIME sont générés in-graph par le moteur ; maskRows ci-dessous ne sert plus
+// que de RÉFÉRENCE host au selftest — spec masques in-graph 2026-07-26 §4.5).
+const MASK_MIN: f32 = engine.MASK_MIN;
 
 // Coefficients RoPE "proportional" (couches full_attention) — formule COPIÉE de
 // transformers/modeling_rope_utils.py::_compute_proportional_rope_parameters (lue sur la 3090,
@@ -299,8 +306,9 @@ fn maskRows(p: i64, sliding_out: []f32, full_out: []f32) void {
 const HostInputs = struct {
     cos_full: []f32, // {L_MAX, HD_F}
     sin_full: []f32, // {L_MAX, HD_F}
-    masks_sliding: []f32, // {L_MAX, L_MAX} — fenêtre 1024 portée par CE masque seul (R10)
-    masks_full: []f32, // {L_MAX, L_MAX}
+    // (masks_sliding/masks_full {L_MAX,L_MAX} SUPPRIMÉS — masques générés in-graph, la fenêtre
+    //  1024 est portée par le scalaire runtime `window` du Packed(.ingraph). Gain : 2×O(L²) f32
+    //  host+device. Spec 2026-07-26 §4.4.)
     positions: []i32, // {L_MAX} = 0..L_MAX-1
     embeds_zero: []u8, // {L_MAX, 1, 1, D} bf16, zéros — factice, non consommé (first=false)
     embptls_zero: []u8, // {L_MAX, 1, 1, LF=1} bf16, zéros — FACTICE (ple_dim=0, ~2,6 Ko)
@@ -317,10 +325,6 @@ const HostInputs = struct {
         errdefer allocator.free(cos_full);
         const sin_full = try allocator.alloc(f32, l_max * hd_f);
         errdefer allocator.free(sin_full);
-        const masks_sliding = try allocator.alloc(f32, l_max * l_max);
-        errdefer allocator.free(masks_sliding);
-        const masks_full = try allocator.alloc(f32, l_max * l_max);
-        errdefer allocator.free(masks_full);
         const positions = try allocator.alloc(i32, l_max);
         errdefer allocator.free(positions);
 
@@ -333,7 +337,6 @@ const HostInputs = struct {
             ropeFull(p, &cos_row, &sin_row);
             @memcpy(cos_full[idx * hd_f .. (idx + 1) * hd_f], &cos_row);
             @memcpy(sin_full[idx * hd_f .. (idx + 1) * hd_f], &sin_row);
-            maskRows(p, masks_sliding[idx * l_max .. (idx + 1) * l_max], masks_full[idx * l_max .. (idx + 1) * l_max]);
         }
 
         const embeds_zero = try allocator.alloc(u8, l_max * @as(usize, @intCast(D)) * 2);
@@ -361,8 +364,6 @@ const HostInputs = struct {
         return .{
             .cos_full = cos_full,
             .sin_full = sin_full,
-            .masks_sliding = masks_sliding,
-            .masks_full = masks_full,
             .positions = positions,
             .embeds_zero = embeds_zero,
             .embptls_zero = embptls_zero,
@@ -376,8 +377,6 @@ const HostInputs = struct {
     fn deinit(self: *HostInputs, allocator: std.mem.Allocator) void {
         allocator.free(self.cos_full);
         allocator.free(self.sin_full);
-        allocator.free(self.masks_sliding);
-        allocator.free(self.masks_full);
         allocator.free(self.positions);
         allocator.free(self.embeds_zero);
         allocator.free(self.embptls_zero);
@@ -430,7 +429,10 @@ fn cosSinTol(p: i32) f32 {
 //   - cos/sin : lignes de la table `HostInputs` à l'index p (donc `ropeFull` ET la construction
 //     de la table {L_MAX,…} sont toutes les deux exercées) vs cos_full/sin_full[k] — écart par
 //     step ≤ cosSinTol(p) (tolérance position-dépendante, cf dérivation sur `cosSinTol`).
-//   - masques : idem vs masks_sliding/masks_full[k] — égalité BIT-EXACTE (valeurs ∈ {0, MASK_MIN}).
+//   - masques : lignes RECALCULÉES à la volée par maskRows(p) (2 scratch L_MAX — plus de table
+//     O(L²) : le runtime les génère in-graph, maskRows est la référence host de la SPEC du masque ;
+//     l'équivalence du GRAPHE est prouvée par les gates M1/M2) vs masks_sliding/masks_full[k] —
+//     égalité BIT-EXACTE (valeurs ∈ {0, MASK_MIN}).
 //   - positions : continuité (positions[k] == positions[0] + k, i.e. p = seq_len + k avec
 //     seq_len = positions[0], lu de la fixture — pas besoin du manifest JSON séparé).
 fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
@@ -464,6 +466,10 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
 
     var host = try HostInputs.init(allocator);
     defer host.deinit(allocator);
+    const scratch_sl = try allocator.alloc(f32, l_max);
+    defer allocator.free(scratch_sl);
+    const scratch_fl = try allocator.alloc(f32, l_max);
+    defer allocator.free(scratch_fl);
 
     var max_abs: f32 = 0;
     var max_ratio: f32 = 0; // max sur les steps de (écart / cosSinTol(p)) — critère de PASS : ≤ 1
@@ -501,13 +507,12 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
             }
         }
 
-        const sl_row = host.masks_sliding[pi * l_max .. (pi + 1) * l_max];
-        const fl_row = host.masks_full[pi * l_max .. (pi + 1) * l_max];
+        maskRows(p, scratch_sl, scratch_fl); // référence host recalculée à la volée (spec §4.5)
         const sl_fx_row = masks_sliding_fx[k * l_max .. (k + 1) * l_max];
         const fl_fx_row = masks_full_fx[k * l_max .. (k + 1) * l_max];
         for (0..l_max) |j| {
-            if (sl_row[j] != sl_fx_row[j]) masks_bitexact = false;
-            if (fl_row[j] != fl_fx_row[j]) masks_bitexact = false;
+            if (scratch_sl[j] != sl_fx_row[j]) masks_bitexact = false;
+            if (scratch_fl[j] != fl_fx_row[j]) masks_bitexact = false;
         }
     }
 
@@ -661,10 +666,11 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 // Compile UNE FOIS le mono-graphe `G12Step.forward`, qui compose : gather (`m12.embed_tokens`)
 // → scale bf16 62.0 (chemin 12B, D12/mode u2) → `Model.forwardStageGen(0, 48, first=false,
 // last=true)` INCHANGÉ (engine.zig:698 — runLayerGen partagé, branche D4 K=V dans le graphe)
-// → `topK(.voc, 5)`. Packed(true)/Cache SYMBOLIQUES construits À LA MAIN :
-//   - cos_full/sin_full/masks_sliding/masks_full/positions : RÉELLEMENT consommés (indexés par
-//     `ctrl.step` == position absolue p, cf pickStep) — remplis depuis HostInputs.
-//   - embeds/embptls du Packed symbolique : déclarés (le type Packed(true) a 7 champs) mais
+// → `topK(.voc, 5)`. Packed(.ingraph)/Cache SYMBOLIQUES construits À LA MAIN :
+//   - cos_full/sin_full/positions : RÉELLEMENT consommés (indexés par `ctrl.step` == position
+//     absolue p, cf pickStep) — remplis depuis HostInputs. `window` : scalaire {} i32 = 1024
+//     (les masques sont GÉNÉRÉS in-graph depuis positions[step] + window, engine.ingraphMaskLines).
+//   - embeds/embptls du Packed symbolique : déclarés (le type Packed(.ingraph) a 6 champs) mais
 //     MORTS au graphe (first=false → hidden = hidden_in ; ple_dim=0 → PLE comptime-mort) —
 //     remplis avec les tables zéro de HostInputs (embptls LF=1 factice), jamais consommés.
 //   - Cache initial : zéro (Bufferized construit par zml.Buffer.fromBytes depuis les zéros host).
@@ -1001,7 +1007,7 @@ pub fn run(init: std.process.Init) !void {
     const model: g12.G12Model = try .init(arena.allocator(), base);
 
     // Symboliques construits À LA MAIN (pas de fixture de store, cf tête de section) — mêmes shapes
-    // que engine.Packed(true)/engine.Cache.
+    // que engine.Packed(.tables)/engine.Cache.
     const tok_sym = zml.Tensor.init(.{ 1, 1 }, .u32).withTags(.{ .b, .s });
     // Repli si le gather rank-2 ne compile pas (P5.4 n'a validé que des ids 1-D) : `tok_sym` en
     // `{ .s }` shape `[1]`, puis dans G12Step.forward : `.gather(.{ .voc = tok }).reshape(.{ 1, 1, D }).withTags(.{ .b, .s, .d })` (reshape layout-preserving + re-tag, piège ZML #1 connu).
@@ -1013,9 +1019,10 @@ pub fn run(init: std.process.Init) !void {
         .embptls = zml.Tensor.init(.{ L_MAX, 1, 1, LF }, .bf16).withTags(.{ .step, .b, .s, .lf }),
         .cos_full = zml.Tensor.init(.{ L_MAX, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
         .sin_full = zml.Tensor.init(.{ L_MAX, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
-        .masks_sliding = zml.Tensor.init(.{ L_MAX, 1, 1, 1, L_MAX }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
-        .masks_full = zml.Tensor.init(.{ L_MAX, 1, 1, 1, L_MAX }, .f32).withTags(.{ .step, .b, .h, .q, .k }),
         .positions = zml.Tensor.init(.{L_MAX}, .i32).withTags(.{.step}),
+        // Fenêtre glissante en DONNÉE runtime ({} i32) — les masques sont générés in-graph par le
+        // moteur (ingraphMaskLines) ; rebindable (contre-test de vacuité : window ← L_MAX).
+        .window = zml.Tensor.init(.{}, .i32),
     };
     // GQA 12B (D5) : le cache sliding porte kvh=8 têtes KV (h=KVH_SL) ; full MQA h=KVH_FL=1.
     // Cache LINÉAIRE .k=L_MAX (R10) — la fenêtre 1024 est portée par le masque, PAS par la dim.
@@ -1040,10 +1047,10 @@ pub fn run(init: std.process.Init) !void {
         .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, host.embptls_zero),
         .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(host.cos_full)),
         .sin_full = try zml.Buffer.fromBytes(io, platform, packed_sym.sin_full.shape(), sharding, std.mem.sliceAsBytes(host.sin_full)),
-        .masks_sliding = try zml.Buffer.fromBytes(io, platform, packed_sym.masks_sliding.shape(), sharding, std.mem.sliceAsBytes(host.masks_sliding)),
-        .masks_full = try zml.Buffer.fromBytes(io, platform, packed_sym.masks_full.shape(), sharding, std.mem.sliceAsBytes(host.masks_full)),
         .positions = try zml.Buffer.fromBytes(io, platform, packed_sym.positions.shape(), sharding, std.mem.sliceAsBytes(host.positions)),
+        .window = try zml.Buffer.scalar(io, platform, @as(i32, @intCast(SLIDING_WINDOW)), .i32, sharding),
     };
+    comptime std.debug.assert(SLIDING_WINDOW > 0); // garde runtime-window (spec §4.1)
     var cache_buf = zml.Bufferized(engine.Cache){
         .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, host.cache_sl_k),
         .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, host.cache_sl_v),
@@ -1097,15 +1104,17 @@ pub fn run(init: std.process.Init) !void {
             }
             fed_seq[ids.items.len + k] = @intCast(t);
         }
-        // Masque élargi rebindé en DONNÉES : seul masks_sliding change (contenu causal plein).
+        // Fenêtre élargie rebindée en DONNÉES : seul le scalaire `window` change (← L_MAX : la
+        // condition basse j >= p-(window-1) devient toujours vraie → sliding dégénère en causal
+        // plein, exactement l'effet de l'ancien rebind masks_sliding ← masks_full). MÊME
+        // executable, UNE compile — mécanisme U9-ii adapté in-graph (spec 2026-07-26 §4.5).
         const pk_wide = zml.Bufferized(PackedLong){
             .embeds = pk_buf.embeds,
             .embptls = pk_buf.embptls,
             .cos_full = pk_buf.cos_full,
             .sin_full = pk_buf.sin_full,
-            .masks_sliding = try zml.Buffer.fromBytes(io, platform, packed_sym.masks_sliding.shape(), sharding, std.mem.sliceAsBytes(host.masks_full)),
-            .masks_full = pk_buf.masks_full,
             .positions = pk_buf.positions,
+            .window = try zml.Buffer.scalar(io, platform, @as(i32, @intCast(L_MAX)), .i32, sharding),
         };
         const voc_us: usize = @intCast(vocab_wv);
         const logits_p1 = try allocator.alloc(u32, s_total * voc_us); // bits f32 (compare BIT, pas de tolérance)

@@ -32,7 +32,7 @@ const S: i64 = 1;
 const D: i64 = 1536;
 // G1 : fp32 (PrecRt défaut tout-null, `self.prec` non touché) — on n'active PAS le bf16 (c'est G2).
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 
 const ExpW = struct {
     e: zml.Tensor,

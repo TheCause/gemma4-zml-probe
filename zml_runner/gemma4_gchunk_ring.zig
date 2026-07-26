@@ -36,7 +36,7 @@ const D: i64 = 1536;
 
 // L1b : ring 512 + masque circulaire. kmax_full reste L_MAX (full jamais fenêtré).
 const Model = engine.EngineModel(struct {}, .{ .ring = true, .two_masks = true, .kmax_sliding = 512, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 const StageOut = struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor };
 
 const Stage = struct { start: usize, end: usize, first: bool, last: bool };

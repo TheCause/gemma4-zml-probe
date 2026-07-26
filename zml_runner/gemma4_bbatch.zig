@@ -49,7 +49,7 @@ const NUM_FULL_SLOTS: usize = 3;
 fn ModelWith(comptime attn: engine.AttnKind) type {
     return engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX, .attn = attn });
 }
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 
 // K du topK in-graph — CONSIGNÉ dans les logs (confound pré-enregistré du gate B4 : gen_auto est
 // aussi à K=5, donc les runs appariés B=1 sont comparables sans re-run K, spec §3.2).

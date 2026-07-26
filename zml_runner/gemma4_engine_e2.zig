@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     // Brique symbolique — sert à charger les constantes depuis store_fx.
     const brick_sym: TurboQuantVBrick = .init(fixture_view);
 
-    const packed_in: engine.Packed(false) = .init(fixture_view);
+    const packed_in: engine.Packed(.single) = .init(fixture_view);
     const cache0: engine.Cache = .init(fixture_view);
     const ctrl_sym: engine.Ctrl = .initSymbolic();
 

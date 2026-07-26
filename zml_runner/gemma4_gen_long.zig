@@ -21,7 +21,7 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const L_MAX: i64 = 1024; // réduit de 2048 : pic compile .k=2048 (~34Go) > hôte 32Go → swap thrash. 1024 franchit 512.
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 
 // Séquence attendue (HF), lue côté host ; `len` = NUM_STEPS (dynamique).
 const ExpW = struct {
