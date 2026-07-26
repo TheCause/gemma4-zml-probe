@@ -77,6 +77,11 @@
   **Voir `docs/U_12B_RESULTS.md`** ; plan + 3 amendements :
   `docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md`. Restes ouverts (backlog §9 : resserrer
   U7 à l'oracle fp32 ; arène XLA ~6 Go).
+- [x] **Contexte long 12B — variante 4k : LIVRÉE (26 juil 2026, PR #13 mergée)** :
+  `G12Auto(comptime L_MAX)` (pattern bbs/bbatch), défaut 1280 **prouvé bit-identique**, cible
+  `gemma4_g12a4k` (4096) **== HF-fp32 STRICT sur 4041 positions** (4000/4000 teacher-forcé
+  oracle fp32, marge min 0,81) ; 8,2 tok/s, pic VRAM réel 22 234 MiB. ⚠ Mur documenté :
+  masques `{L_MAX,L_MAX}` quadratiques → 8k exige des masques in-graph (backlog).
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
