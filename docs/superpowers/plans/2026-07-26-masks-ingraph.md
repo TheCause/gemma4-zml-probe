@@ -22,7 +22,7 @@ Le code de la branche == main (seuls des docs ont été committés). Les témoin
 
 - [ ] **0.1** Vérifier la 3090 libre : `nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv` (garde-fou contention Ollama).
 - [ ] **0.2** Deploy propre : `ZML_REMOTE=<user@gpu-host> ZML_DST=/data/rqz_workspace/zml/examples/rqz zml_runner/deploy_to_3090.sh` — vérifier la sortie rsync NON vide (piège deploy silencieux).
-- [ ] **0.3** Dump HLO témoin M0 (recette U1) : builds `gemma4_gen_auto` (E2B, `.single`) et `gemma4_g12auto` (`.tables`) avec dump `before_optimizations` → `md5sum` des modules principaux enregistrés dans un fichier de travail 3090 (`/data/gemma4-zml-probe/m0_md5_before.txt`).
+- [ ] **0.3** Dump HLO témoin M0 (recette U1/ENGINE_LOG:92 — dumps `--xla_dump_to`, `diff -rq`, 2 diffs bénins tolérés : `debug_options` + noms SSA `.ll` alpha-équivalents) pour les DEUX chemins migrés : `gemma4_engine_e1`/`gemma4_engine_e2` (**`.single`** — mécanisme U1 historique, CPU) et `gemma4_g12auto` + `gemma4_gen_auto` (**`.tables`** — gen_auto:51 est `Packed(true)`, PAS `.single`). Dumps archivés `/data/gemma4-zml-probe/m0_hlo_before/`.
 - [ ] **0.4** Run témoin M1 : `gemma4_g12auto` free-run 48 tokens, MÊME protocole que le run « défaut 1280 bit-identique » de PR #13 (relire le message du commit `85ed329` + ENGINE_LOG pour prompt/flags exacts), `--out-ids /data/gemma4-zml-probe/mi_witness_1280_ids.safetensors`.
 - [ ] **0.5** Run témoin M2 : `gemma4_g12a4k`, préfixe 300 tokens (protocole PR #13 variante), `--out-ids /data/gemma4-zml-probe/mi_witness_4k_ids.safetensors`.
 - [ ] **0.6** Rapatrier les 2 fichiers ids + md5 dans `logs/` (M1, non versionné : `logs/` est l'archive locale du repo).
@@ -31,7 +31,8 @@ Le code de la branche == main (seuls des docs ont été committés). Les témoin
 
 **Files:**
 - Modify: `zml_runner/engine.zig:307-363` (Packed), `:382-397` (EngineCfg), signatures `:655,698,742,780`
-- Modify (migration mécanique) : `gemma4_engine_e1.zig:70`, `gemma4_engine_e2.zig:84`, `gemma4_g12gate.zig` (occurrences `Packed(false)`), `gemma4_bench.zig:28`, `gemma4_bbatch.zig:52`, `gemma4_g23_sweep.zig:45`, `gemma4_g12auto.zig:62`
+- Modify (migration mécanique `.single`) : `gemma4_engine_e1.zig:70`, `gemma4_engine_e2.zig:84`, `gemma4_g12gate.zig` (×6 : 1027/1141/1161/1401/1546/1564)
+- Modify (migration mécanique `.tables`) : `gemma4_bench.zig:28`, `gemma4_bbatch.zig:52`, `gemma4_g23_sweep.zig:45`, `gemma4_g12auto.zig:62`, `gemma4_gchunk_auto.zig:37`, `gemma4_gchunk.zig:42`, `gemma4_gchunk_vacuity.zig:50`, `gemma4_gchunk_ring.zig:39`, `gemma4_gen_long.zig:24`, `gemma4_gen_long_gpu.zig:35`, `gemma4_gen_auto.zig:51`, `gemma4_vacuity_logits.zig:44`, `gemma4_w4auto.zig:39`
 
 - [ ] **1.1** `engine.zig` : ajouter `pub const MaskMode = enum { single, tables, ingraph };` et `pub const MASK_MIN: f32 = -std.math.floatMax(f32);`.
 - [ ] **1.2** `Packed(comptime mode: MaskMode)` : `.single` = ancien `Packed(false)` inchangé ; `.tables` = ancien `Packed(true)` inchangé ; `.ingraph` = `.tables` sans `masks_sliding`/`masks_full`, avec `window: zml.Tensor` (`{}` i32) — `init` : `.window = v.createTensor("window", .{}, null)` (même si les runners 12B assemblent à la main, garder la symétrie), `load` identique.
@@ -89,14 +90,15 @@ fn ingraphMaskLines(comptime kmax_sl: i64, comptime kmax_fl: i64, positions: zml
 
 ## Task 3 : Gate M0 — neutralité (3090)
 
-- [ ] **3.1** Deploy (mêmes précautions que 0.2), rebuild les cibles témoins avec dump HLO → `m0_md5_after.txt` ; comparaison : `diff m0_md5_before.txt m0_md5_after.txt` **exit 0**. Un md5 qui bouge = FAIL M0 → STOP (règle d'arrêt spec §5).
-- [ ] **3.2** Builds verts de TOUS les runners migrés : `bazel.sh build` sur `gemma4_engine_e1`, `gemma4_engine_e2`, `gemma4_g12gate`, `gemma4_bench`, `gemma4_bbatch`, `gemma4_g23_sweep`, `gemma4_g12auto`, `gemma4_g12a4k`, `gemma4_gen_auto` (cuda=true pour les cibles GPU).
+- [ ] **3.1** Deploy (mêmes précautions que 0.2), rebuild les 4 cibles témoins (e1, e2 `.single` ; g12auto, gen_auto `.tables`) avec dump HLO → `m0_hlo_after/` ; comparaison `diff -rq` before/after par cible — seuls les 2 diffs bénins documentés tolérés (ENGINE_LOG:92). Tout fichier HLO qui bouge = FAIL M0 → STOP (règle d'arrêt spec §5).
+- [ ] **3.2** Builds verts de **TOUS** les runners migrés (R3 spec : « tous les runners two_masks avant merge ») : `gemma4_engine_e1`, `gemma4_engine_e2`, `gemma4_g12gate`, `gemma4_bench`, `gemma4_bbatch`, `gemma4_g23_sweep`, `gemma4_g12auto`, `gemma4_g12a4k`, `gemma4_gen_auto`, `gemma4_gchunk_auto`, `gemma4_gchunk`, `gemma4_gchunk_vacuity`, `gemma4_gchunk_ring`, `gemma4_gen_long`, `gemma4_gen_long_gpu`, `gemma4_vacuity_logits`, `gemma4_w4auto` (cuda=true pour les cibles GPU).
+- [ ] **3.2b** Runs bon marché du chemin `.single` : e1 et e2 (CPU) re-PASS — valide `.single` au-delà du HLO.
 - [ ] **3.3** Commit + tag `gate/mi-m0-pass` (message avec les md5).
 
 ## Task 4 : Bascule g12auto en ingraph
 
 **Files:**
-- Modify: `zml_runner/gemma4_g12auto.zig` (`:61-62` cfg/PackedLong, `:296-380` HostInputs, `:428-516` selftest, `:1011-1019` packed_sym, `:1038-1046` pk_buf, `:1101-1109` pk_wide vacuity)
+- Modify: `zml_runner/gemma4_g12auto.zig` (`:61-62` cfg/PackedLong, `:299-380` HostInputs, `:428-516` selftest, `:1011-1019` packed_sym, `:1038-1046` pk_buf, `:1100-1109` pk_wide vacuity — boucle 2-passes `if (pass == 0) pk_buf else pk_wide` à `:1132`)
 
 - [ ] **4.1** `const Model = engine.EngineModel(struct {}, .{ .geom = g12.g12, .two_masks = true, .ingraph_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });` et `const PackedLong = engine.Packed(.ingraph);`.
 - [ ] **4.2** `HostInputs` : supprimer les allocs/remplissages `masks_sliding`/`masks_full` (et leurs `free`). `maskRows` RESTE (selftest 4.4).
