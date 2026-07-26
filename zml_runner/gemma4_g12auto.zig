@@ -28,10 +28,18 @@ const mem_probe = @import("mem_probe.zig");
 const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit derrière g12.zig)
 
 pub const std_options: std.Options = .{ .log_level = .info };
+// ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
+// shapes du cache, des masques {L_MAX,L_MAX} et des tables RoPE — elle change le graphe tracé).
+// Pattern « paramètre comptime explicite » du couple bbs/bbatch (piège 18 : PAS de
+// @import("root") — la variante 4k importe ce fichier, root refermerait la boucle).
+// Défaut 1280 (U9 : 1150 gen + prompt). Variante 4k : gemma4_g12a4k.zig → G12Auto(4096).
+// Coût 4096 (probe 26 juil, == HF-fp32 4000/4000) : pic VRAM 22 234 MiB (masques quadratiques
+// — 8k infaisable avec ce design), 8,2 tok/s (−9 %).
+pub fn G12Auto(comptime L_MAX: i64) type {
+return struct {
 
 // Géométrie : TOUT vient de Geom.g12 (garde anti-source-mixte, plan Task 8 point 10 — aucun
 // alias e2b du moteur (num_layers/embed-scale/têtes/dims historiques) ne doit être référencé ici).
-const L_MAX: i64 = 1280; // >= 1150 gen + prompt (U9)
 const SLIDING_WINDOW: i64 = 1024; // config.sliding_window 12B — portée par le MASQUE seul (R10)
 const HD_F: i64 = @intCast(g12.g12.hd_full); // 512 — dim cos/sin full (= config.global_head_dim)
 const HD_S: i64 = @intCast(g12.g12.hd_sliding); // 256 — dim cache sliding
@@ -810,7 +818,7 @@ fn writeIdsSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try f.writePositionalAll(io, std.mem.sliceAsBytes(data), 8 + header.len);
 }
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
     const allocator = init.gpa;
@@ -1411,4 +1419,11 @@ pub fn main(init: std.process.Init) !void {
             log.info("A3 : stop early-EOT après {d} tokens (dernier = EOT_ID={d})", .{ generated.items.len, eot_id });
         }
     }
+}
+
+};
+}
+
+pub fn main(init: std.process.Init) !void {
+    return G12Auto(1280).run(init);
 }

@@ -527,6 +527,16 @@ zig_binary(
     deps = ["//bazel", "//zml"],
 )
 
+# Variante L_MAX=4096 (contexte long) — point d'entrée mince sur G12Auto(4096), pattern
+# bbs/bbatch (paramètre comptime, piège 18). Pic VRAM 22,2 Go : réserver aux runs 4k.
+zig_binary(
+    name = "gemma4_g12a4k",
+    main = "gemma4_g12a4k.zig",
+    srcs = ["gemma4_g12auto.zig", "engine.zig", "mem_probe.zig", "w4.zig", "g12.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//bazel", "//zml"],
+)
+
 # G1 (P-GPU-1) — baseline fp32 sur GPU : force CUDA + timer tok/s + RSS. Calcul == L1a mono (PrecCfg défaut).
 zig_binary(
     name = "gemma4_gen_long_gpu",
