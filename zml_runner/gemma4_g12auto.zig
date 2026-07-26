@@ -800,7 +800,13 @@ const G12Step = struct {
         // Forme struct à un champ EXIGÉE par `Tensor.topK` (cf zml/nn.zig:1558, seul site d'appel
         // réel dans les sources ZML : `logits.topK(.{ .voc = .voc }, k, .{})`).
         const t5 = logits.topK(.{ .voc = .voc }, 5, .{});
-        return .{ t5.values, t5.indices, logits, slk, slv, flk, flv };
+        // DONATION des caches (spec 2026-07-26 cache-donation) : les 4 caches de sortie aliasent
+        // les buffers d'ENTRÉE (reuseBuffer → input_output_alias à la compile) — supprime le
+        // double-buffering (2×5,6 GiB à 8k, le mur M3). Contrat : le host ne relit JAMAIS un
+        // cache d'entrée après le call (la boucle et le vacuity rebindent/recréent — vérifié).
+        return .{ t5.values, t5.indices, logits,
+            slk.reuseBuffer(cache.sl_k), slv.reuseBuffer(cache.sl_v),
+            flk.reuseBuffer(cache.fl_k), flv.reuseBuffer(cache.fl_v) };
     }
 };
 
