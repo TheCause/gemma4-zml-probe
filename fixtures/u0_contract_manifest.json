@@ -1,0 +1,22 @@
+{
+  "source": "62_u0_contract.py \u2014 contrat 12B v\u00e9rifi\u00e9 sur pi\u00e8ce",
+  "snapshot": "1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee",
+  "packed": 328,
+  "full_layers": [
+    5,
+    11,
+    17,
+    23,
+    29,
+    35,
+    41,
+    47
+  ],
+  "v_proj_layers": "les 40 sliding",
+  "lm_head_eq_embed": true,
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "chat_template_12b": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "chat_template_e2b": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+  "templates_match": false,
+  "pass": "toutes assertions D1 tenues"
+}

@@ -178,6 +178,19 @@ décode l'E2B-W4 sur GPU **48/48 == HF-même-checkpoint** à 40,9 tok/s, pic VRA
 la brique vise le 12B où les linears dominent la VRAM). Résultats, format, finding
 scale-invariance et état J2 (12B, au tiroir) : [`W4_RESULTS.md`](W4_RESULTS.md).
 
+### 2.3 ter Gemma 4 12B Unified sur la 3090 (chantier W4-J2, 11 gates PASS le 25 juillet 2026)
+
+Le point d'arrivée de la brique W4 : `google/gemma-4-12B-it-qat-w4a16-ct` (checkpoint QAT
+officiel, 48 couches, ~24 Go bf16 = infaisable seul sur la 3090) **décode en ZML sur la 3090** —
+1150 tokens stables à **9,0 tok/s**, pic VRAM réel **16 680 MiB**, fenêtre sliding 1024 prouvée
+mordante in-process (divergence exactement à q=1024). Fidélité : **== HF-fp32-même-checkpoint
+STRICT** au teacher-forcing (48/48 et 1150/1150, zéro requalification — l'oracle fp32 sur
+stockage bf16, hooks par-module, a re-fondé les verdicts que l'oracle bf16 brouillait de ties
+artificiels). Moteur paramétré par `Geom` comptime : E2B préservé par preuve **HLO
+byte-identique** (U1). Architecture 12B **hétérogène** : sliding GQA 16Q/8KV tête 256, full
+MQA 1×512 **K=V sans v_proj**. Résultats : [`U_12B_RESULTS.md`](U_12B_RESULTS.md), contrat :
+[`U_12B_CONTRACT.md`](U_12B_CONTRACT.md).
+
 ### 2.4 Briques de recherche (au-delà de Gemma)
 
 - **Socle moteur modulaire** (`engine.zig` + `gemma4_engine_e1/e2`) : moteur de decode + briques
@@ -268,6 +281,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `52`–`53` | **G2.3** : analyse du sweep par-familles + vérification HLO (comptage des converts vs oracle) |
 | `54`–`59` | **W4 poids 4-bit** : quantize E2B w4a16-ct (recette Google rejouée), export dequant de référence bf16, oracle de génération sur checkpoint W4 (fork du 49), fixtures unpack, oracle GEMM, corruption ciblée de checkpoint (non-vacuité) |
 | `60`–`61` | **Batching** : constitution des oracles par lane (N × script 49) + sweep B protocolaire (attente GPU libre, cause de FAIL logguée) |
+| `62`–`70` | **W4-J2 (12B Unified)** : contrat sur pièce (62), export dq streaming + selfchecks (63), oracles par gate embed/sliding/full/chaîne/prefill (64-68), oracle décode + teacher-forcing **`--compute-fp32`** (69 — hooks par-module, l'instrument officiel des gates argmax), corruption non-vacuité (70) |
 | `30`–`33`, `45`, `spike_hadq`, `measure_k_distribution`, `test_kv_quant_generation` | Piste **TurboQuant** (quantization V, Hadamard) |
 | `smoke.sh` | Build-only des runners clés (toolchain OK sans weights ni RAM) |
 | `regen_fixtures.sh`, `sweep_perf.sh`, `g2_3_sweep.sh` | Régénération des fixtures ; sweep de perf (CHUNK) ; orchestration du sweep G2.3 (one-hot par famille) |
@@ -294,6 +308,9 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `w4.zig` | **Brique W4** : `W4Lin`/`unpackW4`/`dequantW4` (int4 g32 → bf16 in-graph, extraction logique) + `W4KV`/`W4LayerW`/`W4Model` (YOCO) |
 | `gemma4_w4gate.zig` | Gates W1/W2/W3 : unpack bit-exact, dequant 5 familles de shape, premier GEMM |
 | `gemma4_w4auto.zig` | Clone ciblé de `gen_auto` : `W4Step` assemble un `Model` à poids `dequantW4` et délègue à `forwardStep` inchangé (32 lignes de diff) ; log de marge top1−top2 en mode oracle |
+| `g12.zig` | **Géométrie 12B** (`Geom.g12` : 48 couches, GQA/MQA hétérogène, p-RoPE, layer_scalar) — le moteur E2B reste le défaut, preuve HLO U1 |
+| `gemma4_g12gate.zig` | Gates unitaires 12B (U2→U7 : embed, sliding, full K=V, chaîne, prefill+softcap) |
+| `gemma4_g12auto.zig` | **Décode 12B autonome** deux-slices (48+40 v_proj), cache linéaire L_MAX=1280, fenêtre par masque ; flags `--dump-top5 --out-ids --window-vacuity --no-prealloc --oracle` |
 | `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire |
 
 **Gates unitaires** (une op chacun, conservés comme suite de preuve) : `gemma4_ple_fixture`,
@@ -318,6 +335,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `ZML_MODULAR_ENGINE_{DESIGN,PLAN}.md` | Socle moteur modulaire (briques comptime) |
 | `TURBOQUANT_ZML_{DESIGN,PLAN,RESULTS}.md` | POC quantization V |
 | `W4_RESULTS.md` | **Poids 4-bit w4a16 (W4-J1)** : format, 6 gates, finding scale-invariance, état J2 |
+| `U_12B_CONTRACT.md` | **Contrat 12B Unified vérifié sur pièce** (U0 : 328 packed, GQA/MQA hétérogène, K=V) |
+| `U_12B_RESULTS.md` | **W4-J2 (12B sur la 3090)** : 11 gates, l'histoire épistémique de l'oracle fp32, findings |
 | `SESSION_2026-06-27_RAPPORT.md` | Rapport de la session « écrite sans compiler » + audit |
 
 ### 5.4 Checklist de clôture de chantier (à faire quand un chantier est mergé)
@@ -332,7 +351,11 @@ pas l'état réel de `main`. Rafraîchir dans l'ordre :
   est la vitrine publique GitHub : c'est le document le plus vu et le plus facile à oublier
   (il a dérivé sur 5 chantiers avant le 24 juil 2026 parce qu'il n'était sur aucune checklist).
 - [ ] `PLANNING.md` (racine) — état du chantier, pointeur vers le RESULTS.
-- [ ] `git diff main...HEAD | grep -cE '<IP>|<user>@'` = 0 avant tout push (repo public).
+- [ ] `git diff main...HEAD | grep -cE '192\.168\.|10\.0\.|<user>@|/Users/<user>|/home/<user>|<alias-ssh-perso>'` = 0
+  avant tout push (repo public). ⚠ Le pattern doit couvrir le « presque personnel » (username
+  dans les chemins, alias ssh, topologie perso), pas seulement les secrets durs — l'angle mort
+  attrapé le 25 juil 2026 (45 occurrences passées sous un grep trop étroit, branche réécrite
+  avant merge). Placeholders du repo : `<m1-home>`, `<oracle-host>`, `user@gpu-host`, `$W4R`.
 
 Règle : « == HF » se qualifie toujours (token-exact en fp32 / enveloppe en bf16 / même-checkpoint
 en quantifié) — ne jamais laisser un doc affirmer un bit-à-bit qui n'existe pas.
@@ -482,6 +505,20 @@ d'elle-même.
 
 Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
 
+### 7.4 Gemma 4 12B Unified w4a16 (W4-J2 — vs HF sur le même checkpoint, oracle fp32)
+
+| Étape | Résultat |
+|---|---|
+| Contrat + export dq (U0-U2) | 328 packed vérifiés sur pièce ; dequant 3 shapes **bit-exact** ; embed scale bf16 62.0 **bit-exact** |
+| Gates unitaires (U3-U6) | sliding/GQA/full ≤ 1e-4 (S=8) ; discriminabilité K=V **×24/×19** ≥ 10× seuil ; chaîne L0→L5 ≤ 1e-3 par `runLayerGen` réel |
+| Prefill 48 couches (U7) | top-5 ensemble+ordre+marges == oracle ; max_abs 0.376 ≤ garde-fou 0.5 (vs oracle bf16) |
+| Décode court (U8, **oracle fp32**) | **48/48 STRICT** (marge min 0.026 @ gen=40) ; contre-test gate_proj ×100 → `A1Mismatch`, logits ×200 |
+| Décode long (U9) | 1150 tok stables, **9,0 tok/s** ; fenêtre : divergence **exactement à q=1024** ; teacher-forcing fp32 **1150/1150 STRICT** (marge min 0.0279) |
+| VRAM (U10, `--no-prealloc`) | pic réel **16 680 MiB** (16 696 sur 4 tok → allocation statique) ; projection 10-12 Go dépassée par l'arène XLA ; réf. : 24 Go bf16 poids seuls = infaisable |
+| Oracle M4 | bf16 : 28,6 s/token, prefill 1176 = 284 s ; **fp32 (hooks) : 58 s** — plus précis ET 5× plus rapide |
+
+Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULTS.md).
+
 ---
 
 ## 8. Pièges et garde-fous (capitalisés — à lire avant de toucher au code)
@@ -570,6 +607,21 @@ Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
     k/v et o/down/up (sandwich norms). **10 des 11 familles de linears de Gemma 4 sont
     scale-invariantes par construction** ; seule `gate_proj` traverse une non-linéarité (gelu)
     avant toute norm — le contre-test retenu (gate_proj L17 ×100) diverge au step gen=4.
+21. **L'oracle est un instrument : son dtype fait partie du contrat du gate** (chantier W4-J2,
+    Amendement 3) : un oracle bf16 a un quantum de 0.125 sur des logits ~25 → il fabrique des
+    ties artificiels sur ~1 % des steps d'un décode greedy, et chaque « échec de peu » appelle
+    une requalification — en cascade, indistinguable d'un petit bug réel. Signature : paires
+    top1/top2 inversées à 0-2 ULP, jamais de vraie dérive. Remède : réparer l'instrument, pas
+    requalifier — **stockage ≠ arithmétique** : `69 --compute-fp32` (hooks par-module, fp32 le
+    temps du forward) donne la précision fp32 dans l'empreinte RAM bf16, et 5× plus vite que
+    le bf16 CPU émulé.
+22. **`pgrep -f` s'auto-détecte** (leçon du 23 juil, revécue au poller VRAM U10) : la boucle
+    de mesure matchait sa propre ligne de commande ssh → boucle infinie silencieuse. Protocole
+    G3 : `pgrep -x <nom-exact-du-binaire>` (≤ 15 caractères), et un poller doit pouvoir
+    rapporter `SEEN=0` (échouer visiblement).
+23. **En mode libre le runner early-stop à l'EOT** : pour capturer un free-run complet de
+    N tokens (`--out-ids`), passer par `--oracle <fixture>` (limite = fed.len) — sinon
+    « Paris »+EOT s'arrête à 2 tokens.
 
 ---
 
@@ -597,9 +649,11 @@ Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
    (cf [`G2_3_OP_SENSITIVITY.md`](G2_3_OP_SENSITIVITY.md)) : 12/12 familles SAFE, config combinée
    12-familles SAFE à 0.486× l'enveloppe, kv_store bf16 quasi-gratuit.
 5. ~~Chantier W4 jalon J1 : brique poids 4-bit w4a16 sur E2B~~ — **LIVRÉ 24 juil 2026**
-   (6 gates PASS, cf [`W4_RESULTS.md`](W4_RESULTS.md)). **Reste au tiroir : J2 — Gemma 4 12B**
-   (`Gemma4Unified`, checkpoint QAT w4a16-ct, VRAM projetée ~10-12 Go sur 24) ; **GO = décision
-   Régis** (règle d'arrêt de la spec `superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`).
+   (6 gates PASS, cf [`W4_RESULTS.md`](W4_RESULTS.md)).
+6. ~~Chantier W4 jalon J2 : Gemma 4 12B Unified sur la 3090~~ — **LIVRÉ 25 juil 2026**
+   (11 gates PASS, == HF-fp32 strict, 9,0 tok/s, cf [`U_12B_RESULTS.md`](U_12B_RESULTS.md)).
+   Restes ouverts : resserrer U7 avec l'oracle fp32 (0.376 → ~1e-4 attendu, une commande) ;
+   réduire l'arène XLA du step 12B (~6 Go de transients dequant, piste scission dequant/step).
 
 ---
 
@@ -616,7 +670,8 @@ Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
 | Pipeline e2e | Scripts 48/49 : prompt libre → texte vérifié | ✅ 28 juin |
 | G2 bf16 | Enveloppe + gemm-bf16 : fidélité tenue en basse précision | ✅ 4 juil |
 | PR → main | Consolidation de la branche `generation-longue` | 🔄 9 juil (PR #3) |
-| W4-J1 | Brique poids 4-bit w4a16 (`dequantW4` in-graph) prouvée sur E2B : 6 gates, 48/48 == HF-même-checkpoint, −37 % VRAM, `engine.zig` intact — J2 (12B) au tiroir | ✅ 24 juil |
+| W4-J1 | Brique poids 4-bit w4a16 (`dequantW4` in-graph) prouvée sur E2B : 6 gates, 48/48 == HF-même-checkpoint, −37 % VRAM, `engine.zig` intact | ✅ 24 juil |
+| W4-J2 | **Gemma 4 12B Unified sur la 3090** : 11 gates, moteur `Geom` comptime (E2B préservé par HLO md5), == HF-fp32-même-checkpoint STRICT (48/48 + 1150/1150, oracle fp32 hooks — Amendement 3), 9,0 tok/s, pic 16 680 MiB | ✅ 25 juil |
 
 Chaque gate a son tag git (`git tag -l 'gate/*' 'p5.*' '*-pass' '*validated*'`) et sa note dans `docs/`.
 

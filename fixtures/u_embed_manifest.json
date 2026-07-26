@@ -1,0 +1,36 @@
+{
+  "source": "64_u2_embed_oracle.py (Task 3, plan J2 amendé 2026-07-24)",
+  "snapshot_sha": "1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee",
+  "oracle": "Gemma4TextScaledWordEmbedding (module réel transformers, poids du PACKÉ model.language_model.embed_tokens.weight, buffer embed_scale f32 casté bf16 par le forward HF)",
+  "cast_order": "gather bf16 -> * bf16(√3840)=62.0 (0x4278) -> bf16 (produit bf16×bf16)",
+  "ids": [
+    0,
+    1,
+    106,
+    4967,
+    90207,
+    569,
+    759,
+    262143
+  ],
+  "ids_provenance": {
+    "fixed": {
+      "0": "pad",
+      "1": "sonde basse",
+      "106": "sonde",
+      "262143": "dernier du vocab"
+    },
+    "text": {
+      "4967": "La",
+      "90207": " capitale",
+      "569": " de",
+      "759": " la"
+    },
+    "text_probe": "La capitale de la France est Paris."
+  },
+  "pass": "gate u2 : gather + scale chemin 12B == expected, BIT-EXACT u16 (max_abs == 0)",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0+cu130"
+  }
+}

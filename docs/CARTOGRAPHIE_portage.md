@@ -91,7 +91,7 @@ final norm → lm_head (tied) → softcap 30 → LOGITS → argmax → TOKEN
 ## ⑥ L'INFRASTRUCTURE
 
 - **M1** (MacBook, SOURCE canonique) : écrit oracles + runners · git commits + tags
-- `rsync` / `ssh` (jumphost macmini)
+- `rsync` / `ssh` (jumphost <oracle-host>)
 - **3090** (COMPUTE) : `venv gemma4-probe` (PyTorch) · ZML workspace + bazel build · checkpoint full 9,6 Go / slim 3,6 Go · fixtures · `libpjrt_cpu`
 
 ## ④ LE PARCOURS

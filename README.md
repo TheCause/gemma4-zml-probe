@@ -3,16 +3,18 @@
 A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 **[ZML](https://github.com/zml/zml)** — the Zig + MLIR + OpenXLA inference compiler — built and
 **proven against HuggingFace Transformers one operation at a time**, then grown into an autonomous
-text→text engine with long-context generation, bf16 fidelity, static batching, and **4-bit weights**.
+text→text engine with long-context generation, bf16 fidelity, static batching, **4-bit weights** —
+and now running **Gemma 4 12B** (official QAT w4a16 checkpoint) on a single RTX 3090.
 
-> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights.**
+> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights + 12B on a 24 GB GPU.**
 > Prefill, logits, single-token decode and **1020-token** generation all reproduce HuggingFace
 > (token-exact in fp32; within the measured HF-bf16 envelope in bf16). The engine now runs
-> **standalone on GPU** (native tokenizer, chat template, EOS early-stop) and carries a modular
-> decode socle (`EngineModel(comptime Brick, EngineCfg)`) with proven-neutral bricks.
-> ~60 atomic gates, each committed and tagged.
+> **standalone on GPU** (native tokenizer, chat template, EOS early-stop), carries a modular
+> decode socle (`EngineModel(comptime Brick, EngineCfg)`) with proven-neutral bricks, and its
+> comptime geometry (`Geom`) runs both E2B and **12B Unified** — whose bf16 weights alone
+> (~24 GB) would not fit the GPU. **~70 atomic gates**, each committed and tagged.
 > Visual map of the core port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
-> Full documentation (capabilities, usage, method, 20 pitfalls — in French): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
+> Full documentation (capabilities, usage, method, 23 pitfalls — in French): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
 
 ```
 prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
@@ -33,6 +35,7 @@ prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
 | **L3 in-graph** | gather + `forwardStep` + top-k fused in one compiled graph, host threads a single scalar/step — **113 tok/s** | PR #7 |
 | **Static batching** | shape-polymorphic engine (one binary, byte-identical HLO for all B); **113 → 2106 tok/s** (B=64, ×18.5), mono-sequence non-regression 0.999 | PR #8, `docs/BATCHING_RESULTS.md` |
 | **4-bit weights (W4)** | `dequantW4` brick (int4 w4a16 compressed-tensors → bf16 in-graph); E2B-W4 decode GPU **48/48 == HF reading the same checkpoint**, **40.9 tok/s**, real VRAM peak **10 524 MiB (−37 % vs bf16)** | PR #9, `docs/W4_RESULTS.md` |
+| **Gemma 4 12B on one 3090 (W4-J2)** | official `gemma-4-12B-it-qat-w4a16-ct` (48 layers, heterogeneous GQA/MQA with K=V full layers) decodes in ZML: **1150 tokens @ 9.0 tok/s**, real VRAM peak **16 680 MiB** (bf16 weights alone: 24 GB — impossible); teacher-forced **== HF-fp32 STRICT, 48/48 + 1150/1150, zero requalification** (fp32-compute oracle on bf16 storage); E2B engine preserved by **byte-identical HLO** proof | `docs/U_12B_RESULTS.md` |
 
 ## Why
 

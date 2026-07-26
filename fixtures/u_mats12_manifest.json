@@ -1,0 +1,23 @@
+{
+  "source": "63_u_dequant_export.py --fixture-u1b (snapshot 1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee)",
+  "pass": "dequant ZML de weight_packed/weight_scale (lus du checkpoint) == deq_*, bit-exact bf16, 3/3",
+  "matrices": {
+    "deq_q0": [
+      4096,
+      3840
+    ],
+    "deq_q5": [
+      8192,
+      3840
+    ],
+    "deq_dn0": [
+      3840,
+      15360
+    ]
+  },
+  "modules": {
+    "deq_q0": "model.language_model.layers.0.self_attn.q_proj",
+    "deq_q5": "model.language_model.layers.5.self_attn.q_proj",
+    "deq_dn0": "model.language_model.layers.0.mlp.down_proj"
+  }
+}

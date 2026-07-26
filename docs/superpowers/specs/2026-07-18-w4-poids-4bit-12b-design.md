@@ -120,6 +120,11 @@ construction (méthode qui a réussi pour le shape-polymorphisme, gate T0/S1).
 Solde net favorable : PLE+YOCO (la moitié du portage E2B) disparaissent ; GQA + p-RoPE sont
 deux briques bien bornées.
 
+> **ERRATUM (25 juil 2026, gate U0)** : la carte ci-dessus est fausse sur les couches **full** —
+> le 12B réel est **hétérogène** : sliding = GQA 16 Q / 8 KV tête 256, mais full = **MQA 1 KV
+> tête 512 avec K=V** (pas de v_proj sur les 8 couches full), et « head_dim 256 uniforme » ne
+> tient donc pas. Contrat vérifié sur pièce : [`U_12B_CONTRACT.md`](../../U_12B_CONTRACT.md), gate `gate/j2-u0-pass`.
+
 ### 4.3 Gate zéro : cartographie du contrat (U0)
 
 Avant toute op, lire `modeling_gemma4_unified.py` + manifest du checkpoint. À vérifier

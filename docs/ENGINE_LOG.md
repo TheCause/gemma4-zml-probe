@@ -23,9 +23,9 @@
 - API clés : `gather(.{.voc=ids},.{})`, `choose1d(.layer,i)` (slice par couche), `convert(.f32)`, `results.get(struct{...x8})` destructuring.
 
 ## Compute
-- 3090 `ssh user@gpu-host` (direct OK + jumphost macmini), VM 23 Go / ~22 dispo, GPU 24 Go.
+- 3090 `ssh user@gpu-host` (direct OK + jumphost <oracle-host>), VM 23 Go / ~22 dispo, GPU 24 Go.
 - venv `/data/venvs/gemma4-probe` (py3.12, transformers 5.9.0), repo `/data/gemma4-zml-probe`.
-- ZML `/data/rqz_workspace/zml`, runners `examples/rqz/` ; deploy `zml_runner/deploy_to_3090.sh` (rsync -J macmini).
+- ZML `/data/rqz_workspace/zml`, runners `examples/rqz/` ; deploy `zml_runner/deploy_to_3090.sh` (rsync -J <oracle-host>).
 - Build : `cd /data/rqz_workspace/zml && ./bazel.sh build //examples/rqz:<cible>` (~9 min premier, incrémental ensuite).
 
 ## Journal
