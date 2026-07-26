@@ -420,16 +420,16 @@ fn ingraphMaskLines(comptime kmax_sliding: i64, comptime kmax_full: i64, positio
     // full {k} : j <= p
     const iota_f = zml.Tensor.iota(zml.Shape.init(.{ .k = kmax_full }, .i32), .k);
     const le_f = iota_f.cmp(.LE, pos);
-    const zero_f = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32).withTags(.{.k}));
-    const min_f = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32).withTags(.{.k}));
+    const zero_f = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32));
+    const min_f = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32));
     const full_line = le_f.select(zero_f, min_f);
     // sliding {k} : j <= p ET j >= p - (window-1)
     const iota_s = zml.Tensor.iota(zml.Shape.init(.{ .k = kmax_sliding }, .i32), .k);
     const le_s = iota_s.cmp(.LE, pos);
     const lo = pos.sub(window).addConstant(1); // {} i32 : p - window + 1
     const ge_s = iota_s.cmp(.GE, lo);
-    const zero_s = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32).withTags(.{.k}));
-    const min_s = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32).withTags(.{.k}));
+    const zero_s = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32));
+    const min_s = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32));
     const sliding_line = le_s.select(ge_s.select(zero_s, min_s), min_s);
     // {k} → {b=1,h=1,q=1,k} : reshape layout-preserving + re-tag (pièges ZML #1/#2)
     return .{
