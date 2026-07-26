@@ -77,6 +77,10 @@
   **Voir `docs/U_12B_RESULTS.md`** ; plan + 3 amendements :
   `docs/superpowers/plans/2026-07-24-w4-j2-12b-unified.md`. Restes ouverts (backlog §9 : resserrer
   U7 à l'oracle fp32 ; arène XLA ~6 Go).
+- [x] **Resserrage U7 à l'oracle fp32 : LIVRÉ (26 juil 2026, PR #14 mergée)** — max_abs
+  **9,365e-4** vs oracle fp32 (×400 vs 0,376 ère bf16), seuil originel §3-U7 **1e-2 restauré
+  et câblé**, top-5 ensemble+ordre exacts zéro tie. Les 3 requalifications bf16 de J2
+  (U7/U8/U9) toutes résolues par l'instrument fp32 (Amendement 3).
 - [x] **Contexte long 12B — variante 4k : LIVRÉE (26 juil 2026, PR #13 mergée)** :
   `G12Auto(comptime L_MAX)` (pattern bbs/bbatch), défaut 1280 **prouvé bit-identique**, cible
   `gemma4_g12a4k` (4096) **== HF-fp32 STRICT sur 4041 positions** (4000/4000 teacher-forcé
