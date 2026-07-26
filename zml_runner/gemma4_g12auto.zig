@@ -1237,19 +1237,21 @@ pub fn run(init: std.process.Init) !void {
     // === Dispatch one-shot / résident (spec repl-mode 2026-07-26) — même chemin de code :
     // generateOnce porte la génération complète (gardes, cache zéros, boucle steps, verdicts). ===
     const vocab = model.embed_tokens.dim(.voc);
+    // Writer stdout UNIQUE pour toute la session (fix R1 : un 2e writer sur le même fd
+    // entrelace ses octets avec le premier — une seule file d'écriture).
+    var stdout_w = std.Io.File.stdout().writer(io, &.{});
     if (!args.repl) {
-        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
     // prompt est INDÉPENDANT (cache zéros, position 0 — V1, pas de multi-tour). Sortie : ligne
     // vide ou EOF. Erreurs de prompt (trop long, hors vocab) : signalées, boucle continue. ===
     log.info("REPL résident : prompts en boucle (ligne vide ou EOF pour quitter, max_tokens={d})", .{max_tokens});
-    var stdout_repl = std.Io.File.stdout().writer(io, &.{});
-    if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
-        try stdout_repl.interface.print("prompt> {s}\n", .{prompt_text});
-        try stdout_repl.interface.flush();
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
+        try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
+        try stdout_w.interface.flush();
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1257,16 +1259,20 @@ pub fn run(init: std.process.Init) !void {
     var line_buf: [16384]u8 = undefined;
     var stdin_r = std.Io.File.stdin().reader(io, &line_buf);
     while (true) {
-        try stdout_repl.interface.print("prompt> ", .{});
-        try stdout_repl.interface.flush();
-        const line_raw = stdin_r.interface.takeDelimiterExclusive('\n') catch |e| switch (e) {
-            error.EndOfStream => break,
+        try stdout_w.interface.print("prompt> ", .{});
+        try stdout_w.interface.flush();
+        // takeDelimiter (PAS takeDelimiterExclusive) : consomme AUSSI le '\n' (Reader.zig:895
+        // « advancing the seek position past the delimiter ») — l'Exclusive laisse le \n en tête
+        // et le tour suivant lit une ligne vide → sortie prématurée (bug mordu au gate R1).
+        // null = fin de flux propre (EOF).
+        const line_opt = stdin_r.interface.takeDelimiter('\n') catch |e| switch (e) {
             error.StreamTooLong => {
                 log.err("prompt refusé (ligne > {d} octets) — prompt suivant", .{line_buf.len});
                 continue;
             },
             else => return e,
         };
+        const line_raw = line_opt orelse break;
         const line = std.mem.trim(u8, line_raw, " \t\r");
         if (line.len == 0) break;
         var pids = promptToIds(allocator, &encoder, line) catch |e| {
@@ -1274,7 +1280,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1287,7 +1293,7 @@ pub fn run(init: std.process.Init) !void {
 // in-graph, verdicts (--oracle/--out-ids en one-shot ; détok stdout en libre). Types opaques
 // (exe compilé, Bufferized du modèle, tokenizer) passés en anytype POINTEURS — un seul chemin de
 // code pour one-shot ET résident. AUCUN état ne survit entre deux appels (R1 le vérifie).
-fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, eot_id: u32, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -1526,7 +1532,8 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         defer text.deinit(allocator);
 
         // Texte final sur STDOUT (les logs vont sur stderr) — dernier maillon du pipeline spec §2.
-        var stdout_w = std.Io.File.stdout().writer(io, &.{});
+        // Writer PARTAGÉ passé par l'appelant (fix R1 : deux writers séparés sur le même fd
+        // entrelaçaient leurs octets — un seul writer = une seule file d'écriture).
         try stdout_w.interface.print("réponse : \"{s}\"\n", .{text.items});
         try stdout_w.interface.flush();
 
