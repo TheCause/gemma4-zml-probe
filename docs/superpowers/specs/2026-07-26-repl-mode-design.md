@@ -29,8 +29,12 @@ multi-tour vs HF).
 **Refactor** : extraire la génération unique (aujourd'hui inline dans `main`, ~:1231-1430 :
 boucle steps + détok + PERF) en `fn generateOnce(ctx: *ReplCtx, prompt_text: []const u8) !void`
 où `ReplCtx` porte {allocator, io, platform, sharding, exe, eng_buf, pk_buf, tok_sym,
-cache_sym, host, tokenizer/encoder, eot_id, max_tokens}. Le mode one-shot appelle
-`generateOnce` UNE fois — même chemin de code (pas deux implémentations).
+cache_sym, host, tokenizer/encoder, eot_id, max_tokens, **vocab** (revue : le bounds-check
+:1235 lit `model.embed_tokens.dim(.voc)` — model n'est pas dans le ctx)}. Le mode one-shot
+appelle `generateOnce` UNE fois — même chemin de code (pas deux implémentations).
+⚠ Revue : `rendered` (:874) est aujourd'hui alloué sur `arena.allocator()` (jamais libéré —
+invisible en one-shot, **croissance host par prompt en résident**) → dans generateOnce,
+allouer sur `allocator` + `defer free`.
 
 **Gardes de compatibilité** : `--repl` est EXCLUSIF des modes fixtures/probe
 (`--oracle`, `--window-vacuity`, `--out-ids`, `--ids-only`, `--selftest-*`) → erreur au
@@ -54,7 +58,7 @@ en Zig 0.16 — voie 1 : `std.Io.File.stdin().reader(io, …)` (symétrique du
 |---|---|---|
 | **R0** moteur intact + non-régression one-shot | `git diff` engine.zig vide ; run one-shot (sans `--repl`), protocole témoin M1 | diff **vide** ; **48/48 ids == `logs/mi_witness_1280_ids.safetensors`** (le refactor generateOnce ne change pas la génération) |
 | **R1** équivalence résident | session `--repl` avec 3 prompts : [fenêtre glissante, capitale Australie, fenêtre glissante] | prompt 1 et 3 : **ids identiques entre eux ET == témoin 48** (la résidence n'a pas d'état caché entre prompts) ; prompt 2 : early-stop EOT, réponse contient « Canberra » |
-| **R2** stabilité mémoire | pendant R1 : VRAM (`nvidia-smi` par prompt) et RSS | VRAM stable entre prompts (± bruit, pas de croissance monotone) ; pas de fuite host visible sur 3 prompts |
+| **R2** stabilité mémoire | run scripté **~20 prompts** (`printf` pipé sur stdin — revue : 3 prompts ne verraient qu'une fuite grossière) ; VRAM + RSS relevés | VRAM stable (pas de croissance monotone) ; RSS stable après le 1er prompt |
 
 Règle d'arrêt : R0-R2 FAIL → STOP, diagnostiquer (jamais requalifier sans décision Régis).
 
