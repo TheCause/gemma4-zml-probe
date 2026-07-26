@@ -44,6 +44,27 @@ from safetensors.torch import save_file
 
 ROOT = "/data/gemma4-zml-probe"
 
+
+def install_fp32_hooks(backbone, extra=()) -> int:
+    """--compute-fp32 : calcul fp32 sur STOCKAGE bf16 — même mécanique que le 69 (Amendement 3,
+    resserrage U7 : le « forward f32 complet = 52 Go infaisable » du bloc Amendement 2 confondait
+    stockage et arithmétique). Chaque module à paramètres directs passe en fp32 le temps de SON
+    forward (bf16→fp32→bf16 sans perte) ; activations fp32 de bout en bout. ⚠ RAM résidente
+    inchangée (~24 Go bf16 + ~1 Go transient) : hôte M4 (32 Gio), pas la VM (23 Gio)."""
+    mods = [m for m in backbone.modules() if any(True for _ in m.parameters(recurse=False))]
+    mods.extend(extra)
+
+    def pre(mod, _inp):
+        mod.to(torch.float32)
+
+    def post(mod, _inp, _out):
+        mod.to(torch.bfloat16)
+
+    for m in mods:
+        m.register_forward_pre_hook(pre)
+        m.register_forward_hook(post)
+    return len(mods)
+
 # Prompt canonique EXACT (Amendement 2 §U7) — ne pas reformuler.
 PROMPT = "What is the capital of France? Answer in one word."
 # sha256 du chat_template.jinja du snapshot 12B (U_12B_CONTRACT §6, fait U0 constaté).
@@ -52,9 +73,10 @@ VOCAB = 262144
 SOFTCAP = 30.0
 SOFTCAP_BITE = 25.0  # « ET > 25 quelque part » (§3-U7)
 TIE_THR = 1.0e-4  # règle de tie du gate (consignée au manifest, appliquée côté Zig)
-# Garde-fou documentaire (Amendement 2 §U7, requalifié décision Régis 25 juil) : le critère
-# discriminant est top-5 ensemble+ordre+marges + softcap ; max_abs reste CÂBLÉ côté gate à 0.5
-# (enveloppe G2 bf16-réel), un dépassement = FAIL.
+# Seuil max_abs côté gate : 1e-2 (originel §3-U7, RESTAURÉ 26 juil contre la fixture fp32 —
+# mesuré 9.365e-4) ; 0.5 = ancien garde-fou de l'ère oracle bf16 (Amendement 2, SUPERSEDED,
+# gardé ici pour le manifest du mode bf16 historique).
+MAX_ABS_GUARD_FP32 = 1.0e-2
 MAX_ABS_GUARD = 5.0e-1
 
 
@@ -67,6 +89,10 @@ def main() -> None:
     ap.add_argument("--host-label", default="VM",
                     help="étiquette du chrono D6 (VM|M4) — JAMAIS le hostname réel "
                          "(anonymisation repo public)")
+    ap.add_argument("--compute-fp32", action="store_true",
+                    help="calcul fp32 sur stockage bf16 (hooks par-module, même mécanique que "
+                         "le 69) — resserrage U7 post-Amendement 3 ; sorties suffixées _fp32 ; "
+                         "hôte M4 requis (RAM)")
     args = ap.parse_args()
     assert args.u7, "mode --u7 requis (seul mode : le --u7b v2.1 est SUPPRIMÉ, Amendement)"
 
@@ -121,13 +147,21 @@ def main() -> None:
         f"final_logit_softcapping {cfg_t.final_logit_softcapping} != {SOFTCAP}"
     print(f"modèle chargé (bf16, low_cpu_mem_usage) en {t_load:.1f} s", flush=True)
 
+    compute_dtype = "bfloat16"
+    if args.compute_fp32:
+        n_hooked = install_fp32_hooks(model.model, extra=(model.lm_head,))
+        compute_dtype = "float32"
+        print(f"calcul fp32 armé : {n_hooked} sous-modules hookés dont lm_head "
+              f"(stockage bf16 intact, activations fp32)", flush=True)
+
     t1 = time.monotonic()
     with torch.no_grad():
         out = model(**enc)
     t_fwd = time.monotonic() - t1
     logits_all = out.logits
     assert list(logits_all.shape) == [1, S, VOCAB], f"logits {list(logits_all.shape)}"
-    assert logits_all.dtype == torch.bfloat16, f"logits {logits_all.dtype} != bf16 (modèle réel)"
+    want_dtype = torch.float32 if args.compute_fp32 else torch.bfloat16
+    assert logits_all.dtype == want_dtype, f"logits {logits_all.dtype} != {want_dtype}"
     last = logits_all[0, -1, :].float()
     assert torch.isfinite(last).all(), "logits dernière position non finis"
     print(f"forward prefill S={S} en {t_fwd:.1f} s (chrono D6)", flush=True)
@@ -154,14 +188,15 @@ def main() -> None:
     print(f"marge top1-top2={margin_12:.6f} ; écart rang5-rang6={gap_56:.6f} "
           f"(tie rule gate : |dlogit| < {TIE_THR})", flush=True)
 
-    # --- fixture + manifest ---
+    # --- fixture + manifest (suffixe _fp32 en mode --compute-fp32 : les deux coexistent) ---
+    suffix = "_fp32" if args.compute_fp32 else ""
     os.makedirs(args.fixtures_dir, exist_ok=True)
     save_file({
         "ids": ids.to(torch.int32).contiguous(),
-        "logits": last.contiguous(),  # f32 (bf16 -> f32 exact), dernière position
+        "logits": last.contiguous(),  # f32, dernière position (bf16->f32 exact en mode bf16)
         "top5_ids": top5_ids.to(torch.int32).contiguous(),
         "top5_vals": top5_vals.contiguous(),
-    }, os.path.join(args.fixtures_dir, "u_prefill.safetensors"))
+    }, os.path.join(args.fixtures_dir, f"u_prefill{suffix}.safetensors"))
 
     manifest = {
         "source": "68_u7_prefill_oracle.py --u7 (Task 7, plan J2 — Amendement 2 §U7)",
@@ -183,7 +218,8 @@ def main() -> None:
                     "note": "piège 17 — marges consignées AVANT tout verdict gate"},
         "chrono_s": {"load": round(t_load, 1), "forward_prefill": round(t_fwd, 1),
                      "host": args.host_label, "note": "donnée D6"},
-        "thresholds": {"u7_max_abs_guard": MAX_ABS_GUARD, "tie_dlogit": TIE_THR,
+        "thresholds": {"u7_max_abs_guard": MAX_ABS_GUARD_FP32 if args.compute_fp32 else MAX_ABS_GUARD,
+                       "tie_dlogit": TIE_THR,
                        "note": "§3-U7 REQUALIFIÉ (Amendement 2 §U7, décision Régis 25 juil) : "
                                "critère discriminant = top-5 en ENSEMBLE + ordre + marges "
                                "(tie rule |dlogit| < 1e-4) + softcap ; max_abs documentaire "
@@ -196,12 +232,13 @@ def main() -> None:
                                "stage-major CHUNKÉ 8x6 (repli prescrit du plan Task 7) ; "
                                "à investiguer côté socle ZML"},
         "seed": "sans objet (forward déterministe, aucun tirage)",
-        "dtype": "bf16 (modèle réel) ; fixture logits f32",
+        "dtype": f"stockage bf16, calcul {compute_dtype} ; fixture logits f32",
+        "compute_dtype": compute_dtype,
         "versions": {"transformers": transformers.__version__, "torch": torch.__version__},
     }
-    with open(os.path.join(args.fixtures_dir, "u_prefill_manifest.json"), "w") as fh:
+    with open(os.path.join(args.fixtures_dir, f"u_prefill{suffix}_manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
-    print(f"PASS fixture U7 écrite : S={S} -> {os.path.join(args.fixtures_dir, 'u_prefill.safetensors')} ; "
+    print(f"PASS fixture U7 écrite : S={S} -> {os.path.join(args.fixtures_dir, f'u_prefill{suffix}.safetensors')} ; "
           f"top1={top5_tokens[0]!r} marge={margin_12:.4f}", flush=True)
 
 
