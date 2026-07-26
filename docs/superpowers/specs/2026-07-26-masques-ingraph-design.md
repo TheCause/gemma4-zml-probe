@@ -181,8 +181,8 @@ sont des résultats publiables.
 
 ## 7. Livrables
 
-- `engine.zig` : `MaskMode`, `Packed(mode)`, champs `EngineCfg`, génération in-graph
-  (branches comptime, défauts neutres).
+- `engine.zig` : `MaskMode`, `Packed(mode)`, champ `EngineCfg.ingraph_masks`, génération
+  in-graph (branches comptime, défauts neutres).
 - `gemma4_g12auto.zig` : HostTables sans tables masques en ingraph, selftest ajusté.
 - `gemma4_g12a8k.zig` + cible Bazel.
 - `docs/` : résultats M0-M3 (fichier de résultats du chantier), PLANNING mis à jour,
