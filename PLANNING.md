@@ -62,7 +62,7 @@
   `docs/superpowers/plans/2026-07-24-w4-j1-brique-e2b.md` ; chiffres 12B déjà en poche :
   328 linears g32, 9,56 GiB, VRAM projetée ~10-12 Go ; ⚠ 8 couches full sans v_proj).
 - [x] **Chantier W4-J2 — 12B `Gemma4Unified` : CLOS, 11 gates U0→U10 PASS (24-25 juil 2026,
-  branche `w4-j2-12b`, PR en cours)** — **Gemma 4 12B décode sur la 3090** : 1150 tokens stables
+  branche `w4-j2-12b`, **PR #12 MERGÉE 26 juil** — branche réécrite/anonymisée avant merge)** — **Gemma 4 12B décode sur la 3090** : 1150 tokens stables
   à **9,0 tok/s**, pic VRAM réel **16 680 MiB** (`--no-prealloc`, pic indépendant de la longueur ;
   bf16 infaisable : 24 Go de poids seuls), fenêtre 1024 mordante prouvée in-process (divergence
   exactement à q=1024). **Fidélité : == HF-fp32-même-checkpoint STRICT — 48/48 (U8 re-fondé) et
