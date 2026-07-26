@@ -97,6 +97,13 @@
   caches KV** (2×5,6 GiB, alloc 2,50 GiB = un cache sliding), plus les masques. Pistes :
   donation PJRT des caches (8k passerait, statique ~17,3 GiB), ring sliding 1024.
   Doc : `docs/MASKS_INGRAPH_RESULTS.md`. Spec/plan : `docs/superpowers/{specs,plans}/2026-07-26-*`.
+- [x] **Mode résident `--repl` — LIVRÉ (26 juil 2026 soir, branche `repl-mode`, gates
+  R0-R2)** : load+compile payés UNE fois, prompts en boucle sur stdin (V1 indépendants,
+  cache zéros par prompt), `generateOnce` extrait (un seul chemin one-shot/résident,
+  engine 0 octet). R0 : 48/48 == témoin ; R1 : p1==p3==témoin + Canberra ; R2 : 20/20
+  réponses, VRAM plate, RSS +1 Mo total. 2 pièges std.Io 0.16 consignés
+  (`takeDelimiter` vs Exclusive ; writers multiples sur un fd s'entrelacent).
+  Doc : `docs/REPL_RESULTS.md`.
 - [x] **Donation des caches KV — LIVRÉE (26 juil 2026 soir, branche `cache-donation`,
   gates D0-D3)** : 4 `reuseBuffer` au return de `G12Step.forward` (`engine.zig` **0 octet**,
   gate D0 = diff vide) → input_output_alias PJRT, double-buffering supprimé. **Le mur M3
