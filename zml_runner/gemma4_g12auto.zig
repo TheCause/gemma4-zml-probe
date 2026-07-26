@@ -59,7 +59,7 @@ const NUM_FULL_SLOTS: usize = blk: {
     break :blk @intCast(g12.g12.fullSlot(g12.g12.num_layers)); // 8
 };
 const Model = engine.EngineModel(struct {}, .{ .geom = g12.g12, .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 
 // BOS (id 2) : PRÉFIXÉ explicitement — l'encoder ZML (iree, cf zml/tokenizer/tokenizer.zig)
 // n'ajoute AUCUN token spécial (constat Task 0 : ids ZML == ids HF sans template, modulo ce préfixe).
@@ -1001,7 +1001,7 @@ pub fn run(init: std.process.Init) !void {
     const model: g12.G12Model = try .init(arena.allocator(), base);
 
     // Symboliques construits À LA MAIN (pas de fixture de store, cf tête de section) — mêmes shapes
-    // que engine.Packed(true)/engine.Cache.
+    // que engine.Packed(.tables)/engine.Cache.
     const tok_sym = zml.Tensor.init(.{ 1, 1 }, .u32).withTags(.{ .b, .s });
     // Repli si le gather rank-2 ne compile pas (P5.4 n'a validé que des ids 1-D) : `tok_sym` en
     // `{ .s }` shape `[1]`, puis dans G12Step.forward : `.gather(.{ .voc = tok }).reshape(.{ 1, 1, D }).withTags(.{ .b, .s, .d })` (reshape layout-preserving + re-tag, piège ZML #1 connu).

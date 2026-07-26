@@ -1024,7 +1024,7 @@ fn u6LayerW(w: U6W, comptime j: usize) engine.LayerW {
 /// head). Le graphe émis pour la couche li est EXACTEMENT runLayerGen (engine.zig:463).
 fn U6Stage(comptime li: usize) type {
     return struct {
-        pub fn forward(w: U6W, hidden_in: zml.Tensor, p: engine.Packed(false), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forward(w: U6W, hidden_in: zml.Tensor, p: engine.Packed(.single), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
             var layers: [G12U6.num_layers]engine.LayerW = undefined;
             inline for (0..G12U6.num_layers) |j| layers[j] = u6LayerW(w, j);
             const m: U6Model = .{
@@ -1138,7 +1138,7 @@ fn gateU6(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
 
     // --- Symboliques (pattern w4auto : Tensor.init à la main, mêmes shapes que Packed/Cache) ---
     const steps_i: i64 = @intCast(U6_STEPS);
-    const packed_sym = engine.Packed(false){
+    const packed_sym = engine.Packed(.single){
         .embeds = zml.Tensor.init(.{ steps_i, 1, 1, D_12B }, .bf16).withTags(.{ .step, .b, .s, .d }),
         .embptls = zml.Tensor.init(.{ steps_i, 1, 1, 1 }, .bf16).withTags(.{ .step, .b, .s, .lf }),
         .cos_full = zml.Tensor.init(.{ steps_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
@@ -1158,7 +1158,7 @@ fn gateU6(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     const hidden_sym = zml.Tensor.init(.{ 1, 1, D_12B }, .f32).withTags(.{ .b, .s, .d });
     try cache_sym.checkDtype(.{}); // prec par défaut (kv_store=null) => cache f32 attendu — témoin
 
-    const pk_buf = zml.Bufferized(engine.Packed(false)){
+    const pk_buf = zml.Bufferized(engine.Packed(.single)){
         .embeds = try zml.Buffer.fromBytes(io, platform, packed_sym.embeds.shape(), sharding, emb_zero),
         .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, eptl_zero),
         .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(cos_host)),
@@ -1398,7 +1398,7 @@ const U7_CHUNK: usize = g12.g12.full_period; // 6 — aligné : 1 couche full pa
 const N12_CHUNKS: usize = N12 / U7_CHUNK; // 8
 fn U7Chunk(comptime ci: usize) type {
     return struct {
-        pub fn forward(w: U7W, hidden_in: zml.Tensor, p: engine.Packed(false), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forward(w: U7W, hidden_in: zml.Tensor, p: engine.Packed(.single), cache: engine.Cache, ctrl: engine.Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
             @setEvalBranchQuota(1_000_000); // slidingSlot comptime x couches du chunk
             const start = ci * U7_CHUNK;
             const end = start + U7_CHUNK;
@@ -1543,7 +1543,7 @@ fn gateU7(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     @memset(cache_fl_zero, 0);
 
     // --- Symboliques (pattern u6, S runtime) ---
-    const packed_sym = engine.Packed(false){
+    const packed_sym = engine.Packed(.single){
         .embeds = zml.Tensor.init(.{ s_i, 1, 1, D_12B }, .bf16).withTags(.{ .step, .b, .s, .d }),
         .embptls = zml.Tensor.init(.{ s_i, 1, 1, 1 }, .bf16).withTags(.{ .step, .b, .s, .lf }),
         .cos_full = zml.Tensor.init(.{ s_i, 1, 1, HD_F }, .f32).withTags(.{ .step, .b, .s, .hd }),
@@ -1561,7 +1561,7 @@ fn gateU7(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
     const hidden_sym = zml.Tensor.init(.{ 1, 1, D_12B }, .f32).withTags(.{ .b, .s, .d });
     try cache_sym.checkDtype(.{}); // prec par défaut => cache f32 attendu — témoin
 
-    const pk_buf = zml.Bufferized(engine.Packed(false)){
+    const pk_buf = zml.Bufferized(engine.Packed(.single)){
         .embeds = try zml.Buffer.fromBytes(io, platform, packed_sym.embeds.shape(), sharding, emb_zero),
         .embptls = try zml.Buffer.fromBytes(io, platform, packed_sym.embptls.shape(), sharding, eptl_zero),
         .cos_full = try zml.Buffer.fromBytes(io, platform, packed_sym.cos_full.shape(), sharding, std.mem.sliceAsBytes(cos_host)),

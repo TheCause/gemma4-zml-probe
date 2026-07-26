@@ -34,7 +34,7 @@ const LF: i64 = 8960; // 35 * 256 (hidden_size_per_layer_input × num_layers)
 
 // L2 : config L1a (ring=false, cache linéaire L_MAX, masque bande). L'autonomie porte sur les embeds.
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 const StageOut = struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor };
 
 const Stage = struct { start: usize, end: usize, first: bool, last: bool };

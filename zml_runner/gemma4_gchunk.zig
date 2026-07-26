@@ -39,7 +39,7 @@ const S: i64 = 1;
 const D: i64 = 1536;
 
 const Model = engine.EngineModel(struct {}, .{ .two_masks = true, .kmax_sliding = L_MAX, .kmax_full = L_MAX });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 const StageOut = struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor };
 
 const Stage = struct { start: usize, end: usize, first: bool, last: bool };

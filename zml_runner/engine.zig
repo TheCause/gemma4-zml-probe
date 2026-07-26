@@ -305,14 +305,46 @@ pub const Cache = struct {
 };
 
 // Entrées par-step empaquetées (constantes sur la boucle ; sélectionnées par dynamicSlice(.step)).
-// Paramétré comptime par `two_masks` (cf engine DESIGN §5.3) :
-//   - false (défaut) : un seul masque `masks` — strictement identique à l'ancien `Packed`, donc la
-//     fixture E1/E2 (KMAX=8) charge inchangée et le graphe HLO est préservé.
-//   - true (génération longue) : deux masques `masks_sliding`/`masks_full` de tailles `.k` distinctes.
-// `zml.io.load` réfléchit RÉCURSIVEMENT sur les champs (chacun doit être un Tensor) → on retourne DEUX
+// Paramétré comptime par `MaskMode` (spec masques in-graph 2026-07-26 §4.2 ; ex-`two_masks: bool`) :
+//   - .single (défaut) : un seul masque `masks` — strictement identique à l'ancien `Packed(false)`,
+//     la fixture E1/E2 (KMAX=8) charge inchangée et le graphe HLO est préservé.
+//   - .tables (génération longue) : deux masques `masks_sliding`/`masks_full` — ancien `Packed(true)`.
+//   - .ingraph : PAS de tables masques (elles étaient {L_MAX,L_MAX} quadratiques) ; à la place un
+//     scalaire runtime `window` ({} i32, la fenêtre glissante en DONNÉE — rebindable pour le
+//     contre-test de vacuité). Les lignes de masque sont générées DANS le graphe (ingraphMaskLines).
+// `zml.io.load` réfléchit RÉCURSIVEMENT sur les champs (chacun doit être un Tensor) → on retourne TROIS
 // structs distincts (pas de champ `void` conditionnel, que load ne saurait pas traiter).
-pub fn Packed(comptime two_masks: bool) type {
-    if (two_masks) return struct {
+pub const MaskMode = enum { single, tables, ingraph };
+
+// Valeur de masquage additive (== maskRows des runners : {0, MASK_MIN} STRICTEMENT — jamais
+// d'addition de deux masques : -floatMax + -floatMax = -inf ≠ MASK_MIN, l'équivalence bit casserait).
+pub const MASK_MIN: f32 = -std.math.floatMax(f32);
+
+pub fn Packed(comptime mode: MaskMode) type {
+    if (mode == .ingraph) return struct {
+        embeds: zml.Tensor, // {step,b,s,d} bf16
+        embptls: zml.Tensor, // {step,b,s,lf} bf16
+        cos_full: zml.Tensor, // {step,b,s,hd=512}
+        sin_full: zml.Tensor,
+        positions: zml.Tensor, // {step} i32
+        window: zml.Tensor, // {} i32 — fenêtre glissante runtime (12B : 1024) ; L_MAX = non mordante
+
+        const Self = @This();
+        pub fn init(v: zml.io.TensorStore.View) Self {
+            return .{
+                .embeds = v.createTensor("embeds", .{ .step, .b, .s, .d }, null),
+                .embptls = v.createTensor("embptls", .{ .step, .b, .s, .lf }, null),
+                .cos_full = v.createTensor("cos_full", .{ .step, .b, .s, .hd }, null),
+                .sin_full = v.createTensor("sin_full", .{ .step, .b, .s, .hd }, null),
+                .positions = v.createTensor("positions", .{.step}, null),
+                .window = v.createTensor("window", .{}, null),
+            };
+        }
+        pub fn load(self: *const Self, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(Self) {
+            return zml.io.load(Self, self, allocator, io, platform, store, .{ .shardings = shardings, .parallelism = 1, .dma_chunks = 1, .dma_chunk_size = 16 * 1024 * 1024 });
+        }
+    };
+    if (mode == .tables) return struct {
         embeds: zml.Tensor, // {step,b,s,d} bf16
         embptls: zml.Tensor, // {step,b,s,lf} bf16
         cos_full: zml.Tensor, // {step,b,s,hd=512}
@@ -374,6 +406,38 @@ fn pickStep(t: zml.Tensor, step: zml.Tensor) zml.Tensor {
     return t.dynamicSlice(.{ .step = zml.Tensor.DynSlice{ .start = step, .len = 1 } }).squeeze(.step);
 }
 
+// Masques in-graph (spec 2026-07-26 §4.3) : les deux lignes de masque additif du step courant,
+// générées depuis positions[step] et le scalaire runtime `window` — remplace les tables host
+// {L_MAX,L_MAX} du mode .tables (seul terme quadratique du design). Valeurs STRICTEMENT
+// {0, MASK_MIN}, bornes identiques à maskRows (g12auto) : full = j <= p ; sliding = j <= p ET
+// j >= p-(window-1). AND par select imbriqué (mêmes valeurs qu'un and booléen). Le pickStep
+// positions est refait ici (le pos_i des forwards est extrait APRÈS les masques — on ne
+// réordonne PAS les modes existants, byte-identité HLO oblige ; XLA dédupliquera).
+// cmp broadcaste les scalaires rank-0 nativement (tensor.zig cmp) ; dtypes i32 alignés (iota
+// {k <= maxInt(i32)} → i32, positions i32, window i32).
+fn ingraphMaskLines(comptime kmax_sliding: i64, comptime kmax_full: i64, positions: zml.Tensor, window: zml.Tensor, step: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    const pos = pickStep(positions, step); // {} i32
+    // full {k} : j <= p
+    const iota_f = zml.Tensor.iota(zml.Shape.init(.{ .k = kmax_full }, .i32), .k);
+    const le_f = iota_f.cmp(.LE, pos);
+    const zero_f = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32).withTags(.{.k}));
+    const min_f = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_full }, .f32).withTags(.{.k}));
+    const full_line = le_f.select(zero_f, min_f);
+    // sliding {k} : j <= p ET j >= p - (window-1)
+    const iota_s = zml.Tensor.iota(zml.Shape.init(.{ .k = kmax_sliding }, .i32), .k);
+    const le_s = iota_s.cmp(.LE, pos);
+    const lo = pos.sub(window).addConstant(1); // {} i32 : p - window + 1
+    const ge_s = iota_s.cmp(.GE, lo);
+    const zero_s = zml.Tensor.scalar(0, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32).withTags(.{.k}));
+    const min_s = zml.Tensor.scalar(MASK_MIN, .f32).broad(zml.Shape.init(.{ .k = kmax_sliding }, .f32).withTags(.{.k}));
+    const sliding_line = le_s.select(ge_s.select(zero_s, min_s), min_s);
+    // {k} → {b=1,h=1,q=1,k} : reshape layout-preserving + re-tag (pièges ZML #1/#2)
+    return .{
+        sliding_line.reshape(.{ 1, 1, 1, kmax_sliding }).withTags(.{ .b, .h, .q, .k }),
+        full_line.reshape(.{ 1, 1, 1, kmax_full }).withTags(.{ .b, .h, .q, .k }),
+    };
+}
+
 /// Config comptime du socle (cf engine DESIGN §3, §5). TOUS les champs ont une valeur par défaut qui
 /// reproduit le comportement decode4/E1 : `EngineModel(Brick, .{})` est strictement neutre (aucune op
 /// nouvelle émise) → graphe HLO byte-identique. La génération longue active `ring`/`two_masks` et fixe
@@ -394,6 +458,19 @@ pub const EngineCfg = struct {
     // byte-identique (gate S1). NB : `.sdpa` NEUTRALISE les familles qk_scores/softmax/pv_ctx de
     // PrecRt (sdpa fait ses propres converts) → gates sdpa en fp32 pur, cf spec §3.4.
     attn: AttnKind = .manual,
+    // Masques in-graph (spec 2026-07-26 §4.1) : les lignes de masque sont générées dans le graphe
+    // (ingraphMaskLines) au lieu d'être lues des tables {L_MAX,L_MAX} de Packed(.tables). Exige
+    // two_masks=true. Défaut false = strictement neutre (branches comptime-mortes, gate M0).
+    ingraph_masks: bool = false,
+
+    /// Mode Packed dérivé de la cfg (gardes comptime incluses).
+    pub fn maskMode(comptime cfg: EngineCfg) MaskMode {
+        if (cfg.ingraph_masks) {
+            if (!cfg.two_masks) @compileError("ingraph_masks exige two_masks=true (chemin mono-masque E2B non couvert — spec §4.1)");
+            return .ingraph;
+        }
+        return if (cfg.two_masks) .tables else .single;
+    }
 };
 
 pub const AttnKind = enum { manual, sdpa };
@@ -652,18 +729,20 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
 
         /// Un pas de génération : sélectionne le step, embed+PLE, 35 couches (cache threadé) -> logits +
         /// cache grandi. Retour : {logits {b,s,voc}, sl_k, sl_v, fl_k, fl_v}.
-        pub fn forward(self: Self, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forward(self: Self, p: Packed(cfg.maskMode()), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
             const prec = self.prec;
             const step = ctrl.step;
             const embed_slice = pickStep(p.embeds, step);
             const embptl_slice = pickStep(p.embptls, step);
             const cos = pickStep(p.cos_full, step);
             const sin = pickStep(p.sin_full, step);
-            // Masque(s) extrait(s) UNE fois (hors boucle) → 1 dynamicSlice en défaut, comme decode4.
-            // `cfg.two_masks` comptime : la branche inactive n'est pas analysée (champs absents tolérés).
+            // Masque(s) extrait(s)/généré(s) UNE fois (hors boucle). Branches comptime par MaskMode :
+            // la branche inactive n'est pas analysée (champs absents tolérés). En .ingraph, les lignes
+            // sont générées depuis positions[step] + window (spec 2026-07-26 §4.3).
             const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
-            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
-            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
+            const masks_gen = if (cfg.ingraph_masks) ingraphMaskLines(cfg.kmax_sliding, cfg.kmax_full, p.positions, p.window, step) else {};
+            const mask_sliding = if (cfg.ingraph_masks) masks_gen[0] else if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.ingraph_masks) masks_gen[1] else if (cfg.two_masks) pickStep(p.masks_full, step) else {};
             const pos_i = pickStep(p.positions, step); // {} i32
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
@@ -695,15 +774,16 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// Le PLE est recalculé ici (pur fonction de embeds, bit-exact). Type de retour UNIFORME (5 Tensors)
         /// : 1er = hidden_out (non-last) OU logits (last) ; + cache (sl_k,sl_v,fl_k,fl_v). Le calcul est
         /// identique à `forward` op-pour-op (runLayerGen partagé) → mêmes tokens, autre exécution.
-        pub fn forwardStageGen(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forwardStageGen(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, p: Packed(cfg.maskMode()), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
             const prec = self.prec;
             const step = ctrl.step;
             const embptl_slice = pickStep(p.embptls, step);
             const cos = pickStep(p.cos_full, step);
             const sin = pickStep(p.sin_full, step);
             const mask_single = if (cfg.two_masks) {} else pickStep(p.masks, step);
-            const mask_sliding = if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
-            const mask_full = if (cfg.two_masks) pickStep(p.masks_full, step) else {};
+            const masks_gen = if (cfg.ingraph_masks) ingraphMaskLines(cfg.kmax_sliding, cfg.kmax_full, p.positions, p.window, step) else {};
+            const mask_sliding = if (cfg.ingraph_masks) masks_gen[0] else if (cfg.two_masks) pickStep(p.masks_sliding, step) else {};
+            const mask_full = if (cfg.ingraph_masks) masks_gen[1] else if (cfg.two_masks) pickStep(p.masks_full, step) else {};
             const pos_i = pickStep(p.positions, step);
             const pos_s = pos_i.reshape(.{1}).withTags(.{.s});
             const pos_u = pos_i.convert(.u32);
@@ -739,7 +819,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// `embptls_step` : {b,s,lf} bf16 — embed_tokens_per_layer[fed_tok] host-gathered.
         /// Retourne {logits, sl_k, sl_v, fl_k, fl_v} (== `forward` mono, op-pour-op identique hormis la
         /// source des embeds/embptls). Permet la boucle autonome : argmax → gather host → reinject.
-        pub fn forwardStep(self: Self, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forwardStep(self: Self, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.maskMode()), cache_in: Cache, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            if (cfg.ingraph_masks) @compileError("ingraph_masks non câblé sur forwardStep — runners 12B = forwardStageGen seul (spec 2026-07-26 §4.1)");
             const prec = self.prec;
             const step = ctrl.step;
             const cos = pickStep(p.cos_full, step);
@@ -777,7 +858,8 @@ pub fn EngineModel(comptime Brick: type, comptime cfg: EngineCfg) type {
         /// Nécessaire car le mono `forwardStep` compile le graphe 35-couches (~33 Go, thrash) : le chunké
         /// borne le pic (cf GENERATION_LONGUE_CHUNKING_DESIGN). `forward`/`forwardStageGen`/`forwardStep`
         /// (E1/E2/L1a) sont INTACTS.
-        pub fn forwardStageStep(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.two_masks), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        pub fn forwardStageStep(self: Self, comptime start: usize, comptime end: usize, comptime first: bool, comptime last: bool, embeds_step: zml.Tensor, embptls_step: zml.Tensor, p: Packed(cfg.maskMode()), cache_in: Cache, hidden_in: zml.Tensor, ctrl: Ctrl) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+            if (cfg.ingraph_masks) @compileError("ingraph_masks non câblé sur forwardStageStep — runners 12B = forwardStageGen seul (spec 2026-07-26 §4.1)");
             const prec = self.prec;
             const step = ctrl.step;
             const cos = pickStep(p.cos_full, step);

@@ -42,7 +42,7 @@ const Model = engine.EngineModel(struct {}, .{
     .kmax_sliding = L_MAX,
     .kmax_full = L_MAX,
 });
-const PackedLong = engine.Packed(true);
+const PackedLong = engine.Packed(.tables);
 
 const ExpW = struct {
     e: zml.Tensor,
