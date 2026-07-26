@@ -88,6 +88,24 @@ fn renderChatTemplate(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "<|turn>user\n{s}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", .{prompt});
 }
 
+// Prompt texte → ids [BOS ++ template rendu] (spec repl-mode §1). Extraction du bloc inline
+// historique de run() pour être appelable PAR PROMPT en mode résident. `rendered` est alloué
+// sur `allocator` + free (fix revue : l'ancien passage par l'arena de run ne se vidait jamais
+// → croissance host par prompt en résident). L'encoder iree est un automate à ÉTAT : reset()
+// systématique avant encode (invariant historique, cf round-trip --ids-only).
+fn promptToIds(allocator: std.mem.Allocator, encoder: anytype, prompt_text: []const u8) !std.ArrayList(u32) {
+    encoder.reset();
+    const rendered = try renderChatTemplate(allocator, prompt_text);
+    defer allocator.free(rendered);
+    var prompt_tok = try encoder.encodeAlloc(allocator, rendered);
+    defer prompt_tok.deinit(allocator);
+    var ids: std.ArrayList(u32) = try .initCapacity(allocator, prompt_tok.items.len + 1);
+    errdefer ids.deinit(allocator);
+    try ids.append(allocator, BOS_ID);
+    try ids.appendSlice(allocator, prompt_tok.items);
+    return ids;
+}
+
 /// `TensorRegistry.fromPath` refuse le checkpoint PACKÉ : `weights_12b/model.safetensors` est un
 /// symlink vers le cache HF dont le `file.realPath` (resolveFiletype, safetensors.zig:543) se
 /// résout en `blobs/<sha256>` SANS extension `.safetensors` -> `.unknown` -> error.InvalidPath
@@ -120,13 +138,16 @@ const Args = struct {
     out_ids: ?[]const u8 = null, // ids générés -> safetensors (requis U9-ii replay / U9-iv teacher-forcing)
     window_vacuity: ?[]const u8 = null, // U9-ii : replay teacher-forcé, masque sliding élargi rebindé en DONNÉES
     no_prealloc: bool = false, // U10 : preallocate=false, nvidia-smi mesure la VRAM réelle (mécanisme gen_long_gpu)
+    repl: bool = false, // mode RÉSIDENT (spec 2026-07-26 repl-mode) : compile une fois, prompts en boucle sur stdin
 };
 
 const usage =
     "Usage: gemma4_g12auto <model.safetensors (checkpoint 12B w4a16-ct, weights_12b)> <tokenizer.json> --prompt \"...\" " ++
     "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
     "[--force-vram] [--dump-top5] [--out-ids f] [--window-vacuity ids.safetensors] [--no-prealloc] " ++
-    "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)]";
+    "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
+    "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
+    "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -177,6 +198,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.dump_top5 = true;
         } else if (std.mem.eql(u8, a, "--no-prealloc")) {
             args.no_prealloc = true;
+        } else if (std.mem.eql(u8, a, "--repl")) {
+            args.repl = true;
         } else if (std.mem.eql(u8, a, "--out-ids")) {
             i += 1;
             if (i >= process_args.len) {
@@ -839,14 +862,27 @@ pub fn run(init: std.process.Init) !void {
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     const args = try parseArgs(process_args);
 
+    // === --repl (spec 2026-07-26 repl-mode) : EXCLUSIF des modes fixtures/probe — un REPL avec
+    // oracle/out-ids écraserait ou accumulerait silencieusement des artefacts de gate ; refusé
+    // au lancement (garde AVANT tout early-return de mode). ===
+    if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
+        args.out_ids != null or args.ids_only or args.selftest_inputs != null or
+        args.selftest_gather != null))
+    {
+        log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
+        return error.ConflictingFlags;
+    }
+
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
         return;
     }
 
-    const prompt_text = args.prompt orelse {
-        log.err("--prompt est requis\n{s}", .{usage});
+    // --repl : --prompt devient OPTIONNEL (s'il est fourni : premier prompt de la boucle).
+    const prompt_text = args.prompt orelse blk: {
+        if (args.repl) break :blk "";
+        log.err("--prompt est requis (sauf --repl)\n{s}", .{usage});
         return error.MissingArgument;
     };
 
@@ -871,14 +907,13 @@ pub fn run(init: std.process.Init) !void {
     // reset() avant réutilisation : l'encoder iree est un automate à état (cf round-trip --ids-only).
     encoder.reset();
 
-    const rendered = try renderChatTemplate(arena.allocator(), prompt_text);
-    var prompt_tok = try encoder.encodeAlloc(allocator, rendered);
-    defer prompt_tok.deinit(allocator);
-
-    var ids: std.ArrayList(u32) = try .initCapacity(allocator, prompt_tok.items.len + 1);
+    // Tokenisation du prompt CLI via promptToIds (extraction repl-mode — même chemin qu'en
+    // résident). En --repl sans --prompt : liste vide, la boucle stdin fournira les prompts.
+    var ids: std.ArrayList(u32) = if (args.repl and prompt_text.len == 0)
+        .empty
+    else
+        try promptToIds(allocator, &encoder, prompt_text);
     defer ids.deinit(allocator);
-    try ids.append(allocator, BOS_ID);
-    try ids.appendSlice(allocator, prompt_tok.items);
 
     if (args.ids_only) {
         log.info("ids = {any}", .{ids.items});
@@ -899,11 +934,11 @@ pub fn run(init: std.process.Init) !void {
         var reenc = try encoder.encodeAlloc(allocator, text_rt.items);
         defer reenc.deinit(allocator);
 
-        const round_trip_ok = std.mem.eql(u32, reenc.items, prompt_tok.items);
+        const round_trip_ok = std.mem.eql(u32, reenc.items, ids.items[1..]);
         if (round_trip_ok) {
             log.info("round-trip détok : PASS (decode -> re-encode == ids)", .{});
         } else {
-            log.err("round-trip détok : FAIL — got={any} want={any}", .{ reenc.items, prompt_tok.items });
+            log.err("round-trip détok : FAIL — got={any} want={any}", .{ reenc.items, ids.items[1..] });
             return error.RoundTripFailed;
         }
         return;
@@ -1057,12 +1092,8 @@ pub fn run(init: std.process.Init) !void {
         .window = try zml.Buffer.scalar(io, platform, @as(i32, @intCast(SLIDING_WINDOW)), .i32, sharding),
     };
     comptime std.debug.assert(SLIDING_WINDOW > 0); // garde runtime-window (spec §4.1)
-    var cache_buf = zml.Bufferized(engine.Cache){
-        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, host.cache_sl_k),
-        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, host.cache_sl_v),
-        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, host.cache_fl_k),
-        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, host.cache_fl_v),
-    };
+    // (cache_buf : construit PAR GÉNÉRATION dans generateOnce — spec repl-mode : chaque prompt
+    //  résident repart d'un cache zéro, position 0.)
     store_ck.deinit();
     reg_ck.deinit();
     mem_probe.logMem(io, "post-load (poids + Packed/Cache sur device)");
@@ -1203,27 +1234,98 @@ pub fn run(init: std.process.Init) !void {
         return;
     }
 
+    // === Dispatch one-shot / résident (spec repl-mode 2026-07-26) — même chemin de code :
+    // generateOnce porte la génération complète (gardes, cache zéros, boucle steps, verdicts). ===
+    const vocab = model.embed_tokens.dim(.voc);
+    if (!args.repl) {
+        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+    }
+
+    // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
+    // prompt est INDÉPENDANT (cache zéros, position 0 — V1, pas de multi-tour). Sortie : ligne
+    // vide ou EOF. Erreurs de prompt (trop long, hors vocab) : signalées, boucle continue. ===
+    log.info("REPL résident : prompts en boucle (ligne vide ou EOF pour quitter, max_tokens={d})", .{max_tokens});
+    var stdout_repl = std.Io.File.stdout().writer(io, &.{});
+    if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
+        try stdout_repl.interface.print("prompt> {s}\n", .{prompt_text});
+        try stdout_repl.interface.flush();
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+            error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
+            else => return e,
+        };
+    }
+    var line_buf: [16384]u8 = undefined;
+    var stdin_r = std.Io.File.stdin().reader(io, &line_buf);
+    while (true) {
+        try stdout_repl.interface.print("prompt> ", .{});
+        try stdout_repl.interface.flush();
+        const line_raw = stdin_r.interface.takeDelimiterExclusive('\n') catch |e| switch (e) {
+            error.EndOfStream => break,
+            error.StreamTooLong => {
+                log.err("prompt refusé (ligne > {d} octets) — prompt suivant", .{line_buf.len});
+                continue;
+            },
+            else => return e,
+        };
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) break;
+        var pids = promptToIds(allocator, &encoder, line) catch |e| {
+            log.err("prompt refusé (tokenisation : {s}) — prompt suivant", .{@errorName(e)});
+            continue;
+        };
+        defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, eot_id, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+            error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
+            else => return e,
+        };
+    }
+    log.info("REPL : sortie propre.", .{});
+}
+
+// Une génération complète — extraction de l'ex-corps de run() (spec repl-mode §1) : gardes de
+// longueur, cache ZÉROS (chaque appel repart de la position 0), boucle prefill-par-decode + topK
+// in-graph, verdicts (--oracle/--out-ids en one-shot ; détok stdout en libre). Types opaques
+// (exe compilé, Bufferized du modèle, tokenizer) passés en anytype POINTEURS — un seul chemin de
+// code pour one-shot ET résident. AUCUN état ne survit entre deux appels (R1 le vérifie).
+fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, eot_id: u32, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+    const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
+    if (ids.len == 0) {
+        log.err("prompt vide (0 ids)", .{});
+        return error.PromptTooLong;
+    }
+    // Gardes de lancement (déplacées de run — refaites PAR PROMPT en résident ; run les
+    // pré-vérifie encore en one-shot pour le fail-fast avant compile).
+    if (ids.len + limit > @as(usize, @intCast(L_MAX))) {
+        log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.len, limit, L_MAX });
+        return error.SequenceTooLong;
+    }
+    if (ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+        log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.len, SLIDING_WINDOW });
+        return error.PromptTooLong;
+    }
+    // Cache ZÉROS par génération (les slices host vivent dans run pour toute la session).
+    var cache_buf = zml.Bufferized(engine.Cache){
+        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, host.cache_sl_k),
+        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, host.cache_sl_v),
+        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, host.cache_fl_k),
+        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, host.cache_fl_v),
+    };
+
     // === Step 5.2 → L3 : boucle prefill-par-decode + topK in-graph + arrêt ===
     var generated: std.ArrayList(i64) = .empty;
     defer generated.deinit(allocator);
     var gen_top5: std.ArrayList(Top5) = .empty; // parallèle à `generated` (diagnostic FAIL, Step 5.3)
     defer gen_top5.deinit(allocator);
 
-    log.info("Boucle autonome : {d} steps de prefill, puis génération (limite {d}{s})", .{ ids.items.len, limit, if (oracle_ids != null) " = fed.len, oracle" else " = max_tokens" });
+    log.info("Boucle autonome : {d} steps de prefill, puis génération (limite {d}{s})", .{ ids.len, limit, if (oracle_ids != null) " = fed.len, oracle" else " = max_tokens" });
 
     // Raison d'arrêt (A3) : capturée DANS la boucle (pas reconstruite après coup) — le strip EOT
     // du détok et le verdict A3 en dépendent. `.oracle` = sortie par compte fed.len (mode --oracle).
     const StopReason = enum { oracle, eot, max_tokens, l_max };
     var stop_reason: StopReason = .oracle;
 
-    var fed: i64 = @intCast(ids.items[0]);
+    var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
-    // Bounds-check (fix revue) : lu UNE FOIS avant la boucle — reprend l'invariant de feu
-    // `EmbedGather` : XLA `gather` CLAMPE silencieusement les indices hors-borne (une divergence
-    // de logits plausible mais fausse, pas un crash) et `@intCast(fed)` ci-dessous vers u32 est UB
-    // en ReleaseFast si `fed` sort de la plage. Portée : couvre le chemin `fed` (host→device) ;
-    // `t5i` issu de topK/arange est ≥ 0 par construction (pas re-borné au cast usize).
-    const vocab = model.embed_tokens.dim(.voc);
     const t0: std.Io.Timestamp = .now(io, .awake);
     // Step 2.7 (spec [it.6]) : capturé au dernier step de prefill (cf plus bas), initialisé à t0
     // par sûreté (jamais réellement lu à cette valeur — le prefill compte toujours ≥1 step).
@@ -1243,7 +1345,7 @@ pub fn run(init: std.process.Init) !void {
 
         var call_args = try exe.args(allocator);
         var call_results = try exe.results(allocator);
-        call_args.set(.{ eng_buf, tok_buf, pk_buf, cache_buf, ctrl_buf });
+        call_args.set(.{ eng_buf.*, tok_buf, pk_buf.*, cache_buf, ctrl_buf });
         exe.call(call_args, &call_results);
         // r_logits : sortie supplémentaire (--window-vacuity) — NON lue ici (pas de D2H), deinit direct.
         var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
@@ -1252,7 +1354,7 @@ pub fn run(init: std.process.Init) !void {
 
         // top5 : TOUJOURS calculé in-graph (cheap, cf PLAN), ignoré tant qu'on est en prefill (sauf
         // le dernier prefill step, qui produit s0 — cf `in_gen_phase` ci-dessous).
-        const in_gen_phase = step + 1 >= ids.items.len;
+        const in_gen_phase = step + 1 >= ids.len;
 
         // Top5 depuis le device (~48 octets D2H) — top1 = next token (spec §2, §4 ties d'argmax).
         var t5v_s = try r_t5v.toSliceAlloc(allocator, io);
@@ -1278,7 +1380,7 @@ pub fn run(init: std.process.Init) !void {
         // W4g (protocole de flip) : marge top1−top2 par step de génération, mode oracle seulement.
         if (in_gen_phase and oracle_ids != null) log.info("  marge top1-top2 @ gen={d} : {d:.6} (top1={d} top2={d})", .{ gen_top5.items.len - 1, top5.val[0] - top5.val[1], top5.idx[0], top5.idx[1] });
         // --dump-top5 (U9) : top-5 par step aussi en mode LIBRE (w4auto ne le loggait qu'en --oracle).
-        if (in_gen_phase and args.dump_top5) log.info("  top5 @ gen={d} : idx={any} val={any}", .{ gen_top5.items.len - 1, top5.idx, top5.val });
+        if (in_gen_phase and dump_top5) log.info("  top5 @ gen={d} : idx={any} val={any}", .{ gen_top5.items.len - 1, top5.idx, top5.val });
 
         // cache swap (motif gemma4_gen_long_gpu.zig:139-168) : deinit l'ancien, adopte le nouveau.
         var old_cache = cache_buf;
@@ -1301,11 +1403,11 @@ pub fn run(init: std.process.Init) !void {
         if ((step + 1) % 256 == 0) log.info("  ... step {d} ({d} générés)", .{ step + 1, generated.items.len });
 
         // Step 2.7 : fin du DERNIER step de prefill (nuance de mesure, cf log L3 PERF plus bas).
-        if (step + 1 == ids.items.len) t_prefill_end = .now(io, .awake);
+        if (step + 1 == ids.len) t_prefill_end = .now(io, .awake);
 
-        if (step + 1 < ids.items.len) {
+        if (step + 1 < ids.len) {
             // Phase 1 (prefill) : argmax ci-dessus IGNORÉ (pas le dernier token du prompt).
-            fed = @intCast(ids.items[step + 1]);
+            fed = @intCast(ids[step + 1]);
             continue;
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
@@ -1358,13 +1460,13 @@ pub fn run(init: std.process.Init) !void {
     // de méthode non confirmé (cf revue Step 2.9).
     const gen_s = @as(f64, @floatFromInt(gen_elapsed.toNanoseconds())) / std.time.ns_per_s;
     const pf_s = elapsed_s - gen_s;
-    const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.items.len)) / pf_s else 0;
+    const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.len)) / pf_s else 0;
     const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
-    log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.items.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+    log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
 
     // === --out-ids (U9) : ids générés -> safetensors (clé "ids", i32) — AVANT le verdict oracle
     // (un A1Mismatch ne doit pas perdre la trace des ids produits, utile au diagnostic). ===
-    if (args.out_ids) |out_path| {
+    if (out_ids_path) |out_path| {
         try writeIdsSafetensors(allocator, io, out_path, generated.items);
         log.info("--out-ids : {d} ids écrits -> {s}", .{ generated.items.len, out_path });
     }
