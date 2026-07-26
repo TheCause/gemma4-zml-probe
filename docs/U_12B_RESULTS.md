@@ -58,7 +58,7 @@ sans réécriture.
 | U4 | GQA groupe 2 + masque 1024 | Oracle `repeat_kv` réel ; masque mordant prouvé | `gate/j2-u4-pass` |
 | U5 | Couche full L5 : K=V, p-RoPE, MQA | Discriminabilité **câblée et mesurée sur la sortie d'attention : ×24 (S=8) / ×19 (S=1040)** ≥ 10× seuil ; fait de checkpoint découvert par le STOP câblé : q_norm/k_norm des 8 couches full **UNIFORMES** (scalaires broadcastés, k_norm L5 = 0.0605, probable artefact QAT) ; étage (c) attention complète ≤ 1e-4 aux deux S | `gate/j2-u5-pass` |
 | U6 | Couche 0 + chaîne L0→L5 par `runLayerGen`/`Geom.g12` | max_abs ≤ 1e-3 (resserrable, jamais élargissable) ; branche moteur K=V réellement exercée (D4, placeholder v_proj `[1]` prouvé non consommé par compile) ; distribution des 48 layer_scalar consignée | `gate/j2-u6-pass` |
-| U7 | Prefill 48 couches + softcap | Top-5 ensemble+ordre+marges == oracle (12.560 vs 12.5625) ; softcap mordant (>25 quelque part, ≤30 partout) ; max_abs 0.376 sous garde-fou 0.5 vs oracle bf16 (Amendement 2) — resserrable à ~1e-4 via l'oracle fp32, voie ouverte | `gate/j2-u7-pass` |
+| U7 | Prefill 48 couches + softcap | **RESSERRÉ 26 juil à l'oracle fp32 (68 `--compute-fp32`)** : max_abs = **9.365e-4** ≤ seuil originel §3-U7 **1e-2 restauré et câblé** (marge ~10×) ; top-5 ensemble+ordre EXACTS, zéro tie utilisé ; marge top1-top2 12.559394 (précision fp32) ; softcap mordant identique (26.3532 vs 26.3531). L'ancien 0.376/0.5 vs oracle bf16 (Amendement 2) est SUPERSEDED — c'était le quantum de l'oracle, pas le bruit du moteur | `gate/j2-u7-pass` (+ resserrage fp32) |
 | U8 | Décode court GPU vs HF-même-checkpoint | Brut vs oracle bf16 : 42/48 (requalification du 25 juil, SUPERSEDED) → **re-fondé oracle fp32 : 48/48 STRICT** ; contre-test câblé : gate_proj L24 ×100 → `A1Mismatch`, divergence logits ×200 le bruit | `gate/j2-u8-pass` |
 | U9 | Décode long 1150 | (i) 1150 tok stables, 0 NaN, texte cohérent ; (ii) morsure fenêtre **in-process même binaire** : logits bit-identiques q ≤ 1023, première divergence **exactement à q=1024** (max_abs 6.3e-2) ; (iv) teacher-forcing **fp32 1150/1150 STRICT** | `gate/j2-u9-pass` |
 | U10 | Observations perf/VRAM | Voir §3 | `gate/j2-u10-pass` |
@@ -97,6 +97,12 @@ les buffers de prefill.
   était un « contrôle qui ne peut pas réussir » contre du bf16) ; top-5+marges = discriminant.
 - **Amendement 3** (l'événement du chantier, §1) : oracle **fp32** = instrument officiel des
   gates argmax J2 ; U8 re-fondé 48/48 strict ; U9-iv 1150/1150 strict.
+- **Resserrage U7 (26 juil, post-merge — la « voie ouverte » de l'Amendement 3 refermée)** :
+  fixture fp32 (68 `--compute-fp32`, hôte M4 — la VM n'a pas la RAM), gate re-jugé :
+  **max_abs 9.365e-4** (vs 0.376 à l'ère bf16, ×400) ; seuil originel §3-U7 **1e-2 restauré**
+  dans le runner (mesure d'abord au garde-fou 0.5, resserrage au vu de l'oracle, re-run au
+  seuil câblé — doctrine U6). Les TROIS requalifications bf16 de J2 (U7 max_abs, U8 42/48,
+  U9 marges) se sont toutes résolues au même remède : l'instrument fp32.
 
 ## 5. Findings transférables
 

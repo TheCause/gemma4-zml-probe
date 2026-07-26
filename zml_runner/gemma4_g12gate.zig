@@ -1301,7 +1301,7 @@ const N12: usize = g12.g12.num_layers; // 48
 const N12_FULL: usize = N12 / g12.g12.full_period; // 8
 const N12_SLIDING: usize = N12 - N12_FULL; // 40 — piège revue U6 (a)
 const U7Model = engine.EngineModel(struct {}, .{ .geom = g12.g12 });
-const U7_MAX_ABS: f64 = 5.0e-1; // garde-fou documentaire (Amendement 2 §U7, requalifié décision Régis 25 juil : critère discriminant = top-5 ensemble+ordre+marges + softcap ; enveloppe G2 bf16-réel, mesuré 0.376 — CÂBLÉ : dépassement = FAIL)
+const U7_MAX_ABS: f64 = 1.0e-2; // RESSERRÉ 26 juil (post-Amendement 3) : seuil ORIGINEL §3-U7 restauré — le gate exige désormais la fixture FP32 (68 --compute-fp32, u_prefill_fp32.safetensors) ; mesuré 9.365e-4 contre elle (marge ~10x). L'ancien garde-fou 0.5 (Amendement 2, oracle bf16, mesuré 0.376) est SUPERSEDED : la fixture bf16 historique ne passe PAS ce seuil — c'était le quantum de l'oracle, pas le bruit du moteur.
 const U7_TIE: f64 = 1.0e-4; // tie rule §3-U7 (piège 17)
 const U7_SOFTCAP: f64 = 30.0;
 const U7_SOFTCAP_BITE: f64 = 25.0;
@@ -1743,10 +1743,10 @@ fn gateU7(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, pl
         return error.GateFailed;
     }
     if (max_abs > U7_MAX_ABS) {
-        log.err("u7 : FAIL max_abs={e:.3} > garde-fou {e:.1} (Amendement 2 §U7 requalifié — le garde-fou documentaire reste CÂBLÉ, un dépassement = FAIL ; top-5 ensemble={}, écarts de rang={d})", .{ max_abs, U7_MAX_ABS, set_eq, n_rank_diff });
+        log.err("u7 : FAIL max_abs={e:.3} > seuil {e:.1} (originel §3-U7 restauré 26 juil contre l'oracle FP32, Amendement 3 — le seuil est CÂBLÉ, un dépassement = FAIL ; top-5 ensemble={}, écarts de rang={d})", .{ max_abs, U7_MAX_ABS, set_eq, n_rank_diff });
         return error.GateFailed;
     }
-    log.info("PASS u7 — prefill 12B 48 couches + head moteur : softcap mordant (max|logits|={d:.4}, {d} > 25), top-5 ensemble={} (écarts de rang tolérés par tie : {d}), max_abs documentaire={e:.3} <= garde-fou 0.5 (bf16-réel requalifié, décision Régis 25 juil)", .{ max_abs_logit, n_over_25, set_eq, n_rank_diff, max_abs });
+    log.info("PASS u7 — prefill 12B 48 couches + head moteur : softcap mordant (max|logits|={d:.4}, {d} > 25), top-5 ensemble={} (écarts de rang tolérés par tie : {d}), max_abs={e:.3} <= seuil {e:.1} (originel §3-U7 restauré 26 juil, oracle FP32 — Amendement 3)", .{ max_abs_logit, n_over_25, set_eq, n_rank_diff, max_abs, U7_MAX_ABS });
 }
 
 // ---------------------------------------------------------------------------- main
