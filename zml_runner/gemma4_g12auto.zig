@@ -31,7 +31,9 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 // Géométrie : TOUT vient de Geom.g12 (garde anti-source-mixte, plan Task 8 point 10 — aucun
 // alias e2b du moteur (num_layers/embed-scale/têtes/dims historiques) ne doit être référencé ici).
-const L_MAX: i64 = 1280; // >= 1150 gen + prompt (U9)
+const L_MAX: i64 = 4096; // probe contexte long (26 juil) — était 1280 (U9 : 1150 gen + prompt).
+// Coût : cache f32 ~2,75 Go (×3,2), masques {L_MAX,L_MAX} 2×67 Mo (quadratique — attention à 8k+).
+// RoPE : max_position_embeddings 12B = 262144, aucune contrainte à 4k.
 const SLIDING_WINDOW: i64 = 1024; // config.sliding_window 12B — portée par le MASQUE seul (R10)
 const HD_F: i64 = @intCast(g12.g12.hd_full); // 512 — dim cos/sin full (= config.global_head_dim)
 const HD_S: i64 = @intCast(g12.g12.hd_sliding); // 256 — dim cache sliding
