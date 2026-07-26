@@ -351,7 +351,11 @@ pas l'état réel de `main`. Rafraîchir dans l'ordre :
   est la vitrine publique GitHub : c'est le document le plus vu et le plus facile à oublier
   (il a dérivé sur 5 chantiers avant le 24 juil 2026 parce qu'il n'était sur aucune checklist).
 - [ ] `PLANNING.md` (racine) — état du chantier, pointeur vers le RESULTS.
-- [ ] `git diff main...HEAD | grep -cE '<IP>|<user>@'` = 0 avant tout push (repo public).
+- [ ] `git diff main...HEAD | grep -cE '192\.168\.|10\.0\.|<user>@|/Users/<user>|/home/<user>|<alias-ssh-perso>'` = 0
+  avant tout push (repo public). ⚠ Le pattern doit couvrir le « presque personnel » (username
+  dans les chemins, alias ssh, topologie perso), pas seulement les secrets durs — l'angle mort
+  attrapé le 25 juil 2026 (45 occurrences passées sous un grep trop étroit, branche réécrite
+  avant merge). Placeholders du repo : `<m1-home>`, `<oracle-host>`, `user@gpu-host`, `$W4R`.
 
 Règle : « == HF » se qualifie toujours (token-exact en fp32 / enveloppe en bf16 / même-checkpoint
 en quantifié) — ne jamais laisser un doc affirmer un bit-à-bit qui n'existe pas.
