@@ -86,6 +86,20 @@
   `gemma4_g12a4k` (4096) **== HF-fp32 STRICT sur 4041 positions** (4000/4000 teacher-forcé
   oracle fp32, marge min 0,81) ; 8,2 tok/s, pic VRAM réel 22 234 MiB. ⚠ Mur documenté :
   masques `{L_MAX,L_MAX}` quadratiques → 8k exige des masques in-graph (backlog).
+- [x] **Masques in-graph — LIVRÉ (26 juil 2026, branche `masks-ingraph`, gates M0-M3)** :
+  le seul terme quadratique du design 12B (tables masques `{L_MAX,L_MAX}`) est supprimé —
+  lignes générées dans le graphe (`engine.ingraphMaskLines` : iota+cmp+select, valeurs
+  {0, MASK_MIN} exactes) depuis `positions[step]` + **fenêtre en scalaire runtime `window`**
+  (rebindable : le contre-test de vacuité U9-ii survit tel quel). `Packed(MaskMode)` 3 variants,
+  17 runners migrés. Gates : **M0 HLO byte-identique 4/4 témoins** ; **M1 48/48 ids + vacuity
+  divergence exactement à q=1024 (zone mordante couverte)** ; **M2 124/124 ids** ; **M3 sonde
+  8k = mur suivant chiffré** : compile PASS 38,9 s, OOM exécution — **double-buffering des
+  caches KV** (2×5,6 GiB, alloc 2,50 GiB = un cache sliding), plus les masques. Pistes :
+  donation PJRT des caches (8k passerait, statique ~17,3 GiB), ring sliding 1024.
+  Doc : `docs/MASKS_INGRAPH_RESULTS.md`. Spec/plan : `docs/superpowers/{specs,plans}/2026-07-26-*`.
+- [ ] **(option) donation des buffers de cache (input-output aliasing PJRT)** : levier n°1
+  post-masques-in-graph — éliminerait le ×2 des caches KV (mur 8k identifié en M3) et
+  réduirait aussi le pic des cibles 1280/4k. À spec-er (API PJRT/ZML donation).
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
