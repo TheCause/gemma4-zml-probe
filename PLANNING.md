@@ -97,9 +97,14 @@
   caches KV** (2×5,6 GiB, alloc 2,50 GiB = un cache sliding), plus les masques. Pistes :
   donation PJRT des caches (8k passerait, statique ~17,3 GiB), ring sliding 1024.
   Doc : `docs/MASKS_INGRAPH_RESULTS.md`. Spec/plan : `docs/superpowers/{specs,plans}/2026-07-26-*`.
-- [ ] **(option) donation des buffers de cache (input-output aliasing PJRT)** : levier n°1
-  post-masques-in-graph — éliminerait le ×2 des caches KV (mur 8k identifié en M3) et
-  réduirait aussi le pic des cibles 1280/4k. À spec-er (API PJRT/ZML donation).
+- [x] **Donation des caches KV — LIVRÉE (26 juil 2026 soir, branche `cache-donation`,
+  gates D0-D3)** : 4 `reuseBuffer` au return de `G12Step.forward` (`engine.zig` **0 octet**,
+  gate D0 = diff vide) → input_output_alias PJRT, double-buffering supprimé. **Le mur M3
+  est levé : le 12B décode 8028 positions sur la 3090** (2 passes vacuity complètes, fenêtre
+  mordante exactement à q=1024 À 8k, pic 22 234 MiB — identique à 4k : le pic est le
+  transitoire compile/autotune, pas le régime permanent). Équivalence D1/D2 : 48/48 et
+  124/124 ids == témoins. Claim == HF inchangée (4041 positions).
+  Doc : `docs/CACHE_DONATION_RESULTS.md`.
 - [ ] **(option) 3e chantier — Triton paged attention** : seul chemin flash **B>1** crédible
   (B>1 natif, f32, scale custom, sliding window) mais exige un **bump ZML + refonte du cache
   YOCO vers un layout paginé**. Non démarré, cf. l'audit upstream.
