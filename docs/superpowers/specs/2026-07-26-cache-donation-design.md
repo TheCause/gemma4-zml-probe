@@ -22,7 +22,7 @@ Application : dans `gemma4_g12auto.zig`, `G12Step.forward` (:780) retourne les 4
 de `forwardStageGen` — on les marque au return :
 
 ```zig
-return .{ t5v, t5i, logits,
+return .{ t5.values, t5.indices, logits,
     slk.reuseBuffer(cache.sl_k), slv.reuseBuffer(cache.sl_v),
     flk.reuseBuffer(cache.fl_k), flv.reuseBuffer(cache.fl_v) };
 ```
@@ -49,7 +49,7 @@ return .{ t5v, t5i, logits,
 | **D0** moteur intact | `git diff` de la branche sur `engine.zig` | **vide** ; builds 12B verts |
 | **D1** équivalence 1280 | run libre 48 + vacuity replay 1178 (`--no-prealloc`) | **48/48 ids == `logs/mi_witness_1280_ids.safetensors`** (cmp vide) ; vacuity : bit-identiques ≤1023, divergence **exactement à q=1024** ; pic VRAM publié |
 | **D2** équivalence 4096 | `gemma4_g12a4k`, même protocole que M2 | **124/124 ids == témoin** + early-stop même step ; pic VRAM publié (réf ère tables : 22 234 MiB) |
-| **D3** re-sonde 8k | `gemma4_g12a8k` `--no-prealloc --window-vacuity` replay 8000 (fixture M3 existante) | **verdict mesuré publié** : soit {2 passes complètes 8028 steps, divergence à q=1024, pic VRAM, tok/s}, soit mur suivant chiffré |
+| **D3** re-sonde 8k | `gemma4_g12a8k` `--no-prealloc --window-vacuity /data/gemma4-zml-probe/mi_replay_8k.safetensors` (fixture M3 : 8000 ids = tuilage u9_ids, déjà sur la 3090) | **verdict mesuré publié** : soit {2 passes complètes 8028 steps, divergence à q=1024, pic VRAM, tok/s}, soit mur suivant chiffré |
 
 NB : le HLO de g12auto N'EST PAS attendu byte-identique (les annotations d'aliasing font
 partie du module) — les gates D sont des gates d'**équivalence de sortie**, comme M1/M2.
@@ -59,7 +59,7 @@ Règle d'arrêt : D0-D2 FAIL → STOP, diagnostiquer (pas de requalification san
 
 | # | Risque | Réponse |
 |---|---|---|
-| R1 | `old_cache.deinit()` post-donation (g12auto:1174-1177, :1279+) = destroy d'un handle consommé → double-free/crash | Pattern PJRT normal (destroy de handle ≠ libération mémoire donnée) ; si crash au premier run D1 : retirer les deinit des buffers donnés et re-mesurer (fuite de handles bornée par la boucle) |
+| R1 | `old_cache.deinit()` post-donation (g12auto:1174-1177, :1279+) = destroy d'un handle consommé → double-free/crash | Pattern PJRT normal (destroy de handle ≠ libération mémoire donnée) ; si crash au premier run D1 : retirer les deinit des buffers donnés, re-mesurer, et **consigner la fuite de handles mesurée dans le RESULTS** |
 | R2 | XLA refuse l'aliasing en silence (pas d'erreur, pas de gain) | Le verdict est le **pic VRAM mesuré** (D1-D3), jamais la théorie |
 | R3 | 8k OOM malgré la donation (activations/scratch) | Prévu : D3 publie le mur suivant chiffré, D0-D2 suffisent à la brique |
 
