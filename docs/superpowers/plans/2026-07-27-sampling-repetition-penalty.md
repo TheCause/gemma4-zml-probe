@@ -8,7 +8,7 @@
 
 **Tech Stack:** Zig (std.Io 0.16), ZML/PJRT CUDA, bazel via `./bazel.sh` dans l'arbre ZML, Python + transformers pour l'oracle.
 
-**Spec:** `docs/superpowers/specs/2026-07-27-sampling-repetition-penalty-design.md` (rév. 3, `717380b`)
+**Spec:** `docs/superpowers/specs/2026-07-27-sampling-repetition-penalty-design.md` (rév. 4, `8c95587`)
 
 ---
 
@@ -33,7 +33,7 @@ Deux d'entre elles sont remontées **dans la spec** (rév. 4), parce que le déf
 |---|---|---|
 | 1 | **Off-by-one sur `hist`** : `append(if (in_gen_phase) tok else fed)` saute le **dernier token du prompt** (`in_gen_phase` est vrai au step où `fed` le vaut encore). → `append(fed)` en tête d'itération | **spec rév. 4-1** |
 | 2 | **RP6-(c) exigeait des ids en `--repl`**, qui les refuse → comparaison sur le texte détokenisé | **spec rév. 4-2** |
-| 3 | **`--@zml//platforms:cuda=true` manquant** sur tous les builds GPU — « sinon **repli CPU silencieux** » (`DOCUMENTATION.md:90`) : RP0 aurait comparé deux dumps **CPU** et passé à vide | plan |
+| 3 | **`--@zml//platforms:cuda=true` manquant** sur tous les builds GPU (`DOCUMENTATION.md:90`). *Rectifié en rév. 3 : l'oubli est aujourd'hui **refusé en dur** (`error.CudaRequired`), donc un run raté — pas un gate faussement vert. Le flag reste obligatoire.* | plan |
 | 4 | **`BUILD.bazel` : 3 cibles**, pas 1 — `g12a4k` et `g12a8k` compilent aussi `gemma4_g12auto.zig` et casseraient sur l'`@import` | plan |
 | 5 | **`.gitignore:15` = `fixtures/*.safetensors`** : la fixture RP1 « committée » ne l'aurait pas été → `git add -f` + vérification | plan |
 | 6 | **`readLogitsInto` était une API inventée** → repli `FixedBufferAllocator` + `toSliceAlloc`, qui ne dépend d'aucune API non vérifiée | plan |
@@ -60,33 +60,46 @@ les exporter dans le shell.
 ./bazel.sh build --@zml//platforms:cuda=true //examples/rqz:<cible>
 ```
 
-`docs/DOCUMENTATION.md:90` : « **OBLIGATOIRE (sinon repli CPU silencieux)** ». L'oubli ne
-provoque pas d'erreur : il produit un run **sur un autre backend, donc un autre HLO**. RP0
-comparerait alors deux dumps CPU et « passerait » sans rien prouver du chemin CUDA — un test à
-vide parfait, dans le gate censé garantir que le graphe n'a pas bougé.
+`docs/DOCUMENTATION.md:90-91`, cité en entier : « **OBLIGATOIRE** (sinon repli CPU silencieux —
+**désormais refusé en dur par `error.CudaRequired`**, échappatoire `--allow-cpu` débogage) ».
+Autrement dit l'oubli **échoue bruyamment** aujourd'hui ; le repli silencieux est le
+comportement historique, déjà corrigé. Le flag reste obligatoire — simplement, son oubli coûte
+un run raté, pas un gate faussement vert.
 
 **Arguments pinnés.** RP0 et RP2 comparent un « avant » et un « après » : leurs lignes de
 commande doivent être **identiques au caractère près**. Les figer **une seule fois** ici, à la
-Task 0, et s'y référer ensuite par `$RUN_ARGS` — jamais de `<args habituels>` laissé au
-jugement de l'implémenteur.
+Task 0, et s'y référer ensuite par `"${RUN_ARGS[@]}"` (c'est un **tableau** bash) — jamais de
+`<args habituels>` laissé au jugement de l'implémenteur.
 
 **Attendre l'état terminal avant de conclure.** Un run 12B paie ~1 min 40 de load+compile. Un
 `diff -rq` (ou un `ls | wc -l`) lancé juste après un `nohup … &` porterait son verdict sur un
-dump **incomplet**. Attendre `PASS`/`FAIL`/`error` dans le log distant — jamais un identifiant
-de gate (au chantier U7, « U7 » matchait la bannière de démarrage).
+dump **incomplet**.
+
+⚠ **N'attendre `PASS`/`FAIL` que sur les runs qui en émettent.** Ces chaînes n'existent que dans
+les chemins `--selftest-*` (`:544`, `:681`) et `--oracle` (`:1494`, `:1497`) du runner, et dans
+l'oracle Python (`69:225`). Un **run libre** (`--out-ids` sans `--oracle`) n'imprime que
+`PERF : …` et `mode libre : N tokens générés` : y attendre `PASS` boucle **indéfiniment** — le
+« contrôle qui ne peut pas RÉUSSIR », dans le paragraphe même qui prétend l'éviter.
+
+Motif universel, indépendant de toute chaîne applicative — on attend **la fin du processus** :
 
 ```bash
-# motif d'attente réutilisable
-ssh "$ZML_REMOTE" 'until grep -qE "PASS|FAIL|error|Traceback" /tmp/<log>; do sleep 10; done'
+ssh "$ZML_REMOTE" "nohup sh -c '<commande> ; echo DONE rc=\$?' > /tmp/<log> 2>&1 < /dev/null &"
+ssh "$ZML_REMOTE" 'until grep -q "^DONE rc=" /tmp/<log>; do sleep 10; done; tail -1 /tmp/<log>'
 ```
+
+Attendu : `DONE rc=0` ; un `rc` non nul est un échec à instruire **avant** tout verdict. Sur les
+runs `--oracle`, vérifier **en plus** `A1 PASS`/`A1 FAIL` — jamais un identifiant de gate (au
+chantier U7, « U7 » matchait la bannière de démarrage).
 
 **Runs distants longs** (leçon payée deux fois au gate U7) : **toujours** `nohup` + log distant +
 **stdin fermé** (`< /dev/null`). Un run de génération 12B ne se lance jamais en avant-plan sur
 une session SSH.
 
-**Guetteurs de logs** : filtrer sur des **états terminaux uniquement** (`PASS`, `FAIL`, `error`).
-Ne jamais filtrer sur un identifiant de gate — au chantier U7 la chaîne « U7 » matchait la
-bannière de démarrage et faisait croire à une terminaison.
+**Guetteurs de logs** : filtrer sur des **états terminaux uniquement**, jamais sur un
+identifiant de gate — au chantier U7 la chaîne « U7 » matchait la bannière de démarrage et
+faisait croire à une terminaison. Et vérifier que l'état guetté est **réellement émis par le
+run** : cf le paragraphe d'attente ci-dessus, un run libre n'imprime jamais « PASS ».
 
 **Dumps HLO** : `XLA_FLAGS=--xla_dump_to=<dir>`, et le gold est le **pré-opt** — jamais le
 post-opt (piège 15, cf `docs/BATCHING_RESULTS.md:37`).
@@ -120,21 +133,29 @@ export ZML_DST=...
 - [ ] **Step 3 : figer les arguments de run, une fois pour toutes**
 
 ```bash
-# À COLLER dans le plan une fois renseigné, et à réutiliser TEL QUEL en RP0 et RP2.
-RUN_ARGS='--weights <chemin poids 12B> --tokenizer <chemin tokenizer> \
-          --prompt "<prompt de référence>" --max-tokens 48'
+# ⚠ Le runner prend le checkpoint et le tokenizer en POSITIONNELS (usage :144-145) :
+#   gemma4_g12auto <model.safetensors> <tokenizer.json> --prompt "..." [--max-tokens N]
+# `--weights` est un drapeau de scripts/69_u8_gen_oracle.py, PAS du runner.
+# Tableau bash (pas une chaîne) : le prompt contient des espaces, une chaîne non quotée
+# se ferait découper au word-splitting.
+RUN_ARGS=(<model.safetensors> <tokenizer.json> --prompt "<prompt de référence>" --max-tokens 48)
 ```
+
+À réutiliser **tel quel** en RP0 et RP2, via `"${RUN_ARGS[@]}"`.
 
 - [ ] **Step 4 : builder et dumper le HLO témoin**
 
 ```bash
 ssh "$ZML_REMOTE" 'cd "$ZML_DST/../.." && ./bazel.sh build --@zml//platforms:cuda=true //examples/rqz:gemma4_g12auto'
-ssh "$ZML_REMOTE" "XLA_FLAGS=--xla_dump_to=/tmp/hlo_before \
-  nohup ./bazel-bin/examples/rqz/gemma4_g12auto $RUN_ARGS --out-ids /tmp/witness_before.safetensors \
-  > /tmp/witness_before.log 2>&1 < /dev/null &"
-# ATTENDRE l'état terminal AVANT de compter (cf Conventions)
-ssh "$ZML_REMOTE" 'until grep -qE "PASS|FAIL|error" /tmp/witness_before.log; do sleep 10; done; ls /tmp/hlo_before | wc -l'
+ssh "$ZML_REMOTE" "nohup sh -c 'XLA_FLAGS=--xla_dump_to=/tmp/hlo_before \
+  ./bazel-bin/examples/rqz/gemma4_g12auto ${RUN_ARGS[*]} --out-ids /tmp/witness_before.safetensors \
+  ; echo DONE rc=\$?' > /tmp/witness_before.log 2>&1 < /dev/null &"
+# ATTENDRE la FIN DU PROCESSUS avant de compter — un run libre n'émet jamais « PASS »
+ssh "$ZML_REMOTE" 'until grep -q "^DONE rc=" /tmp/witness_before.log; do sleep 10; done
+  tail -1 /tmp/witness_before.log; ls /tmp/hlo_before | wc -l'
 ```
+
+Attendu : `DONE rc=0`, puis ~1000 fichiers.
 
 Attendu : ~1000 fichiers (`ENGINE_LOG.md:92`). **Un dossier vide invaliderait RP0** (`diff -rq`
 de deux dossiers vides est vide) — c'est la garde de la spec.
@@ -147,7 +168,9 @@ en bf16 (spec F6). Rapatrier le fichier et l'archiver hors arbre.
 
 - [ ] **Step 6 : consigner `$RUN_ARGS` et le nombre de fichiers dumpés**
 
-Les écrire dans `docs/SAMPLING_RESULTS.md` (section « témoins ») dès maintenant : RP0 et RP2
+Les écrire dans `docs/SAMPLING_RESULTS.md` (section « témoins ») dès maintenant — ⚠ fichier
+PUBLIC : n'y consigner que des chemins déjà publics du dépôt (`/data/...`), jamais un `$HOME`
+d'hôte (le script oracle a un `anon_path()` prévu pour ça) : RP0 et RP2
 n'ont de valeur que si l'« après » rejoue **exactement** la même commande.
 
 ---
@@ -190,6 +213,8 @@ ssh "$ORACLE_HOST" 'cd <repo> && nohup python3 scripts/69_u8_gen_oracle.py \
   --weights <export dq> --prompt "<le prompt de $RUN_ARGS, à l'\''identique>" \
   --compute-fp32 --out <fixture fp32> \
   > /tmp/rp1_fixture.log 2>&1 < /dev/null &'
+# Ici `PASS` est légitime (≠ des runs libres du runner) : mode_decode imprime bien
+# « PASS fixture U8 écrite : … » en fin de parcours (69_u8_gen_oracle.py:225).
 ssh "$ORACLE_HOST" 'until grep -qE "PASS|FAIL|error|Traceback" /tmp/rp1_fixture.log; do sleep 10; done'
 ```
 
@@ -281,7 +306,7 @@ Noter la version de transformers affichée (spec §4-5).
 - [ ] **Step 3 : commit**
 
 ```bash
-# ⚠ .gitignore:15 contient `fixtures/*.safetensors` — un `git add` NU ÉCHOUE en silence
+# ⚠ .gitignore:15 contient `fixtures/*.safetensors` — un `git add` NU ÉCHOUE (bruyamment : « paths are ignored », code ≠ 0)
 # côté intention : la fixture RP1 que la spec §10 dit « committée » ne le serait pas.
 git add scripts/71_penalty_vectors.py
 git add -f fixtures/penalty_vectors.safetensors
@@ -300,7 +325,7 @@ doit voyager avec le code.*
 **Files:**
 - Create: `zml_runner/sampling.zig`
 - Modify: `zml_runner/gemma4_g12auto.zig` — champ `Args` (`:125-142`), parse (`:217`), `usage`
-  (`:148`), dispatch selftest (près de `:449`), **et la garde d'exclusivité `--repl` (`:868-874`)**
+  (`:144`), dispatch selftest (près de `:449`), **et la garde d'exclusivité `--repl` (`:868-874`)**
   qui énumère les drapeaux un par un : `--selftest-penalty` doit y être ajouté (spec §3.4,
   « exclusif de `--selftest-*` »)
 - Modify: `zml_runner/BUILD.bazel` — ajouter `sampling.zig` aux `srcs` des **TROIS** cibles qui
@@ -468,6 +493,9 @@ Ajouter **`params: *sampling.Params`** — un **pointeur**, pas une valeur : la 
 penalty à chaud entre deux prompts, et une copie par valeur ferait que `:penalty` n'aurait
 jamais d'effet sur le prompt suivant. **Mettre à jour les 3 sites**, aucun oubli.
 
+**Où déclarer le struct** : dans `run()`, **à côté de `stdout_w` (`:1241`)** — même frame que les
+3 sites d'appel et que la boucle stdin (`:1258-1284`), donc aucune question de durée de vie.
+
 - [ ] **Step 3 : allouer bitset et buffer de logits UNE FOIS**
 
 Dans `generateOnce`, avant la boucle de steps — **pas par step** : 1 Mio par step ferait 4 Gio
@@ -480,15 +508,26 @@ n'est pas vendored dans ce dépôt (impossible de vérifier qu'un `readInto` exi
 dépend d'aucune API non vérifiée :
 
 ```zig
-// bloc de 1 Mio alloué UNE FOIS, réutilisé à chaque step via un FixedBufferAllocator remis à zéro
+// UNE SEULE allocation, avant la boucle. Marge de 4 Kio EXIGÉE : le vocab 12B fait
+// 262 144 × 4 = 1 048 576 octets, soit EXACTEMENT 1 Mio — un bloc à la taille juste
+// échouerait en OutOfMemory si toSliceAlloc alloue le moindre descripteur ou si
+// l'alignement fait avancer end_index.
+const voc_us: usize = @intCast(vocab);                       // vocab RUNTIME (:1239)
+const logits_backing = try allocator.alloc(u8, voc_us * @sizeOf(f32) + 4096);
+defer allocator.free(logits_backing);
 var logits_fba = std.heap.FixedBufferAllocator.init(logits_backing);
+
 // par step :
 logits_fba.reset();
 var s = try r_logits.toSliceAlloc(logits_fba.allocator(), io);
+defer s.free(logits_fba.allocator());        // idiome des 40+ sites du dépôt ; inoffensif sur FBA
 const logits_host = s.items(f32);
+// Contrôle de forme, repris du chemin --window-vacuity (:1185-1188) : sans lui, un D2H de
+// mauvaise forme mis-indexe EN SILENCE — ce que la spec §8 interdit.
+if (logits_host.len != voc_us) return error.UnexpectedShape;
 ```
 
-Le RSS reste plat parce que le bloc sous-jacent ne bouge pas. Si une API `readInto` s'avère
+Le RSS reste plat parce que le bloc sous-jacent ne bouge jamais. Si une API `readInto` s'avère
 exister côté ZML, la substituer — mais ne pas bloquer le plan dessus.
 
 - [ ] **Step 4 : brancher le chemin host dans la boucle**
@@ -498,7 +537,9 @@ exister côté ZML, la substituer — mais ne pas bloquer le plan dessus.
 ```zig
 // `fed` est le token qu'on s'apprête à feeder : l'enregistrer ICI donne
 // prompt complet ++ générés, sans cas particulier.
-try hist.append(allocator, @intCast(fed));
+// Conditionné à la penalty : à 1.0 le chemin greedy doit rester STRICTEMENT inchangé,
+// sans même une ArrayList qui grossit (promesse d'architecture, spec §3.2).
+if (params.repetition_penalty != 1.0) try hist.append(allocator, @intCast(fed));
 ```
 
 ⚠ **Ne PAS écrire `hist.append(if (in_gen_phase) tok else fed)` en fin d'itération.**
@@ -550,16 +591,18 @@ if (params.repetition_penalty != 1.0) {
 # deploy + build de l'état MODIFIÉ — le flag CUDA est OBLIGATOIRE (repli CPU SILENCIEUX sinon,
 # ce qui ferait comparer deux dumps CPU : RP0 « passerait » sans rien prouver)
 ssh "$ZML_REMOTE" 'cd "$ZML_DST/../.." && ./bazel.sh build --@zml//platforms:cuda=true //examples/rqz:gemma4_g12auto'
-ssh "$ZML_REMOTE" "XLA_FLAGS=--xla_dump_to=/tmp/hlo_after \
-  nohup ./bazel-bin/examples/rqz/gemma4_g12auto $RUN_ARGS --out-ids /tmp/witness_after.safetensors \
-  > /tmp/witness_after.log 2>&1 < /dev/null &"
+ssh "$ZML_REMOTE" "nohup sh -c 'XLA_FLAGS=--xla_dump_to=/tmp/hlo_after \
+  ./bazel-bin/examples/rqz/gemma4_g12auto ${RUN_ARGS[*]} --out-ids /tmp/witness_after.safetensors \
+  ; echo DONE rc=\$?' > /tmp/witness_after.log 2>&1 < /dev/null &"
 # ATTENDRE la fin AVANT de differ (un dump incomplet donnerait un verdict faux)
-ssh "$ZML_REMOTE" 'until grep -qE "PASS|FAIL|error" /tmp/witness_after.log; do sleep 10; done
+ssh "$ZML_REMOTE" 'until grep -q "^DONE rc=" /tmp/witness_after.log; do sleep 10; done
+  tail -1 /tmp/witness_after.log
   diff -rq /tmp/hlo_before /tmp/hlo_after | tee /tmp/rp0_diff.txt; wc -l < /tmp/rp0_diff.txt'
 ```
 
-`$RUN_ARGS` est **exactement** celui figé en Task 0 Step 3 — une différence d'argument invaliderait
-la comparaison.
+`RUN_ARGS` est **exactement** celui figé en Task 0 Step 3 — une différence d'argument invaliderait
+la comparaison. Seule variation admise et sans effet sur le HLO : le chemin de `--out-ids`
+(`witness_before` / `witness_after`), drapeau purement host.
 
 Attendu : **uniquement les tolérances de F5** — `debug_options` (le chemin de dump lui-même) et
 éventuellement un `.ir-with-opt.ll` à noms SSA alpha-équivalents. **Publier le nombre observé** :
@@ -623,10 +666,11 @@ ids du template Zig aux `prompt_ids` de la fixture avant de conclure quoi que ce
 ```bash
 # trois runs d'oracle seulement — aucune ressource GPU engagée
 # --weights et --prompt (required=True, :356) sont OBLIGATOIRES : les omettre bloque au lancement
-COMMON="--weights <export dq> --prompt \"<le prompt de \$RUN_ARGS, à l'identique>\" --compute-fp32"
-python3 scripts/69_u8_gen_oracle.py $COMMON --repetition-penalty 1.0  --out /tmp/o_greedy
-python3 scripts/69_u8_gen_oracle.py $COMMON --repetition-penalty 1.15 --out /tmp/o_p115
-python3 scripts/69_u8_gen_oracle.py $COMMON --repetition-penalty 0.8  --out /tmp/o_p08
+# TABLEAU, pas une chaîne : `$COMMON` non quoté découperait le prompt sur ses espaces.
+COMMON=(--weights <export dq> --prompt "<le prompt de RUN_ARGS, à l'identique>" --compute-fp32)
+python3 scripts/69_u8_gen_oracle.py "${COMMON[@]}" --repetition-penalty 1.0  --out /tmp/o_greedy
+python3 scripts/69_u8_gen_oracle.py "${COMMON[@]}" --repetition-penalty 1.15 --out /tmp/o_p115
+python3 scripts/69_u8_gen_oracle.py "${COMMON[@]}" --repetition-penalty 0.8  --out /tmp/o_p08
 # hamming des ids `fed` entre o_greedy et chacun des deux autres
 ```
 
@@ -693,7 +737,10 @@ de logits est alloué une fois. 20 × 32 tokens ≈ 2 min de génération.
 pas par le code de sortie. (b) la valeur s'applique au prompt **suivant**, sur un prompt dont la
 sensibilité est **prouvée par RP3**, avec `divergences.len > 0`. (c) `:params` vérifié **contre
 le comportement** : `:params` annonce 1.15 ⇒ la sortie du repl égale la **détokenisation de la
-fixture oracle 1.15** (`/tmp/o_p115`, Task 5), bornée aux **48 premiers tokens**. ⚠ La
+référence 1.15**, bornée aux **48 premiers tokens**. ⚠ Cette détokenisation n'est **pas** dans
+`/tmp/o_p115` (qui contient les ids) mais dans son sidecar **`/tmp/o_p115.manifest.json`, champ
+`reponse_hf`** (`69_u8_gen_oracle.py:223`) — et ce fichier est produit sur `$ORACLE_HOST` alors
+que le repl tourne sur `$ZML_REMOTE` : **le rapatrier d'abord**. ⚠ La
 comparaison porte sur le **texte**, pas sur les ids : `--repl` refuse leur export (`:868-874`,
 garde non relâchée) — c'est le même choix qu'en RP5, et les conditions d'arrêt diffèrent de
 toute façon (EOT/`max_tokens` côté repl, `fed.len` côté oracle). (d) valeurs
