@@ -124,6 +124,10 @@ git rev-parse --short HEAD  # noter la valeur, elle identifie les témoins
 
 - [ ] **Step 2 : déployer l'état non modifié sur la machine GPU**
 
+⚠ **Le redéploiement n'est pas une formalité** : à l'exécution, l'arbre distant portait une
+version **obsolète** de `gemma4_g12auto.zig`. Un run lancé sans redéployer aurait mesuré
+silencieusement autre chose que HEAD. Contrôler la synchro après coup (`rsync -n`).
+
 ```bash
 export ZML_REMOTE=...   # jamais committé
 export ZML_DST=...
@@ -155,12 +159,42 @@ ssh "$ZML_REMOTE" 'until grep -q "^DONE rc=" /tmp/witness_before.log; do sleep 1
   tail -1 /tmp/witness_before.log; ls /tmp/hlo_before | wc -l'
 ```
 
-Attendu : `DONE rc=0`, puis ~1000 fichiers.
+Attendu : `DONE rc=0`, puis **510 fichiers** — valeur MESURÉE à l'exécution de cette tâche
+(19 Mo, un seul module `module_0001.zml.*`). ⚠ Le « ~1000 » d'une version antérieure de ce plan
+transposait `ENGINE_LOG.md:92` (« 1037/1037 »), qui concerne les runs **XLA-CPU** de
+`gemma4_engine_e1`/`e2` — un autre binaire, un autre backend. Ici `g12auto` sur CUDA compile un
+**mono-graphe**. La référence à inscrire dans `SAMPLING_RESULTS.md` est **510**.
+
+⚠ **Composition du dump, et ce qu'elle implique pour le verdict RP0** : 250 `.ll` + 248 `.ptx`
+(= **498 fichiers de codegen sur 510**), 8 `.txt`, 3 `.pbtxt`, 1 `.debug_options`.
+`ENGINE_LOG.md:92` documente déjà que les `.ll` diffèrent par des noms SSA alpha-équivalents
+entre deux compilations : avec 250 `.ll` ici contre 1 diff bénin à l'époque, **il faut
+s'attendre à nettement plus de bruit bénin**. Faire donc porter le verdict sur les **8 `.txt` +
+3 `.pbtxt`** — le graphe (`before_optimizations.txt`, `after_spmd_partitioner.txt`,
+`sm_8.6_gpu_after_optimizations.txt`, buffer-assignment, thunk sequences) — et traiter
+`.ll`/`.ptx`/`debug_options` comme du bruit, à instruire seulement s'il déborde de ce cadre.
 
 Attendu : ~1000 fichiers (`ENGINE_LOG.md:92`). **Un dossier vide invaliderait RP0** (`diff -rq`
 de deux dossiers vides est vide) — c'est la garde de la spec.
 
-- [ ] **Step 5 : le témoin d'ids de RP2 est produit par le même run**
+- [ ] **Step 5 : SECOND témoin, sur un prompt LONG** (indispensable — mesuré à l'exécution)
+
+⚠ Le prompt canonique répond « Paris » puis **EOT au 2ᵉ token** : `--max-tokens 48` n'est jamais
+atteint et le témoin vaut `[50429, 106]`. **Deux ids n'exercent pas une repetition penalty** —
+ce témoin prouve seulement que le chemin par défaut n'a pas bougé. (Le « 48/48 » des gates
+historiques vient de la fixture `u8_gen48`, pas de ce prompt.)
+
+Produire donc un second témoin, **sur le même HEAD non modifié**, avec un prompt génératif :
+
+```
+… --prompt "Tell me the story of the number zero, from its invention to modern mathematics." \
+  --max-tokens 200 --out-ids /tmp/witness_long_before.safetensors
+```
+
+Il sert **deux** gates : RP2 (des ids nombreux, donc du mordant) et le **témoin de récitation**
+de RP7, qui exige de publier le comportement à penalty neutre avant tout balayage.
+
+- [ ] **Step 5-bis : le témoin d'ids court est produit par le run de la Step 4**
 
 `--out-ids /tmp/witness_before.safetensors` ci-dessus **est** le témoin de RP2 : des ids, en
 safetensors, comparables bit à bit. **Jamais `u8_gen48`**, contre lequel le runner marque 42/48
