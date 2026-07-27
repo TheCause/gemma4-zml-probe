@@ -5,10 +5,12 @@
 > backlog : sampling + repetition penalty ». Symptôme d'origine : en greedy, le 12B **boucle
 > sur la récitation** — comportement de modèle, pas un bug du portage.
 >
-> **Révision 2** (même jour, après double revue de spec). La v1 affirmait que les logits
-> sortaient déjà du graphe **des deux runners** : c'est **faux pour l'E2B**
-> (`gemma4_gen_auto.zig:753` retourne 6 sorties, sans logits). Le périmètre a été
-> re-arbitré (§0 C3) et 11 gates ont été durcis ou ajoutés. Détail en §10.
+> **Révision 3** (même jour, 2 tours de double revue). Deux corrections de fond :
+> (1) la v1 croyait les logits disponibles sur les deux runners — **faux pour l'E2B** ;
+> (2) la v2 a déplacé le périmètre sur le 12B **sans déplacer l'oracle**, qui est resté celui
+> de l'E2B — et l'oracle de décode du 12B est **bf16 par construction**, c'est-à-dire
+> l'instrument que le projet a déclaré corrompu le 25 juillet. D'où le prérequis **RP-1**.
+> Détail des 2 tours en §12.
 
 ## 0. Décisions de cadrage (arbitrées avec Régis)
 
@@ -16,90 +18,93 @@
 |---|---|---|
 | **C1** | **Deux phases**, penalty d'abord | La penalty sur greedy reste **déterministe** → HF sait faire `greedy + repetition_penalty` → **l'oracle « ids == HF » reste opérable**. Le stochastique casse l'oracle argmax et exige des gates distributionnels : on ne mélange pas les deux natures de preuve. |
 | **C2** | **Approche host-side pure** | Seule voie qui laisse le **graphe intact** : « je n'ai rien cassé » se démontre par un diff, pas par une campagne. |
-| **C3** | **`gemma4_g12auto.zig` SEUL est câblé** (rév. 2) | C'est le seul runner dont le graphe sort déjà les logits (F1). Câbler l'E2B exigerait d'ajouter une sortie à son tuple racine, donc de modifier son HLO — C2 et « gates lourds sur E2B » ne peuvent pas tenir ensemble. La vitesse d'itération est préservée **par RP1** (`zig test` sans GPU, où se joue l'essentiel du débogage), pas par le petit modèle. |
-| **C4** | **Directives `:param` à chaud** dans `--repl` | Le host-side les rend gratuites (aucun recompile). Recharger le 12B coûte ~1 min 40 : un balayage complet de la penalty passe de N compiles à **une**. |
-| **C5** | **L'oracle appelle le vrai `RepetitionPenaltyLogitsProcessor`** de transformers (rév. 2) | Retranscrire la formule dans le script oracle ferait comparer deux transcriptions **de la même lecture par le même auteur** : une inversion de branche commise des deux côtés passerait le gate et la claim serait fausse. Voir §5 RP3. |
+| **C3** | **`gemma4_g12auto.zig` SEUL est câblé** (rév. 2) | Seul runner dont le graphe sort déjà les logits (F1). Câbler l'E2B exigerait d'ajouter une sortie à son tuple racine, donc de modifier son HLO. La vitesse d'itération vient **de RP1** (`zig test` sans GPU), pas du petit modèle. |
+| **C4** | **Directives `:param` à chaud** dans `--repl` | Gratuites en host-side. Recharger le 12B coûte ~1 min 40 : un balayage passe de N compiles à **une**. |
+| **C5** | **L'oracle appelle le vrai `RepetitionPenaltyLogitsProcessor`** | Retranscrire la formule ferait comparer deux transcriptions **de la même lecture par le même auteur** : une inversion de branche commise des deux côtés passerait le gate. |
+| **C6** | **L'instrument est refondé AVANT d'armer la penalty** (rév. 3) | L'oracle de décode 12B est bf16 (F6) : il fabrique des ties artificiels, et la penalty **comprime les marges de 13 %**, donc en fabriquerait davantage. Armer la penalty sur cet oracle produirait des FAIL dont la cause n'est pas le code livré. → gate **RP-1**. |
 
-**Hors périmètre décidé** : câbler `gemma4_gen_auto.zig` (E2B). Dette **écrite** au backlog :
+**Hors périmètre décidé** : câbler `gemma4_gen_auto.zig` (E2B). Dette **écrite** :
 « exposer les logits de `StepTok` → +1 sortie au tuple racine → arbitrage HLO à refaire ».
-Ce n'est pas un oubli, c'est un report explicite.
 
 ## 1. Faits établis par lecture du code
 
 **F1 — les logits sortent déjà du graphe du 12B, et PAS de celui de l'E2B.**
-
-- `gemma4_g12auto.zig:830` : `return .{ t5.values, t5.indices, logits, … }` — **7 sorties**,
-  logits en 3ᵉ position (ajoutée pour `--window-vacuity`). Réception `:1357`, commentaire
-  « NON lue ici (pas de D2H) » `:1356`, `r_logits.deinit()` `:1401`. Le chemin host est donc
-  à un `toSliceAlloc` près : **aucune modification du graphe**.
-- `gemma4_gen_auto.zig:753` : `return .{ t5.values, t5.indices, slk, slv, flk, flv }` —
-  **6 sorties, pas de logits** (côté host, `call_results.get` attend bien 6 buffers `:1041`).
-
-C'est **exactement** ce qui fonde C3. La v1 de cette spec généralisait le premier cas au
-second : correction portée en rév. 2.
+`gemma4_g12auto.zig:830` : **7 sorties**, logits en 3ᵉ (ajoutée pour `--window-vacuity`) ;
+réception `:1357`, commentaire « NON lue ici (pas de D2H) » `:1356`, `deinit()` `:1401`.
+`gemma4_gen_auto.zig:753` : **6 sorties, sans logits** (host : `get` à 6 buffers, `:1041`).
+C'est ce qui fonde C3.
 
 **F2 — les logits sont post-softcap, sur les quatre chemins du moteur.**
-`softcapPrec` (`engine.zig:193`) est appliqué aux logits en `:766` (`forward`), **`:807`
-(`forwardStageGen`)**, `:850` (`forwardStep`) et `:889` (`forwardStageStep`).
-**Le chemin du 12B est `forwardStageGen`** (`gemma4_g12auto.zig:822`) → la ligne pertinente est
-**`engine.zig:807`**. `:850` appartient à `forwardStep` (ouverte `:822`), que le commentaire D12
-(`gemma4_g12auto.zig:794-801`) rejette explicitement pour le 12B.
+`softcapPrec` (`engine.zig:193`) appliqué en `:766` (`forward`), **`:807` (`forwardStageGen`)**,
+`:850` (`forwardStep`), `:889` (`forwardStageStep`). **Le chemin du 12B est `forwardStageGen`**
+(`gemma4_g12auto.zig:822`) → la ligne pertinente est **`engine.zig:807`** ; `:850` appartient à
+`forwardStep`, que le commentaire D12 (`:794-801`) rejette explicitement pour le 12B.
+L'objet rapatrié est donc exactement celui que HF passe à ses `LogitsProcessor`.
 
-L'objet rapatrié est donc **exactement celui que HF passe à ses `LogitsProcessor`** : aucune
-part du modèle n'est à réimplémenter côté host.
-
-**F3 — formule HF** (`transformers/generation/logits_process.py`,
-`RepetitionPenaltyLogitsProcessor.__call__`) :
+**F3 — formule HF** (`transformers/generation/logits_process.py`) :
 
 ```python
 penalty_scores = torch.where(last_scores < 0, last_scores * penalty, last_scores / penalty)
 scores = torch.where(token_mask, penalty_scores, last_scores)
 ```
 
-- logit **négatif → ×penalty** ; **positif ou nul → ÷penalty** ;
-- `token_mask` **booléen** ⇒ penalty appliquée **au plus une fois par token distinct** ;
-- tokens considérés = **`input_ids` entier, prompt inclus** par défaut ; `prompt_ignore_length`
-  (un **entier**, pas un booléen) permet de n'en garder que le généré ;
-- `__init__` rejette `penalty ≤ 0` via `not (penalty > 0)` — **formulation en acceptation**,
-  qui exclut aussi `NaN`. Voir §4 : la transcription naïve `penalty <= 0` laisse passer `NaN`.
+logit **négatif → ×penalty**, **positif ou nul → ÷penalty** · `token_mask` **booléen** ⇒ **au
+plus une fois par token distinct** · tokens = **`input_ids` entier, prompt inclus** par défaut,
+`prompt_ignore_length` étant un **entier** · `__init__` rejette via `not (penalty > 0)` —
+**formulation en acceptation**, qui exclut aussi `NaN` (voir §8).
 
-**F4 — le RNG device est écarté** (phase 2). `docs/ZML_UPSTREAM_AUDIT_2026-07-12.md:36-41` :
-`sampleTokens`/`sampleTokensDynamic`/`Tensor.Rng` existent déjà dans le ZML vendored
-(`adee932e`) — **aucun bump requis** — mais « le RNG device n'est pas garanti déterministe entre
-backends/versions et son état global lie le bruit par lane à B ». Piège consigné : dans
-`adee932e`, `sampleTokensDynamic` **multiplie** par la température **au lieu de diviser**
-(bugfix upstream `73498264` non appliqué). Ce piège dicte la conception de SM1 (§6).
+**F4 — le RNG device est écarté** (phase 2). `ZML_UPSTREAM_AUDIT_2026-07-12.md:36-41` :
+`sampleTokens`/`Tensor.Rng` existent déjà dans le ZML vendored (`adee932e`, aucun bump), mais
+« le RNG device n'est pas garanti déterministe entre backends/versions ». Piège consigné :
+`sampleTokensDynamic` **multiplie** par la température au lieu de diviser. Ce piège dicte SM1.
 
 **F5 — la byte-identité HLO stricte n'existe pas dans ce repo.**
-`docs/ENGINE_LOG.md:92` (preuve E1/E2, Task 0) : `diff -rq` sur 1037 fichiers → identiques
-**sauf 2 diffs bénins** : (a) `debug_options`, qui n'encode que le chemin `--xla_dump_to` et
-diffère donc **par construction** entre `before/` et `after/` ; (b) un `.ir-with-opt.ll` où
-seuls des **noms SSA LLVM** diffèrent (alpha-équivalent). Le critère RP0 énumère ces
-tolérances **avant** la mesure (§5).
+`ENGINE_LOG.md:92` : 1037/1037 fichiers identiques **sauf 2 diffs bénins** — (a)
+`debug_options`, qui n'encode que le chemin `--xla_dump_to` et diffère **par construction** ;
+(b) un `.ir-with-opt.ll` à **noms SSA LLVM** alpha-équivalents.
+⚠ **Contradiction interne au repo** : `ZML_MODULAR_ENGINE_DESIGN.md:132` n'en compte qu'**1**
+(`debug_options` seul). RP0 retient la version conservatrice (2) et **tranche la contradiction
+en publiant ce qu'il observe**.
+
+**F6 — l'oracle de décode du 12B est bf16 par construction** (rév. 3, fondement de C6/RP-1).
+`scripts/69_u8_gen_oracle.py:371-372` refuse `--compute-fp32` hors teacher-force (« le mode
+décode U8 reste bf16 tel que consigné ») et `:148` **asserte** `out.logits.dtype == bfloat16`.
+`U_12B_RESULTS.md:22-25` en documente l'effet : « quantum bf16 = 0,125 sur des logits ~25 →
+l'oracle fabrique des ties artificiels sur ~1 % des steps (48 quasi-ties mesurés sur 1150) »,
+d'où « U8 brut **42/48** ». Le **48/48 STRICT** a été obtenu par un **autre instrument**
+(`68 --compute-fp32`, teacher-force fp32), pas par la fixture de décode.
+
+Conséquence directe : la penalty **divise par 1,15 les logits positifs**, comprimant les marges
+de ~13 % ⇒ elle fabriquerait **davantage** de ties artificiels sur cet oracle. Un RP3 armé sur
+la fixture bf16 échouerait pour une raison étrangère au code livré, et déclencherait le STOP de
+§7-4 sur un faux signal.
+
+**F7 — les nombres de marge, mesurés, existent déjà** (rév. 3 — ils remplacent une devinette).
+`U_12B_RESULTS.md` : U7 fp32 `max_abs` runner↔oracle = **9,365e-4** (`:61`) · U9-iv marge
+minimale réelle = **0,0279 @ gen=1043 sur 1150 steps** (`:38-40`) · les 11 « divergences » bf16
+avaient des marges fp32 réelles de **0,028 à 0,24** — « toutes des artefacts de quantum ».
+`ENGINE_LOG.md:277` documente par ailleurs le précédent exact du risque qu'anticipe RP4 :
+« les contre-tests argmax restaient à 0 divergence — l'argmax greedy est trop robuste ».
 
 ## 2. Posture en tension avec la spec batching §3.5 — les deux restent valides
 
-`docs/superpowers/specs/2026-07-12-batching-flash-attn-design.md:212-220` a spécifié un sampling
-**tronqué au top-K rapatrié**, explicitement « approximation de charge, pas une implémentation
-de sampling de référence », avec « aucun oracle en mode sampling ».
-
-Cette spec **n'annule pas** ce choix, elle en ouvre un second à côté :
+`2026-07-12-batching-flash-attn-design.md:212-220` a spécifié un sampling **tronqué au top-K**,
+explicitement « approximation de charge, pas une implémentation de référence », « aucun oracle ».
 
 | Voie | Cible | Statut |
 |---|---|---|
-| §3.5 batching — top-K tronqué, D2H ≈ K×8 o/lane/step | **mode charge, B>1** | **intention de spec, sans code à ce jour** (`grep temperature zml_runner/gemma4_bbatch.zig` → 0 occurrence) |
+| §3.5 batching — top-K tronqué | **mode charge, B>1** | **intention de spec, sans code** (`grep temperature gemma4_bbatch.zig` → 0) |
 | Cette spec — logits complets, host, B=1 | **mode référence, oraclé** | nouvelle |
 
-La troncature au top-K est **structurellement incapable** de porter une claim « == HF » : un
-token de l'historique hors du top-K ne peut pas être pénalisé. C'est une limite de la voie de
-charge, pas un défaut à corriger.
+La troncature est **structurellement incapable** de porter une claim « == HF » : un token de
+l'historique hors du top-K ne peut pas être pénalisé. Limite de la voie de charge, pas défaut.
 
 ## 3. Design — module
 
 ### 3.1 `zml_runner/sampling.zig` (nouveau)
 
 Responsabilité unique : **transformer un vecteur de logits en un token**. Aucune dépendance ZML
-(f32 nus) ⇒ testable par `zig test` sans GPU, sans PJRT, sans poids.
+(f32 nus) ⇒ `zig test` sans GPU, sans PJRT, sans poids.
 
 ```zig
 pub const Params = struct {
@@ -108,26 +113,26 @@ pub const Params = struct {
 };
 
 /// Applique la penalty IN-PLACE, au plus une fois par token distinct (F3).
-/// `seen` : bitset dimensionné au vocab RUNTIME, alloué une fois, remis à zéro par appel.
 pub fn applyRepetitionPenalty(logits: []f32, hist: []const u32, penalty: f32, seen: *Bitset) void
 
-/// argmax host. Politique de tie-break explicite (premier indice gagnant), gatée en RP1
-/// sur des vecteurs à ties EXACTS — le seul endroit où un tie est provoquable.
+/// argmax host. Tie-break explicite (premier indice gagnant), gaté en RP1 sur des vecteurs
+/// à ties EXACTS, et surveillé en production par la marge du compteur (§3.2).
 pub fn argmax(logits: []const f32) u32
 ```
 
-**Quatre contraintes d'implémentation, chacune adossée à un gate :**
+**Quatre contraintes, chacune adossée à un gate :**
 
-1. **Déduplication obligatoire** (F3). Un `for (hist) |t| logits[t] = …` naïf applique la penalty
-   autant de fois que le token apparaît — et diverge exactement dans le cas qui motive le
-   chantier. Bitset ⇒ coût `O(|hist|)`, sémantique identique à HF. → contre-test RP4-(b).
-2. **Le signe commande l'opération** (F3). → contre-test RP4-(a).
-3. **Interdiction de l'optimisation `× (1/penalty)`.** Mathématiquement équivalente, elle **casse
-   la bit-exactitude f32** attendue en RP1 : la division doit rester une division.
-4. **Le bitset est dimensionné sur le vocab lu au runtime**
-   (`model.embed_tokens.dim(.voc)`, cf `gemma4_g12auto.zig:1239`), jamais sur une constante.
+1. **Déduplication obligatoire** (F3) : un `for (hist) |t| …` naïf applique la penalty autant de
+   fois que le token apparaît, et diverge exactement dans le cas qui motive le chantier.
+   → contre-test RP4-(b).
+2. **Le signe commande l'opération** (F3) → contre-test RP4-(a).
+3. **Interdiction de l'optimisation `× (1/penalty)`** : mathématiquement équivalente, elle casse
+   la bit-exactitude f32 attendue en RP1. La division reste une division.
+4. **Bitset ET buffer de logits alloués UNE FOIS**, dimensionnés au vocab **runtime**
+   (`gemma4_g12auto.zig:1239`). Le buffer réutilisé, pas un `toSliceAlloc` par step — sinon
+   200 tokens × 20 prompts = 4 Gio alloués/libérés et le critère RSS de RP5 saute de bonne foi.
 
-### 3.2 Câblage dans la boucle — pourquoi la non-régression est gratuite
+### 3.2 Câblage dans la boucle
 
 **Si `penalty == 1.0`, les logits ne sont pas lus du tout** : le chemin actuel (top-1 du `topK`
 in-graph, ~48 octets D2H) reste strictement inchangé. Le chemin host ne s'arme que si la penalty
@@ -140,23 +145,34 @@ exe.call → r_t5v, r_t5i, r_logits, caches
          PAS `tok` (l'argmax du step, ignoré en prefill — cf :1415).
 
   penalty == 1.0 → tok = t5i[0]                     (chemin actuel, r_logits.deinit())
-  sinon          → logits = r_logits.toSliceAlloc   (1 Mio, transfert DÉJÀ synchrone)
+  sinon          → logits ← r_logits (buffer réutilisé, 1 Mio, transfert DÉJÀ synchrone)
                    applyRepetitionPenalty(logits, hist, p, seen)
                    tok = argmax(logits)
-                   compteur_divergence += (tok != t5i[0])   // cf RP3
+                   si tok != t5i[0] : divergences.append(.{ step, marge = t5v[0]-t5v[1] })
   hist.append(tok)   // en phase génération
 ```
 
 Le **premier token généré `s0`** est produit au dernier step de prefill (`in_gen_phase` vrai dès
-`step + 1 >= ids.len`, `:1363`) : la penalty **s'y applique**. L'oracle doit faire de même
-(§4) — sinon divergence garantie dès le token 0.
+`step + 1 >= ids.len`, `:1363`) : la penalty **s'y applique**. L'oracle doit faire de même (§4).
 
-Le D2H s'ajoute à un transfert **déjà synchrone** (la boucle lit le top-5 à chaque step) : il ne
-sérialise rien de nouveau. Son coût est **mesuré en M1**, il n'est supposé nulle part.
+### 3.2.1 Le compteur de divergences — ce qu'il prouve et ce qu'il ne prouve pas
 
-**`compteur_divergence`** (nombre de steps où l'argmax host diffère du top1 device) est exposé en
-fin de génération. À penalty ≠ 1.0, un compteur nul signifie que la penalty **n'a rien fait** :
-c'est une erreur bruyante, pas un succès silencieux (RP3).
+`divergences` = liste des steps où l'argmax host diffère du top-1 device, **avec la marge**.
+
+| Observation | Signification | Action |
+|---|---|---|
+| `len == 0` avec penalty ≠ 1.0 | La penalty **n'a rien fait** (paramètre non propagé jusqu'à `generateOnce` — 15 arguments positionnels `:1296`, `hist` vide, `in_gen_phase` inversé) | **FAIL bruyant** |
+| une divergence à **marge exactement 0,0** | Désaccord de **tie-break** host↔device, sans rapport avec la penalty | **FAIL** — et c'est le seul endroit où un vrai tie est observable (voir §3.1-note) |
+| `len > 0`, marges non nulles | La penalty **a agi**. **Ce n'est PAS une preuve de correction** : une lecture erronée du D2H (dtype, stride) ferait diverger presque tous les steps | tripwire seulement — la preuve, c'est RP3 |
+
+Seul `len == 0` est informatif comme échec. C'est un détecteur de penalty morte, **pas un
+oracle**. Il est exigé en **RP3, RP5, RP6 et RP7** — les quatre gates exposés à tourner
+penalty éteinte sans que rien ne le montre.
+
+**Note tie-break** : RP1 compare la politique host à la sémantique **documentée** de `sort`
+(ZML n'est pas vendored dans ce dépôt : `tensor.zig` se lit à distance). C'est déclaratif, et le
+repo a déjà payé un gate déclaratif. La règle « marge 0,0 ⇒ FAIL » ci-dessus est le complément
+**opérable et gratuit**, en production.
 
 ### 3.3 Historique
 
@@ -164,138 +180,208 @@ c'est une erreur bruyante, pas un succès silencieux (RP3).
 
 **`hist` est le premier état inter-prompts jamais introduit dans ce runner.** Son scope est
 `generateOnce`, jamais `run()` : chaque prompt repart d'un historique vide, comme le cache
-(`gemma4_g12auto.zig:1295`). L'invariant « aucun état ne survit entre deux prompts », prouvé
-par R1/R2 au chantier repl, devient **cassable** — d'où le gate RP5, qui n'existait pas en v1.
+(`:1295`, « AUCUN état ne survit entre deux appels (R1 le vérifie) »). L'invariant prouvé par
+R1/R2 devient **cassable** → gate RP5.
 
 ### 3.4 Directives `--repl` et surface CLI
 
 CLI : `--repetition-penalty <f>`, `--ignore-prompt`.
 Directives : `:penalty <f>` · `:ignore-prompt on|off` · `:params` · `:help`.
 
-Règle unique et testable : **une ligne commençant par `:` n'est jamais un prompt**. Limite
-assumée et documentée (un prompt ne peut pas commencer par `:`) plutôt qu'un mécanisme
-d'échappement dont personne n'a besoin (YAGNI). Valeur invalide rejetée **sans tuer la session**.
+**Une ligne commençant par `:` n'est jamais un prompt.** Limite assumée et documentée (un prompt
+ne peut pas commencer par `:`) plutôt qu'un échappement dont personne n'a besoin. Valeur
+invalide rejetée **sans tuer la session**.
 
-## 4. Design — oracle
+⚠ **`--repl` est exclusif de `--oracle`, `--window-vacuity`, `--out-ids`, `--ids-only`,
+`--selftest-*`** (`gemma4_g12auto.zig:868-874`), garde dont le motif écrit est d'éviter qu'un
+repl écrase des artefacts de gate. **Cette garde n'est pas relâchée** : les gates en mode
+résident (RP5, RP6) comparent donc le **texte détokenisé de stdout**, comme R1 l'avait fait au
+chantier repl. Relâcher une garde de sécurité pour faire passer un test irait dans le mauvais sens.
 
-`scripts/49_gen_custom_oracle.py` **n'utilise pas `generate()`** : c'est une boucle greedy
-maison (`next_token` `:129-132`, `lg.argmax(dim=-1)`). Son extension obéit à C5 :
+## 4. Design — oracle (`scripts/69_u8_gen_oracle.py`, PAS le 49)
 
-1. **Importer et appeler le vrai processor** :
+L'oracle du 12B est **`scripts/69_u8_gen_oracle.py`** (mode décode, fixture `u8_gen48`, clés
+`positions` + `fed` — exactement ce que lit le mode `--oracle` de `gemma4_g12auto`).
+`scripts/49_gen_custom_oracle.py` est l'oracle **E2B** (`MODEL_ID = "google/gemma-4-E2B-it"`,
+`:35`) : hors périmètre depuis C3.
+
+**Favorable à C5** : le 69 lit `out.logits` **déjà softcappé par HF dans le forward** (assert
+≤ 30 à chaque step), là où le 49 recalcule la tête à la main. Le point d'insertion du processor
+est donc plus propre sur le 69.
+
+Extensions requises :
+
+1. **Lever la restriction `--compute-fp32` au mode décode** (`:371-372`). Les hooks
+   `install_fp32_hooks` **existent déjà** (`:69-93`) et l'oracle fp32 est **~5× plus rapide**
+   que le bf16 émulé (`U_12B_RESULTS.md:41`) : le coût n'est pas l'obstacle. → RP-1.
+2. **Importer et appeler le vrai processor** :
    `from transformers.generation.logits_process import RepetitionPenaltyLogitsProcessor`.
-   **Interdiction de retranscrire le `torch.where` de F3** — c'est le point où une erreur
-   commune aux deux implémentations passerait inaperçue.
-2. **Appliquer la penalty aussi à `s0`**, calculé hors boucle (`:137`).
-3. **Exporter `prompt_ids` comme tenseur** de la fixture, pas seulement dans le `.manifest.json`
-   sidecar (`:196-217`). Sous penalty, les ids du prompt **entrent dans le calcul** : deux
-   tokenisations de même longueur donnent silencieusement des pénalités différentes, et le mode
-   `--oracle` ne contrôle aujourd'hui que **la longueur** du prompt
-   (`gemma4_gen_auto.zig:866-870`, déviation assumée et documentée).
-4. **Journaliser la version de `transformers`** dans `SAMPLING_RESULTS.md` : la formule a évolué
-   entre versions — la claim est version-relative.
+   **Interdiction de retranscrire le `torch.where` de F3.**
+3. **Appliquer la penalty aussi à `s0`**, produit par le prefill hors boucle (`:143-153`,
+   `seq = [int(idxs[0])]`, la boucle démarre `:160`).
+4. **Exporter `prompt_ids` comme tenseur** de la fixture : `save_file` (`:191`) ne l'exporte pas,
+   il ne vit que dans le manifest JSON (`:204`). Sous penalty les ids du prompt **entrent dans le
+   calcul**, or le contrôle côté runner ne porte que sur **la longueur**
+   (`gemma4_g12auto.zig:977-981`, déviation assumée : « les prompt_ids complets ne vivent que
+   dans le manifest sidecar JSON »). Deux tokenisations de même longueur donneraient
+   silencieusement des pénalités différentes.
+5. **Journaliser la version de `transformers`** : la formule a évolué entre versions, la claim
+   est version-relative.
+6. **Producteur de fixtures RP1** : un script séparé émettant des triplets
+   `(logits_in, hist, penalty) → logits_out` **au niveau vecteur** (ce n'est pas ce qu'émet un
+   oracle de génération). Il ne tourne que là où `transformers` est installé.
 
 Nouveaux flags : `--repetition-penalty`, `--ignore-prompt`.
 
 ## 5. Gates — phase 1 (`RP`, déterministe)
 
-| Gate | Contenu | Critère PASS |
+### RP-1 — PRÉREQUIS : refonder l'instrument (rév. 3)
+
+**Rien n'est armé tant que RP-1 n'est pas PASS.**
+
+| Étape | Contenu | Critère |
 |---|---|---|
-| **RP0** | **Graphe intact** — dumps HLO de `g12auto` avant/après, témoins pris **avant toute édition**, worktree homogène | `diff -rq` identique **sauf les 2 tolérances énumérées en F5** (`debug_options`, noms SSA LLVM). **+ contre-test** : une perturbation délibérée du graphe (pattern E1 : `RMS_EPS` 1e-6→1e-2) doit faire **FAIL** RP0. **+ garde** : dumps non vides et binaire effectivement rebuildé (`diff -rq` de deux dossiers vides est vide). |
-| **RP1** | **Unitaire sans GPU** — `zig test sampling.zig` vs fixtures produites par le **vrai processor** HF : penalty ∈ {0.8, 1.0, 1.15, 1.5} | **bit-exact, 0 ULP** — aucun repli pré-approuvé. **Le test asserte les propriétés de sa propre fixture** (≥1 token en doublon, ≥1 logit négatif pénalisé, ≥1 positif pénalisé) et **échoue si un compteur vaut 0**. **+ tie-break** : vecteurs à ties f32 **exacts**, politique comparée à la sémantique documentée de `sort`. |
-| **RP2** | **Non-régression** — penalty=1.0, 12B | ids **bit-identiques** au témoin. Quasi-tautologique et **assumé comme tel** (même code) : il couvre le câblage, pas le calcul. |
-| **RP3** | **Oracle HF exact, penalty active** — 12B, penalty ∈ {0.8, 1.15}, script 49 étendu (C5) | **ids == HF** · **+ mordant pré-enregistré** : `hamming(ids_HF_penalty, ids_HF_greedy) ≥ 3` sur 48 steps, **sinon la configuration est déclarée inutilisable** et le prompt change (le gate ne peut pas passer à vide) · **+ `compteur_divergence` > 0**, sinon **FAIL bruyant** · **+ publier** la marge min top1−top2, avec et sans penalty. |
-| **RP4** | **Non-vacuité** — 3 corruptions : (a) branches de signe inversées, (b) dédup supprimée, (c) prompt inclus/exclu à tort | **chacune doit faire FAIL RP3**, et **publier son mordant** (nb de steps dont l'id change), **plancher 1**. Si une corruption ne mord pas, la remédiation est **écrite d'avance** : prompt contenant des tokens qui sont aussi des continuations probables, et re-run — jamais une requalification en « effet trop faible ». |
-| **RP5** | **Aucun état ne survit entre prompts** (§3.3) — `--repl`, même prompt joué 2×, penalty active | `ids(p1) == ids(p2)` (rejeu du contrôle p1==p3 de R1) **+ RSS/VRAM plate sur 20 prompts** penalty active (rejeu de R2 — c'est ici que se voit un `hist` ou un bitset qui grossit, pas dans une comparaison d'ids). |
-| **RP6** | **Directives repl** — (a) `:penalty` ne produit **aucune** génération (**comptage**) ; (b) la valeur s'applique au prompt suivant, sur un prompt **dont la sensibilité à la penalty est prouvée par RP3** ; (c) `:params` vérifié **contre le comportement** (`:params` dit 1.15 ⇒ ids == référence 1.15), pas contre son propre écho ; (d) valeurs invalides **énumérées** : `0`, `-1`, `nan`, `inf`, `abc`, vide | 4/4 |
-| **RP7** | **12B — la récitation est-elle levée** — balayage `:penalty` à chaud (une seule compile) | **Métrique chiffrée** : longueur maximale de n-gramme répété sur les 200 derniers tokens. **Le témoin penalty=1.0 est publié d'abord** ; **si le témoin ne récite pas, le gate est déclaré vacué** et le prompt change. PASS = métrique du témoin divisée par ≥ 2 pour au moins une valeur du balayage. |
+| a | Lever `--compute-fp32` au mode décode du 69 (§4-1) | la commande s'exécute, logits **f32** (l'assert bf16 `:148` devient conditionnel) |
+| b | Régénérer `u8_gen48` **en fp32** | fixture produite, dtype consigné |
+| c | **Re-valider le greedy 48/48 STRICT** via `--oracle` contre la fixture fp32 | **48/48**. C'est **ce run** qui refonde l'instrument. |
 
-**M1 — mesure (pas un gate)** : coût du D2H, tok/s penalty=1.0 vs penalty active, **n ≥ 3 runs
-par bras**, médiane et dispersion publiées. **Valeur attendue pré-enregistrée : ~1 %**
-(1 Mio greffé sur un transfert déjà synchrone, ~110 ms/step). Plafond 10 %. **La dispersion
-inter-run doit être inférieure à l'écart mesuré**, sinon l'instrument ne résout pas ce qu'il
-prétend mesurer et la conclusion est « non concluant », pas « négligeable ».
+Si (c) ne donne pas 48/48, **le chantier penalty s'arrête** : le problème est dans l'instrument,
+pas dans un code non encore écrit. Rappel F6 : contre la fixture **bf16**, le runner marque
+42/48 — ce chiffre n'est pas un échec du runner, c'est la signature du quantum.
 
-## 6. Gates — phase 2 (`SM`, stochastique) — spécifiés, livrés après la phase 1
+### Gates du chantier
 
 | Gate | Contenu | Critère PASS |
 |---|---|---|
-| **SM0** | **Pont avec la phase 1** — `--top-k 1` avec **température ≠ 0** et **10 seeds** | ids identiques aux 10 seeds **et** == greedy. (`--temperature 0` seul serait tautologique : c'est nécessairement un cas spécial branché sur `argmax`, sinon division par zéro.) |
-| **SM0-bis** | **« Zéro RNG device » prouvé, pas déclaré** — dumps HLO après la phase 2 | HLO **inchangé** (mêmes tolérances F5). Un `Tensor.Rng` glissé in-graph le ferait bouger. Le repo a déjà payé un gate déclaratif (Munich) : celui-ci est opérable et gratuit. |
-| **SM1** | **Distributionnel** — 10 000 tirages sur des logits **figés en fixture** | χ² sous seuil **α = 0,01 écrit d'avance**. **La distribution théorique vient d'une implémentation INDÉPENDANTE** (torch/scipy dans le script oracle), **jamais du binaire testé** : sinon un `×temp` au lieu de `÷temp` (le piège F4 !) déplace les deux distributions à l'identique et le χ² passe. **Binning** : fixture à support restreint (~10 catégories, effectif attendu ≥ 50) — 262 144 catégories invalideraient le test. **Re-run** : règle écrite d'avance (à α=0,01, un échec légitime sur 100) — un re-run non prévu est une requalification silencieuse. **Non-vacuité** : un biais injecté de 5 % doit faire **FAIL**. |
+| **RP0** | **Graphe intact** — dumps HLO de `g12auto` avant/après, témoins pris **avant toute édition**, worktree homogène | `diff -rq` identique **sauf les tolérances F5** ; **publier** le nombre observé (tranche la contradiction ENGINE_LOG:92 / ZML_MODULAR:132). **+ contre-test** : perturbation délibérée (`RMS_EPS` 1e-6→1e-2, précédent `ZML_MODULAR_ENGINE_DESIGN.md:132`) ⇒ RP0 doit **FAIL**. **+ garde** : dumps non vides et binaire effectivement rebuildé. |
+| **RP1** | **Unitaire sans GPU** — `zig test sampling.zig` vs fixtures du **vrai processor** (§4-6), penalty ∈ {0.8, 1.0, 1.15, 1.5} | **bit-exact, 0 ULP**, aucun repli pré-approuvé. **Le test asserte sa propre fixture** (≥1 doublon, ≥1 négatif pénalisé, ≥1 positif) et **échoue si un compteur vaut 0**. **+ tie-break** sur ties f32 exacts (complété en production par la règle marge 0,0, §3.2.1). |
+| **RP2** | **Non-régression** — penalty=1.0, 12B | ids **bit-identiques au témoin**, le témoin étant **la sortie du runner AVANT modification**, prise en même temps que les dumps RP0 — **jamais `u8_gen48`** (contre lequel le runner marque 42/48 en bf16, F6). Quasi-tautologique et assumé : couvre le câblage, pas le calcul. |
+| **RP3** | **Oracle HF exact, penalty active** — 12B, penalty ∈ {0.8, 1.15}, oracle **69 fp32** étendu | **ids == HF** · **mordant pré-calculé sur l'oracle SEUL, avant tout run GPU** : `hamming(ids_HF_penalty, ids_HF_greedy) ≥ 3` / 48, **sinon la configuration est déclarée inutilisable** et le prompt change · **publier le hamming réel** (attendu ~40 par effet de cascade, pas 3) · **vérifier que penalty 0,8 l'atteint aussi** (elle *récompense* la répétition : c'est le cas le moins évident) · **`divergences.len > 0`** sinon FAIL (§3.2.1) · **publier la marge min top1−top2**, avec et sans penalty. |
+| **RP4** | **Non-vacuité** — 3 corruptions : (a) signes inversés, (b) dédup supprimée, (c) prompt inclus/exclu à tort | **chacune doit faire FAIL RP3** et **publier son mordant**, plancher **1**. **De plus** : un mordant `< mordant_naturel(RP3) / 2` est **à instruire, pas à valider** — vu la cascade, une vraie corruption sémantique mord massivement ; un mordant ras-du-plancher signale un test au bord de sa détection. Remédiation **écrite d'avance** : prompt contenant des tokens qui sont aussi des continuations probables. Précédent à garder en tête : `ENGINE_LOG.md:277`, « l'argmax greedy est trop robuste ». |
+| **RP5** | **Aucun état ne survit entre prompts** — `--repl`, même prompt joué 2×, penalty active, **`max_tokens = 32`** | **texte détokenisé identique** (l'export d'ids est refusé en repl, §3.4) **+ `divergences.len > 0` sur les DEUX passes** (sinon deux runs greedy identiques passeraient à vide) **+ RSS ≤ +1 Mo sur 20 prompts** (repère R2, atteignable **parce que** le buffer de logits est alloué une fois, §3.1-4). 20 × 32 tokens ≈ 2 min de génération. |
+| **RP6** | **Directives repl** — (a) `:penalty` ne produit **aucune** génération (**comptage**) ; (b) la valeur s'applique au prompt suivant, sur un prompt **dont la sensibilité est prouvée par RP3**, avec **`divergences.len > 0`** ; (c) `:params` vérifié **contre le comportement** : `:params` dit 1.15 ⇒ **les 48 premiers ids** égalent la référence 1.15 (bornage explicite : le repl s'arrête sur EOT/`max_tokens`, l'oracle sur `fed.len`) ; (d) invalides **énumérées** : `0`, `-1`, `nan`, `inf`, `abc`, vide | 4/4 |
+| **RP7** | **12B — la récitation est-elle levée** — balayage `:penalty` à chaud, **valeurs {1.05, 1.1, 1.15, 1.3}**, `max_tokens = 200` | **Métrique** : longueur maximale de n-gramme répété sur les 200 derniers tokens. **Ligne de base SAINE mesurée** sur le run U9 « 1150 tok stables, texte cohérent » (`U_12B_RESULTS.md:64`) et **publiée**. **Témoin penalty=1.0 publié d'abord** ; **si le témoin ne récite pas, le gate est vacué** et le prompt change. PASS = métrique ≤ ligne de base saine, pour au moins une valeur du balayage, **avec `divergences.len > 0`**. ⚠ RP7 ne mesure **pas la qualité** : une penalty haute peut casser la boucle en produisant du charabia — la sortie de chaque valeur est **jointe au rapport** pour lecture humaine. |
+
+**M1 — mesure (pas un gate)** : coût du chemin host.
+**Instrument** : **chronomètre autour du bloc hôte** (µs/step : lecture D2H + penalty + argmax) —
+mesure exacte, sans bruit GPU. **Design apparié** : deux bras dans **une seule session `--repl`**,
+entrelacés, une seule compile — ce qui élimine la variance inter-run.
+Le tok/s bout-en-bout n'est plus qu'un **recoupement grossier**.
+**Attendu pré-enregistré : ~0,5 %** (D2H 1 Mio ≈ 40-100 µs + argmax 262 144 f32 ≈ 100-200 µs,
+sur ~110 ms/step). Plafond 10 % = tripwire, **non discriminant et assumé comme tel**.
+*Motif du changement d'instrument : à n=3 sur un GPU partagé, exiger « dispersion < écart » pour
+un effet de 0,5 % garantit la conclusion « non concluant » — honnête, mais inutile.*
+
+## 6. Gates — phase 2 (`SM`, stochastique) — livrés après la phase 1
+
+| Gate | Contenu | Critère PASS |
+|---|---|---|
+| **SM0** | **Pont** — `--top-k 1` avec **température ≠ 0** et **10 seeds** | ids identiques aux 10 seeds **et** == greedy. (`--temperature 0` seul serait tautologique : cas spécial branché sur `argmax`, sinon division par zéro.) |
+| **SM0-bis** | **« Zéro RNG device » prouvé** — dumps HLO après la phase 2 | HLO **inchangé** (tolérances F5). Un `Tensor.Rng` in-graph le ferait bouger. Le repo a déjà payé un gate déclaratif : celui-ci est opérable et gratuit. |
+| **SM1** | **Distributionnel** — 10 000 tirages sur des logits **figés en fixture** | χ² sous **α = 0,01** écrit d'avance. **Distribution théorique issue d'une implémentation INDÉPENDANTE** (torch/scipy) — sinon un `×temp` au lieu de `÷temp` (le piège F4 !) déplace les deux distributions à l'identique et le χ² passe. **Binning** : support restreint ~10 catégories, effectif attendu ~1000 (σ≈31) — 262 144 catégories invalideraient le test. **Non-vacuité** : un biais injecté de **5 %** (≈50 comptes) doit **FAIL**. **Règle de re-run ÉCRITE** : un seul re-run, **seed pré-déclarée**, deux échecs = FAIL. |
 | **SM2** | **Reproductibilité** — RNG **host** seedé par (seed, step) | même seed ⇒ sortie identique |
-| **SM3** | **Non-vacuité du RNG** — N seeds | **≥ k sorties distinctes parmi N**, k et N **calculés depuis la fixture avant la mesure** : sur une distribution piquée, deux seeds donnent légitimement la même sortie et « seed différent ⇒ sortie différente » échouerait sur une implémentation correcte. |
-
-Paramètres phase 2 : `--temperature`, `--top-k`, `--top-p`, `--seed` + directives `:temp`,
-`:top-k`, `:top-p`, `:seed`.
+| **SM3** | **Non-vacuité du RNG** — N seeds | **≥ k sorties distinctes parmi N**, k et N **calculés depuis la fixture avant la mesure** : sur une distribution piquée, deux seeds donnent légitimement la même sortie. |
 
 ## 7. Vigilances pré-enregistrées (écrites AVANT de mesurer)
 
-1. **La penalty déforme les écarts — asymétriquement.** Sur la branche positive elle **comprime**
-   (÷1,15 rapproche de zéro) et peut créer des quasi-ties ; sur la branche négative elle
-   **éloigne** de zéro (×1,15). La claim du projet est « ids == HF », **jamais** « logits
-   bit-identiques » : un mismatch sous penalty n'est pas automatiquement un bug.
-2. **Un mismatch RP3 n'est admissible que si les TROIS conditions tiennent**, chacune chiffrée :
-   (i) marge `|top1−top2|` au step fautif `< 1e-3` ; (ii) le top-2 de HF est **la même paire
-   inversée** ; (iii) **au plus 1** step de ce type sur 48. Hors de ces bornes, c'est un FAIL.
-3. **RP1 est à 0 ULP.** Aucun repli n'est pré-approuvé dans son critère : tout écart est un FAIL
-   publié, puis instruit.
-4. **Procédure d'échec** (pattern A2) : au premier mismatch → top-5 du step fautif et marge
-   top1−top2. **Le FAIL brut est publié d'abord** ; toute requalification vient ensuite et est
-   datée. **Toute 2ᵉ requalification, de quelque type que ce soit, = STOP** : on diffe
-   l'instrument avant d'écrire une ligne de plus (rév. 2 : la v1 disait « du même type », ce qui
-   autorisait deux portes différentes sans jamais déclencher la règle).
-5. **Oracle en fp32**, jamais bf16.
-6. **Témoins RP0 pris avant tout deploy**, sur un worktree homogène — le piège exact qui avait
-   mordu au gate M0.
-7. **Seuils fixés maintenant** : mordant RP3 ≥ 3 · plancher RP4 = 1 · ε quasi-tie = 1e-3 ·
-   récitation RP7 = ÷2 · M1 attendu ~1 %, plafond 10 % · α SM1 = 0,01.
+1. **La penalty déforme les écarts — asymétriquement.** Branche positive : elle **comprime**
+   (÷1,15) et peut créer des quasi-ties. Branche négative : elle **éloigne** de zéro (×1,15).
+   La claim est « ids == HF », **jamais** « logits bit-identiques ».
+2. **ε de quasi-tie = 2e-3**, **dérivé, pas deviné** : 2 × le bruit fp32 mesuré runner↔oracle
+   (9,365e-4, F7) majoré par la branche négative (×1,15) ≈ 2,15e-3, arrondi à **2e-3**.
+   **Prédiction falsifiable qui l'accompagne** : la marge minimale réelle observée est **0,0279
+   sur 1150 steps** (F7) — donc **aucun step n'a jamais été vu sous 2e-3**. La fenêtre
+   d'admissibilité de la vigilance 3 est **attendue VIDE** : l'ouvrir serait un événement à
+   instruire, pas une routine.
+   ⚠ **1e-3 est explicitement banni** : c'est le seuil du menu de requalification du 25 juillet
+   (`U_12B_RESULTS.md:26`, « un menu dont le critère glissait déjà : marge ≤ 1e-3 → ≤ 2 ULP »),
+   c'est-à-dire l'instrument mis au rebut. Il est écrit ici pour que personne ne le réintroduise.
+3. **Un mismatch RP3 n'est admissible que si les TROIS conditions tiennent** : (i) marge
+   `|top1−top2| < 2e-3` ; (ii) le top-2 de HF est **la même paire inversée** ; (iii) **au plus
+   1** step de ce type sur 48. Hors bornes : FAIL.
+4. **RP1 est à 0 ULP.** Aucun repli pré-approuvé : tout écart est un FAIL publié, puis instruit.
+5. **Procédure d'échec** (pattern A2) : au premier mismatch → top-5 du step fautif et marge.
+   **Le FAIL brut est publié d'abord** ; toute requalification vient ensuite et est datée.
+   **Toute 2ᵉ requalification, de quelque type que ce soit, = STOP** : on diffe l'instrument.
+6. **Oracle en fp32** — et cette vigilance n'est honorable **qu'après RP-1** (F6). Avant RP-1,
+   elle serait un vœu : l'outillage de décode 12B ne sait pas produire du fp32.
+7. **Témoins RP0 pris avant tout deploy**, worktree homogène — le piège qui avait mordu à M0.
+8. **Seuils fixés maintenant** : mordant RP3 ≥ 3 (et hamming réel publié) · plancher RP4 = 1,
+   avec instruction si `< mordant_naturel/2` · ε = **2e-3** · RP7 = ligne de base saine mesurée ·
+   M1 attendu ~0,5 %, plafond 10 % · α SM1 = 0,01, biais de non-vacuité 5 %.
 
 ## 8. Gestion d'erreur
 
-- **Garde penalty écrite en ACCEPTATION** : `p > 0 and std.math.isFinite(p)`.
-  La transcription naïve `p <= 0 → rejet` **laisse passer `NaN`** (`NaN <= 0` est faux) :
-  `:penalty nan` empoisonnerait tous les logits et l'argmax renverrait un token arbitraire
-  **sans erreur** — un repli silencieux parfait, dans le dispositif censé les interdire.
-- Bitset alloué **une fois** au démarrage, jamais par step ; dimensionné au vocab runtime.
+- **Garde penalty en ACCEPTATION** : `p > 0 and std.math.isFinite(p)`. La transcription naïve
+  `p <= 0 → rejet` **laisse passer `NaN`** (`NaN <= 0` est faux) : `:penalty nan` empoisonnerait
+  tous les logits et l'argmax renverrait un token arbitraire **sans erreur** — un repli
+  silencieux parfait, dans le dispositif censé les interdire.
+- Bitset **et** buffer de logits alloués **une fois**, dimensionnés au vocab runtime.
 - Token hors vocab dans `hist` : déjà gardé (`:1343`), assert conservé.
-- **Un D2H échoué remonte une erreur** — **pas de repli silencieux** sur le top-5 : un tel repli
-  rendrait RP3 incapable d'échouer.
+- **Un D2H échoué remonte une erreur** — **pas de repli silencieux** sur le top-5, qui rendrait
+  RP3 incapable d'échouer.
 
 ## 9. Hors périmètre
 
-Câblage de `gemma4_gen_auto.zig` (E2B — dette écrite, §0) · multi-tour avec contexte accumulé
-(`--repl` V1 reste à prompts indépendants) · `no_repeat_ngram_size` · sampling par lane en B>1
-(voie §3.5) · beam search · toute modification de `engine.zig` ou du graphe.
+Câblage de `gemma4_gen_auto.zig` (E2B — dette écrite, §0) · multi-tour avec contexte accumulé ·
+`no_repeat_ngram_size` · sampling par lane en B>1 (voie §3.5) · beam search · toute modification
+de `engine.zig` ou du graphe **en dehors de la perturbation jetable du contre-test RP0**
+(worktree dédié, jamais committée, §7-7).
 
 ## 10. Livrables
 
 - `zml_runner/sampling.zig` + tests `zig test`
 - câblage `gemma4_g12auto.zig` (hérité par `g12a4k`/`g12a8k`)
-- `scripts/49_gen_custom_oracle.py` étendu (C5 : vrai processor, `s0`, `prompt_ids` en tenseur,
-  version transformers journalisée)
-- fixtures RP1 (safetensors, committées)
-- `docs/SAMPLING_RESULTS.md` (résultats + chiffres mesurés + témoins)
-- tags `gate/rp0-pass` … `gate/rp7-pass`, une PR
+- `scripts/69_u8_gen_oracle.py` étendu : `--compute-fp32` en mode décode (RP-1), vrai processor,
+  `s0`, `prompt_ids` en tenseur, version transformers journalisée
+- **fixture `u8_gen48` régénérée en fp32** (RP-1)
+- **script producteur des fixtures RP1** (triplets au niveau vecteur) + les fixtures committées
+- `docs/SAMPLING_RESULTS.md` : résultats, chiffres mesurés, témoins publiés (RP0 nombre de diffs,
+  RP3 hamming réel et marge min, RP7 ligne de base et sorties du balayage, M1 µs/step)
+- tags `gate/rp-1-pass`, `gate/rp0-pass` … `gate/rp7-pass`, une PR
 
-## 11. Historique de révision
+## 11. Ordre d'exécution
 
-**Rév. 2 (2026-07-27, après double revue de spec — cohérence/faits et falsifiabilité).**
+```
+RP-1 (refonder l'oracle fp32)  ──┐
+                                 ├─→ RP0 (témoins + graphe intact)
+RP1 (unitaire, sans GPU)  ───────┘        │
+                                          ├─→ RP2 (non-régression)
+                                          ├─→ RP3 (oracle HF) → RP4 (non-vacuité)
+                                          ├─→ RP5, RP6 (repl)
+                                          └─→ RP7 (récitation) + M1 (mesure)
+```
+
+RP1 ne dépend d'aucun GPU et peut démarrer immédiatement. **RP3 est bloqué par RP-1.**
+
+## 12. Historique de révision
+
+**Rév. 2** — après le 1ᵉʳ tour de double revue (cohérence/faits et falsifiabilité) : F1 faux pour
+l'E2B → périmètre re-arbitré au 12B ; F2 citait `forwardStep` au lieu de `forwardStageGen` ;
+F5 ajouté (`diff -rq` vide inatteignable) ; C5 (vrai processor) ; RP3 mordant + compteur ;
+RP5 ajouté (état inter-prompts) ; RP0 contre-test ; RP1 à 0 ULP ; ancien RP2 tautologique
+supprimé ; SM0-bis ; garde `NaN` ; règle du STOP élargie à **toute** 2ᵉ requalification.
+16 corrections.
+
+**Rév. 3** — après le 2ᵉ tour :
 
 | # | Correction |
 |---|---|
-| 1 | **F1 faux pour l'E2B** → périmètre re-arbitré (C3), E2B en dette écrite |
-| 2 | F2 : citation corrigée `:850` (`forwardStep`, rejetée par D12) → **`:807`** (`forwardStageGen`) |
-| 3 | F5 ajouté : `diff -rq` **vide** est inatteignable (ENGINE_LOG:92) → RP0 énumère ses tolérances **avant** la mesure |
-| 4 | C5 : l'oracle **appelle** le vrai `RepetitionPenaltyLogitsProcessor` au lieu de retranscrire (risque de faute commune aux deux implémentations) |
-| 5 | RP3 : mordant chiffré + `compteur_divergence` → le gate central ne peut plus passer avec une penalty morte |
-| 6 | RP5 **ajouté** : `hist` est le premier état inter-prompts du repl, aucun gate ne le couvrait |
-| 7 | RP0 : contre-test de non-vacuité + garde « dumps non vides / binaire rebuildé » |
-| 8 | RP1 : 0 ULP strict (le repli était pré-approuvé dans le critère) + assertions sur la fixture + tie-break rapatrié depuis l'ancien RP2, qui était tautologique |
-| 9 | Ancien RP3 : critère inadéquat à son motif → scindé en RP2 (ids) et RP5 (RSS plate) |
-| 10 | RP7 : « récitation levée » chiffrée + témoin publié d'abord + gate vacué si le témoin ne récite pas |
-| 11 | M1 : étiqueté **mesure**, n≥3, valeur attendue pré-enregistrée, exigence de résolution |
-| 12 | RP6 : (b) prompt à sensibilité prouvée, (c) vérifié contre le comportement, (d) invalides énumérées |
-| 13 | SM0 rendu mordant · **SM0-bis ajouté** (zéro RNG device prouvé par HLO) · SM1 : implémentation indépendante + binning + α + re-run + non-vacuité · SM3 : k/N pré-calculés |
-| 14 | §8 : garde `NaN` (formulation en acceptation) |
-| 15 | §3.1 : interdiction de `× (1/penalty)` · bitset au vocab runtime · §3.2 : `fed` vs `tok` en prefill, et `s0` |
-| 16 | §7-4 : la règle du STOP couvre **toute** 2ᵉ requalification, plus seulement « du même type » |
+| 1 | **F6 + C6 + RP-1** : l'oracle de décode 12B est **bf16 par construction** — l'instrument déclaré corrompu le 25 juil. RP3 ne pouvait pas réussir, et §7-6 « oracle fp32 » était inapplicable. Prérequis de refondation ajouté (décision Régis). |
+| 2 | **§4 rebranché sur `scripts/69`** : la rév. 2 avait déplacé le périmètre sur le 12B sans déplacer l'oracle, resté celui de l'E2B (`49`, `MODEL_ID = E2B`). RP3 était inexécutable. |
+| 3 | **ε : 1e-3 → 2e-3 dérivé** de F7 (9,365e-4 mesuré), **avec la prédiction falsifiable** « fenêtre attendue vide » (marge min réelle 0,0279). 1e-3 était **le seuil du menu de requalification au rebut** : banni explicitement. |
+| 4 | **RP5/RP6 comparent le texte**, pas les ids : `--repl` est exclusif de `--oracle`/`--out-ids` (`:868-874`). La garde n'est **pas** relâchée. |
+| 5 | **`divergences.len > 0` exigé en RP5, RP6, RP7** — pas seulement RP3 : ces gates pouvaient tourner penalty éteinte et passer à vide. |
+| 6 | **§3.2.1** : ce que le compteur prouve et **ne prouve pas** (seul `len == 0` est informatif) ; **marge 0,0 ⇒ FAIL tie-break** — le complément opérable au tie-break déclaratif de RP1. |
+| 7 | **Buffer de logits alloué une fois** (comme le bitset) : sans ça, 4 Gio alloués/libérés feraient sauter le critère RSS de RP5 de bonne foi. RP5 chiffré (RSS +1 Mo, `max_tokens=32`). |
+| 8 | **M1 : instrument changé** — chronomètre host + bras appariés en session `--repl`. À n=3 sur GPU partagé, « dispersion < écart » pour 0,5 % garantissait « non concluant ». Attendu affiné à ~0,5 %. |
+| 9 | **RP7 ancré sur une ligne de base mesurée** (run U9 sain) au lieu d'un ratio ÷2 deviné ; valeurs du balayage et `max_tokens` fixés ; garde-fou « la penalty haute produit du charabia » (RP7 ne mesure pas la qualité). |
+| 10 | **RP2 : témoin nommé** = sortie du runner **avant modification**, jamais `u8_gen48` (42/48 en bf16). |
+| 11 | **RP4** : plancher 1 complété par « mordant `< naturel/2` ⇒ instruire » ; précédent `ENGINE_LOG.md:277` cité. |
+| 12 | **RP3** : mordant **pré-calculable sur l'oracle seul, sans GPU** ; hamming réel à publier ; cas `penalty 0,8` explicitement vérifié. |
+| 13 | **SM1 : règle de re-run écrite** (un seul re-run, seed pré-déclarée, deux échecs = FAIL) — elle était exigée par le critère mais absente. |
+| 14 | **RP6-(c) borné** aux « 48 premiers ids » (conditions d'arrêt différentes entre repl et oracle). |
+| 15 | Citations : §4 → `gemma4_g12auto.zig:977-981` (et non `gen_auto:866-870`) ; renvoi `NaN` §4 → §8. |
+| 16 | **F5** : contradiction interne du repo signalée (ENGINE_LOG:92 = 2 diffs, ZML_MODULAR:132 = 1) — RP0 tranche en publiant. |
+| 17 | **§9** : le contre-test RP0 perturbe `RMS_EPS`, ce que « aucune modification d'`engine.zig` » interdisait — exception explicite (jetable, worktree dédié, jamais committée). |
+| 18 | **§10** : script producteur des fixtures RP1 ajouté aux livrables · **§11** : ordre d'exécution ajouté. |
