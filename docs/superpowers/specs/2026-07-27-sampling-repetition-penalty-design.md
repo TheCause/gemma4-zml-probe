@@ -139,18 +139,26 @@ in-graph, ~48 octets D2H) reste strictement inchangé. Le chemin host ne s'arme 
 est active, **et seulement en phase génération** (`in_gen_phase`, `:1363`).
 
 ```
-exe.call → r_t5v, r_t5i, r_logits, caches
+DÉBUT d'itération : hist.append(fed)      ← le token qu'on s'apprête à feeder
 
-  hist : pendant le PREFILL on mémorise `fed` (le token du prompt),
-         PAS `tok` (l'argmax du step, ignoré en prefill — cf :1415).
+exe.call → r_t5v, r_t5i, r_logits, caches
 
   penalty == 1.0 → tok = t5i[0]                     (chemin actuel, r_logits.deinit())
   sinon          → logits ← r_logits (buffer réutilisé, 1 Mio, transfert DÉJÀ synchrone)
                    applyRepetitionPenalty(logits, hist, p, seen)
                    tok = argmax(logits)
                    si tok != t5i[0] : divergences.append(.{ step, marge = t5v[0]-t5v[1] })
-  hist.append(tok)   // en phase génération
+
+FIN d'itération : fed ← ids[step+1] en prefill (:1416), fed ← tok en génération (:1438)
 ```
+
+⚠ **`hist.append(fed)` en TÊTE d'itération, jamais `hist.append(tok)` en fin** (corrigé rév. 4).
+`in_gen_phase = step + 1 >= ids.len` (`:1363`) est **vrai au step `ids.len-1`, où `fed` vaut
+encore le DERNIER token du prompt**. Un `append(if (in_gen_phase) tok else fed)` y appendrait
+`s0` et **sauterait définitivement `ids[ids.len-1]`**, alors que HF a le prompt complet dans
+`input_ids` au même step. La divergence RP3 qui en résulterait aurait une cause quasi
+introuvable. Appender `fed` en tête donne **prompt complet ++ générés**, sans cas particulier :
+`fed` du step suivant *est* le `tok` du step courant en phase génération (`:1438`).
 
 Le **premier token généré `s0`** est produit au dernier step de prefill (`in_gen_phase` vrai dès
 `step + 1 >= ids.len`, `:1363`) : la penalty **s'y applique**. L'oracle doit faire de même (§4).
@@ -161,7 +169,7 @@ Le **premier token généré `s0`** est produit au dernier step de prefill (`in_
 
 | Observation | Signification | Action |
 |---|---|---|
-| `len == 0` avec penalty ≠ 1.0 | La penalty **n'a rien fait** (paramètre non propagé jusqu'à `generateOnce` — 15 arguments positionnels `:1296`, `hist` vide, `in_gen_phase` inversé) | **FAIL bruyant** |
+| `len == 0` avec penalty ≠ 1.0 | La penalty **n'a rien fait** (paramètre non propagé jusqu'à `generateOnce` — **19** arguments positionnels `:1296`, **3 sites d'appel** `:1244`/`:1254`/`:1283`, `hist` vide, `in_gen_phase` inversé) | **FAIL bruyant** |
 | une divergence à **marge exactement 0,0** | Désaccord de **tie-break** host↔device, sans rapport avec la penalty | **FAIL** — et c'est le seul endroit où un vrai tie est observable (voir §3.1-note) |
 | `len > 0`, marges non nulles | La penalty **a agi**. **Ce n'est PAS une preuve de correction** : une lecture erronée du D2H (dtype, stride) ferait diverger presque tous les steps | tripwire seulement — la preuve, c'est RP3 |
 
@@ -259,7 +267,7 @@ pas dans un code non encore écrit. Rappel F6 : contre la fixture **bf16**, le r
 | **RP3** | **Oracle HF exact, penalty active** — 12B, penalty ∈ {0.8, 1.15}, oracle **69 fp32** étendu | **ids == HF** · **mordant pré-calculé sur l'oracle SEUL, avant tout run GPU** : `hamming(ids_HF_penalty, ids_HF_greedy) ≥ 3` / 48, **sinon la configuration est déclarée inutilisable** et le prompt change · **publier le hamming réel** (attendu ~40 par effet de cascade, pas 3) · **vérifier que penalty 0,8 l'atteint aussi** (elle *récompense* la répétition : c'est le cas le moins évident) · **`divergences.len > 0`** sinon FAIL (§3.2.1) · **publier la marge min top1−top2**, avec et sans penalty. |
 | **RP4** | **Non-vacuité** — 3 corruptions : (a) signes inversés, (b) dédup supprimée, (c) prompt inclus/exclu à tort | **chacune doit faire FAIL RP3** et **publier son mordant**, plancher **1**. **De plus** : un mordant `< mordant_naturel(RP3) / 2` est **à instruire, pas à valider** — vu la cascade, une vraie corruption sémantique mord massivement ; un mordant ras-du-plancher signale un test au bord de sa détection. Remédiation **écrite d'avance** : prompt contenant des tokens qui sont aussi des continuations probables. Précédent à garder en tête : `ENGINE_LOG.md:277`, « l'argmax greedy est trop robuste ». |
 | **RP5** | **Aucun état ne survit entre prompts** — `--repl`, même prompt joué 2×, penalty active, **`max_tokens = 32`** | **texte détokenisé identique** (l'export d'ids est refusé en repl, §3.4) **+ `divergences.len > 0` sur les DEUX passes** (sinon deux runs greedy identiques passeraient à vide) **+ RSS ≤ +1 Mo sur 20 prompts** (repère R2, atteignable **parce que** le buffer de logits est alloué une fois, §3.1-4). 20 × 32 tokens ≈ 2 min de génération. |
-| **RP6** | **Directives repl** — (a) `:penalty` ne produit **aucune** génération (**comptage**) ; (b) la valeur s'applique au prompt suivant, sur un prompt **dont la sensibilité est prouvée par RP3**, avec **`divergences.len > 0`** ; (c) `:params` vérifié **contre le comportement** : `:params` dit 1.15 ⇒ **les 48 premiers ids** égalent la référence 1.15 (bornage explicite : le repl s'arrête sur EOT/`max_tokens`, l'oracle sur `fed.len`) ; (d) invalides **énumérées** : `0`, `-1`, `nan`, `inf`, `abc`, vide | 4/4 |
+| **RP6** | **Directives repl** — (a) `:penalty` ne produit **aucune** génération (**comptage**) ; (b) la valeur s'applique au prompt suivant, sur un prompt **dont la sensibilité est prouvée par RP3**, avec **`divergences.len > 0`** ; (c) `:params` vérifié **contre le comportement** : `:params` dit 1.15 ⇒ la sortie du repl égale la **détokenisation de la fixture oracle 1.15**, bornée aux **48 premiers tokens** (rév. 4 : la comparaison porte sur le **texte**, pas sur les ids — `--repl` refuse l'export d'ids, §3.4 ; et les conditions d'arrêt diffèrent, EOT/`max_tokens` côté repl vs `fed.len` côté oracle) ; (d) invalides **énumérées** : `0`, `-1`, `nan`, `inf`, `abc`, vide | 4/4 |
 | **RP7** | **12B — la récitation est-elle levée** — balayage `:penalty` à chaud, **valeurs {1.05, 1.1, 1.15, 1.3}**, `max_tokens = 200` | **Métrique** : longueur maximale de n-gramme répété sur les 200 derniers tokens. **Ligne de base SAINE mesurée** sur le run U9 « 1150 tok stables, texte cohérent » (`U_12B_RESULTS.md:64`) et **publiée**. **Témoin penalty=1.0 publié d'abord** ; **si le témoin ne récite pas, le gate est vacué** et le prompt change. PASS = métrique ≤ ligne de base saine, pour au moins une valeur du balayage, **avec `divergences.len > 0`**. ⚠ RP7 ne mesure **pas la qualité** : une penalty haute peut casser la boucle en produisant du charabia — la sortie de chaque valeur est **jointe au rapport** pour lecture humaine. |
 
 **M1 — mesure (pas un gate)** : coût du chemin host.
@@ -385,3 +393,13 @@ supprimé ; SM0-bis ; garde `NaN` ; règle du STOP élargie à **toute** 2ᵉ re
 | 16 | **F5** : contradiction interne du repo signalée (ENGINE_LOG:92 = 2 diffs, ZML_MODULAR:132 = 1) — RP0 tranche en publiant. |
 | 17 | **§9** : le contre-test RP0 perturbe `RMS_EPS`, ce que « aucune modification d'`engine.zig` » interdisait — exception explicite (jetable, worktree dédié, jamais committée). |
 | 18 | **§10** : script producteur des fixtures RP1 ajouté aux livrables · **§11** : ordre d'exécution ajouté. |
+
+**Rév. 4** — corrections remontées par la revue du plan d'implémentation (le plan a servi de
+test de la spec) :
+
+| # | Correction |
+|---|---|
+| 1 | **§3.2 — off-by-one sur `hist`, bug réel.** La rév. 3 écrivait `hist.append(tok)` en phase génération et `fed` sinon. Or `in_gen_phase` (`:1363`) est vrai **au step où `fed` vaut encore le dernier token du prompt** : ce token n'entrait **jamais** dans `hist`, alors que HF l'a dans `input_ids`. Règle corrigée : **`append(fed)` en tête d'itération**, sans cas particulier. |
+| 2 | **§5 RP6-(c) — comparaison impossible** : elle exigeait des ids en mode `--repl`, qui refuse leur export (§3.4). Portée sur le **texte détokenisé** de la fixture oracle, bornée à 48 tokens. |
+| 3 | §3.2.1 : `generateOnce` prend **19** arguments (pas 15) et a **3 sites d'appel** — le mode d'échec « paramètre non propagé » est d'autant plus probable. |
+| 4 | **Amendement 1** (du plan) : RP1 se fait par `--selftest-penalty` sur le pattern `--selftest-inputs`, **pas** par `zig test` — `BUILD.bazel` ne charge que `zig_binary`, aucun target de test n'existe, `zig` est absent du PATH de la machine de dev. |
