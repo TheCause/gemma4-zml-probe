@@ -24,6 +24,43 @@
 - **E1 rerun PASS 4/4** (`f74b8df`) : neutralité des édits G2 confirmée aux 3 niveaux (source/G1/E1).
 - **Cette session (9 juil)** : PR `generation-longue` → `main` + rafraîchissement de ce PLANNING.
 
+## 🔴 État 27 juillet 2026 — chantier `generation_config` PRIORITAIRE (découvert incidemment)
+
+**Le portage n'applique pas `generation_config.json`.** Découvert en gelant les témoins du
+chantier repetition penalty : le runner émet `<image|>` (id 258882) **en greedy** au milieu d'un
+texte. A/B à un seul facteur sur le vrai 12B → le forward ZML est **innocenté** (ses logits
+reproduisent HF, `<image|>` gagne de 0,25), mais Google déclare
+`"suppress_tokens": [258883, 258882]` et **trois** `eos_token_id` `[1, 106, 50]`, que ni le
+runner ni l'oracle n'implémentent. **`69_u8_gen_oracle.py` partage l'angle mort** : il fait aussi
+un argmax nu, donc aucun gate existant ne pouvait détecter l'écart.
+Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
+
+À faire, dans cet ordre (décision Régis, 27 juil) :
+
+- [ ] **`suppress_tokens`** (logits → -inf avant l'argmax) + **3 EOS** dans le runner
+- [ ] **Aligner `69_u8_gen_oracle.py` en même temps** — sinon l'angle mort persiste
+- [ ] **Reprendre les témoins** : ceux du 27 juil figent `<image|>` et deviennent caducs
+- [ ] **Puis** le chantier repetition penalty (spec + plan déjà écrits et revus, ci-dessous)
+
+Deux conséquences à retenir :
+1. La claim « ids == HF » est **vraie au sens « même argmax sur les logits bruts »**, et **fausse
+   au sens « reproduit ce que `generate()` produirait »**. Nuance à écrire partout où la claim
+   apparaît.
+2. `do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0` → **le sampling est la
+   configuration NOMINALE du modèle**, pas un raffinement optionnel. La « récitation en greedy »
+   est plausiblement le symptôme d'un usage hors configuration prévue.
+   ⚠ La récitation **n'a pas pu être reproduite** : 3 témoins greedy (2/200/1150 tokens) ne
+   montrent aucune boucle (n-gramme max répété : 4 sur 200, 5 sur les 400 derniers de 1150 ;
+   diversité plate 0,62-0,76 ; le run de 1150 atteint sa propre conclusion). Le prompt qui récite
+   reste à identifier.
+
+**Chantier repetition penalty — cadrage TERMINÉ, exécution suspendue** (branche
+`sampling-penalty`) : spec rév. 4 + plan rév. 3, deux tours de revue chacun.
+Task 0 faite (3 témoins gelés, archivés en durable côté GPU). Prérequis **RP-1** identifié :
+l'oracle de décode 12B est **bf16 par construction** (`69:371` refuse `--compute-fp32` hors
+teacher-force) — l'instrument déclaré corrompu le 25 juil ; à refonder en fp32 avant d'armer la
+penalty.
+
 ### Planning courant
 
 - [x] **PR `generation-longue` → `main`** — mergée le 9 juil (PR #3, `c4d483b`).
