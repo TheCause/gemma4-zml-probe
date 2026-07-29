@@ -127,18 +127,29 @@ majore le même 9,365e-4 avant de s'en servir comme seuil. Utiliser le chiffre b
   c'est un tie : publié comme tel, avec sa marge.
 - **Porté par** : GC8.
 
-⚠ **C1 EST DÉJÀ EN DIFFICULTÉ, et il faut le dire avant de mesurer.** Le finding §9 rapporte une
-divergence en roue libre **dès l'index 47** (`5743 ▁zero` vs `27069 ▁humanity`), marge **0,004587**
-— soit **2,4× au-dessus du seuil de kill**. Elle est antérieure à 57 et **sans rapport avec
-`suppress_tokens`**. Deux lectures, non départagées :
+### ⚠ C1 — RÉVISÉE le 29 juil, sur mesure. @47 est INSTRUITE.
 
-  - (a) artefact du protocole de comparaison ⇒ C1 tient ;
-  - (b) écart réel du forward ⇒ **C1 est réfutée**, et le finding n'innocente le forward que
-    localement.
+La rév. 2 posait la divergence @47 (marge 0,004587, 2,4× le seuil de kill) comme une menace non
+départagée sur C1, avec deux lectures possibles : artefact de protocole, ou écart réel du forward.
 
-**Conséquence de spec** : C1 ne peut pas être énoncée tant que @47 n'est pas instruite. Soit GC9
-l'instruit, soit **C1 est bornée à « jusqu'à la position 46 »**, le reste déclaré non prouvé.
-**Interdit d'énoncer C1 sans l'un ou l'autre.**
+**La mesure a tranché — et par une troisième voie, qu'aucune des deux lectures n'anticipait** :
+`docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md`. Quatre runs du **même binaire, même checkpoint,
+mêmes arguments** : trois donnent `5743` @47, **un donne `27069`** — la valeur que HF produisait.
+**ZML n'a pas *une* réponse à cette position.** À cette marge (~5× le bruit d'un logit),
+l'autotuning XLA-GPU suffit à faire basculer l'argmax, et 149 ids/200 changent derrière.
+
+**Conséquences sur C1, dans l'ordre** :
+
+1. **Le forward n'est PAS mis en cause par @47** — la lecture (b) est écartée. C1 n'est pas réfutée.
+2. **Mais C1 ne peut pas être énoncée sur une trajectoire LIBRE**, quelle que soit la référence en
+   face : comparer deux runs à cette marge échantillonne un tirage, cela ne mesure pas une
+   différence d'implémentation.
+3. **Énoncé retenu** : « en **teacher-forcing**, aux positions dont la marge dépasse le seuil de
+   stabilité, la sortie du runner est identique à celle d'un décodage HF greedy appliquant la même
+   politique. » Le seuil de stabilité est à établir par la campagne N=20 (§7 du finding) ; en
+   attendant, la borne connue est **1,873e-3** (2× le bruit U7) et @47 (0,004587) est **au-dessus**
+   — donc le seuil réel est **plus grand que 1,873e-3**, ce qui est en soi un résultat neuf.
+4. **GC9 est répondu** : son verdict est publié dans le finding, pas à produire.
 
 ### C2 — « La suppression sur le top-5 est exactement équivalente à la suppression sur le vocabulaire complet »
 
@@ -179,9 +190,10 @@ l'instruit, soit **C1 est bornée à « jusqu'à la position 46 »**, le reste d
 
 | Grandeur | Valeur prédite | Fondement |
 |---|---|---|
-| `n_suppress_hits`, témoin 200 tokens | **≥ 1, dont la position 57** | le finding relève `258882` @57. ⚠ **Pas « exactement 1 »** : après correction la trajectoire diverge dès 57, les 142 positions suivantes sont un **autre texte**, sur lequel rien n'a été mesuré |
-| Position de la 1ʳᵉ divergence AVANT/APRÈS, témoin 200 | **57** | greedy déterministe |
-| Ids 0..56 après correction vs témoin AVANT | **bit-identiques** | toute divergence antérieure réfute l'isolation du facteur |
+| `n_suppress_hits`, run libre 200 tokens | **≥ 1** sur les runs qui atteignent le contexte de la position 57 | le finding relève `258882` @57. ⚠ **Ni « exactement 1 », ni garanti sur tous les runs** : la trajectoire n'est pas auto-reproductible |
+| ~~Position de la 1ʳᵉ divergence AVANT/APRÈS~~ | **RETIRÉE** | ⚠ prédiction **réfutée avant mesure du chantier** : deux runs du même binaire divergent déjà @47 sans qu'aucun code n'ait changé |
+| ~~Ids 0..56 bit-identiques au témoin~~ | **RETIRÉE** | idem — c'était un critère qui aurait échoué ~1 fois sur 4 pour une raison étrangère au chantier |
+| `258882` sur N runs, APRÈS | **0/N** | la suppression est inconditionnelle ; ce critère est **robuste à la bifurcation**, contrairement aux deux précédents |
 | `n_suppress_hits`, témoins 48 et 124 | **0** | F4 |
 | `rank_used` max, tous témoins | **≤ 2** | argument de rang, \|S\| = 2 |
 | GC5 : `verdict_data.n_match` | **199/200 → exactement 198/200** | `{258882,258883}` n'est rang 1 qu'à la position 57 sur les 200. Aux **9 autres positions** où l'un d'eux figure dans le top-5 (1, 12, 13, 21, 124, 138, 146, 149, 171), la marge top1−top2 est **≥ 2,78** (min @138) — la suppression n'y peut donc pas changer l'argmax, quel que soit le dtype. Le mismatch @47 (`27069`, non supprimé) subsiste. **Cette baisse de 1 est le résultat ATTENDU, pas une régression** — toute autre valeur arrête GC5 |
@@ -645,13 +657,15 @@ précisément pour l'éviter.
 | **GC0** | Le graphe n'a pas bougé | md5 de `module_0001.zml.before_optimizations.txt` **identique** au témoin pris AVANT toute édition ; **garde** : les deux dumps existent et sont non vides | 3090 |
 | **GC1** | Selftest **sans GPU**, via un nouveau drapeau **`--selftest-gencfg <fixture>`** (patron d'early-return `:877-880`, avant tokenizer/VRAM/Platform). **Trois** familles de cas, trois véhicules distincts (§4.5bis) | Token choisi identique sur 100 % des cas de sélection ; le selftest **asserte sa propre non-vacuité** et FAIL si un compteur vaut 0, sur **6** cas : id supprimé top-1 · `EotNotInEosList` · `SuppressIdOutOfRange` · `BeginSuppressUnsupported` · `EosListEmpty` · doublons dédupliqués | **3090** (⚠ pas M1 : aucun toolchain Zig n'y compile ces sources) |
 | **GC2** | Non-régression : témoins 48 (`mi_witness_1280`) et 124 (`mi_witness_4k`) | ids **bit-identiques** ; `n_suppress_hits == 0` **et** la ligne de log **littérale** `suppress=[258883,258882]` (format imposé §4.1 — ⚠ un `{any}` Zig produirait `{ 258883, 258882 }` et ferait **FAIL à tort** un gate d'arrêt) | 3090 |
-| **GC3** | Mordant : prompt du finding, 200 tokens, AVANT vs APRÈS | `258882` **présent @57** AVANT ; **absent** APRÈS ; `n_suppress_hits ≥ 1` (prefill exclu) ; ids 0..56 **bit-identiques** au témoin AVANT ; index de 1ʳᵉ divergence **publié**. **Token attendu @57 : `11814`** — ⚠ valeur **dérivée du top-5 HF** (`ab57.json`, `tf200.json`), le top-5 **ZML** @57 n'ayant jamais été mesuré. Le témoin AVANT est donc re-tiré avec `--dump-top5` (même coût) pour transformer cette prédiction en fait | 3090 |
-| **GC4** | Non-vacuité, 3 sous-tests. **Contenu des fichiers fabriqués imposé** (sinon refus au chargement — le piège réparé pour GC6 était resté ouvert ici) | (a) `--no-gen-config` **sur le prompt de GC3** reproduit le témoin AVANT **bit-à-bit**, `258882` **de retour @57** ; (b) `{"eos_token_id":[1,106,50],"suppress_tokens":[]}` → **le run va au bout**, log `suppress=[] (aucune suppression)`, `258882` revient @57 (⚠ **pas** une erreur au chargement : un contre-test satisfait par un refus ne prouve rien) ; (c) `{"eos_token_id":[1,106,50],"suppress_tokens":[258883,258882,258880,258881,258884]}` → `error.SuppressListTooLongForTopK` | 3090 |
+| **GC3** | Mordant — ⚠ **critère STATISTIQUE, pas position-par-position** (cf. `docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md`) : N runs libres AVANT vs N runs APRÈS, même prompt, 200 tokens | **AVANT** : `258882` apparaît dans **k/N** runs (k mesuré par la campagne de référence). **APRÈS** : `258882` apparaît dans **0/N** runs, **et** `n_suppress_hits ≥ 1` sur les runs où il apparaissait. ⚠ **Interdit** : « ids 0..56 bit-identiques » et « 1ʳᵉ divergence @57 » — le runner **ne reproduit pas sa propre trajectoire** (3 runs sur 4 donnent `5743` @47, un donne `27069`, et 149 ids/200 changent derrière). Un critère position-par-position sur trajectoire libre **échouerait à tort** | 3090 |
+| **GC3-tf** | Mordant **à contexte imposé** — c'est lui qui porte la preuve fine, en teacher-forcing (déterministe, il atteint la position 57 quoi qu'il arrive en amont) | À la position 57 du témoin : argmax **nu** → `258882` ; argmax **avec politique** → `11814`. Porté par **GC5** côté oracle. Côté runner, l'exactitude de la sélection est portée par **GC1** (selftest contre la fixture du vrai processor HF) | oracle + M1 |
+| **GC4** | Non-vacuité, 3 sous-tests. **Contenu des fichiers fabriqués imposé** (sinon refus au chargement — le piège réparé pour GC6 était resté ouvert ici) | (a) `--no-gen-config` sur le prompt de GC3, **N runs** : `258882` réapparaît dans **~k/N** runs (⚠ **pas** « reproduit le témoin bit-à-bit » : ce critère de la rév. 2 échouerait ~1 fois sur 4 pour une raison sans rapport avec la politique) ; (b) `{"eos_token_id":[1,106,50],"suppress_tokens":[]}` → **le run va au bout**, log `suppress=[] (aucune suppression)`, `258882` réapparaît (⚠ **pas** une erreur au chargement : un contre-test satisfait par un refus ne prouve rien) ; (c) `{"eos_token_id":[1,106,50],"suppress_tokens":[258883,258882,258880,258881,258884]}` → `error.SuppressListTooLongForTopK` | 3090 |
 | **GC5** | L'oracle ne partage plus l'angle mort. Deux runs du **même script** (même md5), **un seul flag** (`--no-gen-policy`), tous deux `--compute-fp32` | Branche **nue** : `top5_per_pos[57].ids[0] == 258882` — **reproduction** de `tf200.json` (top-5 `[258882, 11814, 3495, 1548, 13186]`, marge 0,249853) ; si elle ne reproduit pas, **c'est l'instrument qui est en cause**, on s'arrête. Branche **politique** : `top5_policy_per_pos[57].ids[0] == 11814` **et** `top5_per_pos[57].ids[0]` **inchangé** à `258882`. Et `n_match` : **199/200 → exactement 198/200** | oracle (`g12b`) |
 | **GC6** | Chemin multi-EOS **exercé en run réel** : `{"eos_token_id":[1,106,50,496],"suppress_tokens":[258883,258882]}` (§4.3) | Arrêt **exactement** à la position de la 1ʳᵉ occurrence de `496` **mesurée sur le témoin AVANT** (gen=34) ; `stop_reason` **nomme** cet id ; sans le fichier fabriqué, le même run va au bout | 3090 |
 | **GC7** | Équivalence runner ↔ oracle **avec politique des deux côtés**, sur le **témoin 200** (nommé : `witness_long_before`) | `n_match == n_total − 1`, **l'unique mismatch autorisé étant `pos_gen == 47`** — tout autre mismatch = FAIL. ⚠ `n_match == n_total` était **inatteignable** (rév. 1) : @47 est un écart de forward que ce chantier ne touche pas, et GC5 prédit déjà 198/200. Le rapport consigne `versions.transformers` **et** `script_md5` | 3090 + oracle |
 | **GC8** | **Test décisif de C1** : trajectoire libre du runner corrigé vs **décodage HF GREEDY** appliquant la même politique, **arrêt compris** | Séquences identiques jusqu'à l'arrêt **ou** divergences toutes **< 1,873e-3** (publiées avec leur marge). ⚠ **Trois prérequis mesurés** : (1) `mode_decode` n'a **aucun** arrêt EOS (`69:140-141`, « informatif seulement ») → flag `--gen-policy-stop`, défaut **off** pour ne pas casser la reproduction de `u8_gen48` ; (2) `--compute-fp32` est **refusé hors teacher-force** (`:371-372`) → la garde doit être levée, sinon GC8 est en bf16 et **le seuil de kill fp32 ne s'y applique plus** ; (3) **coût mesuré 28,57 s/token** (bf16, `u8_gen48.manifest.json`) ⇒ 200 tokens ≈ 1 h 35, et le fp32 est un autre ordre de grandeur → **mesurer sur 5 tokens avant de lancer**, et dimensionner `n` (≥ 60 suffit : la zone décisive est 47-57) | oracle + 3090 |
-| **GC9** | **Instruire la divergence @47** (finding §9, marge 0,004587) : logits ZML vs HF **à cette seule position**, oracle fp32, `--dump-top5`. **Décision Régis (28 juil) : retenu dans ce chantier.** ⚠ Ne dépend **pas** du code modifié ⇒ exécutable **dès T0**, en parallèle | Verdict **publié**, pas PASS/FAIL : artefact de protocole (**C1 tient**) ou écart réel du forward (**C1 réfutée**, cf. « ce qui réfuterait le chantier ») | oracle + 3090 |
+| **GC9** | ~~Instruire la divergence @47~~ — **FAIT le 29 juil, en Task 0** | ✅ **Verdict publié** : `docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md`. Ni artefact de protocole, ni écart de forward : **point d'instabilité numérique** — ZML produit lui-même les deux valeurs selon le run (3/4 vs 1/4 sur 4 runs ; quantification N=20 en cours). Le forward est **hors de cause** | ✅ fait |
+| **GC12** | **Reproductibilité de la trajectoire libre** (gate né du finding) : N=20 runs identiques, config nominale, aucun flag d'observation | Publier : **taux de bifurcation @47**, **recensement de toutes les positions instables** sur les 200, et **k/N** = nombre de runs contenant `258882` (c'est la **ligne de base AVANT** dont GC3 a besoin). Verdict **mesuré**, pas PASS/FAIL | 3090 |
 | **GC10** | **`--repl` applique bien la politique** (R11 : 3 sites d'appel de `generateOnce`, un oubli la rend silencieusement inopérante) | GC3 rejoué **en mode `--repl`** : mêmes ids, même `n_suppress_hits`, ligne `GENCFG:` présente ; **et** `n_suppress_hits` remis à zéro entre deux prompts. ⚠ **Canal de lecture des ids** : la garde d'exclusivité `:868-874` refuse `--out-ids` sous `--repl` ⇒ les ids se lisent via `--dump-top5` (rang 0 par step). Et **`--gen-config`/`--no-gen-config` NE sont PAS exclusifs de `--repl`** (sans quoi GC10 serait inexécutable) — seul `--selftest-gencfg` l'est | 3090 |
 | **GC11** | **La passe de nuance sur la claim est faite** (objectif #7, sinon livrable purement déclaratif) | Le grep de recensement (commande figée au plan, exécutée avant/après) : **0 site** de catégorie (i) sans qualificatif ; **contre-preuve exigée** — réintroduire une formulation nue doit faire **échouer** le grep | M1 |
 
@@ -838,3 +852,14 @@ GC8, ou décidé d'avance si Régis veut borner C1.
 | 39 | **Corrections d'ancrage** : F3 « 48 → **2** tokens » (le token d'arrêt est conservé) ; dette E2B ancrée sur `weights_w4/generation_config.json` (3 EOS) et non sur `config.json` (2) ; « marge ≥ 2,78 » reformulée (elle vaut aux **9 positions** concernées, pas partout) | Revue 2 (×3 lentilles) |
 | 40 | **§4.7 point 5** : le compteur `divergences` du chantier penalty doit être **scindé** (`div_penalty` / `div_suppress`), sinon son tripwire « len == 0 ⇒ FAIL » devient inopérant une fois la suppression active | Revue 2 |
 | 41 | **GC9 retenu (décision Régis, 28 juil)** et **avancé à T0** : il ne dépend pas du code modifié | Décision Régis |
+
+### Révision 3 — la MESURE a réfuté le protocole (29 juil, Task 0, avant toute modif de code)
+
+| # | Correction | Origine |
+|---|---|---|
+| 42 | **GC3 passe d'un critère position-par-position à un critère STATISTIQUE** (`258882` dans 0/N runs APRÈS vs k/N AVANT). Les critères « ids 0..56 bit-identiques » et « 1ʳᵉ divergence @57 » sont **retirés** : ils échoueraient ~1 fois sur 4 pour une raison étrangère au chantier | Mesure T0 — `docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md` |
+| 43 | **GC4(a) idem** : « reproduit le témoin bit-à-bit » → « `258882` réapparaît dans ~k/N runs » | idem |
+| 44 | **GC3-tf créé** : la preuve fine du mordant est portée par le **teacher-forcing** (GC5, déterministe) et par le **selftest** (GC1), pas par la roue libre | idem |
+| 45 | **C1 révisée une 2ᵉ fois** : énonçable seulement en teacher-forcing, aux positions dont la marge dépasse le seuil de stabilité. Le forward est **innocenté** sur @47 | idem |
+| 46 | **GC9 ✅ répondu** (verdict publié dans le finding) ; **GC12 créé** (quantification N=20 : taux de bifurcation, positions instables, ligne de base k/N) | idem |
+| 47 | **Deux prédictions pré-enregistrées RETIRÉES parce que réfutées** — c'est le pré-enregistrement qui a permis de le voir : chercher à transformer une prédiction dérivée (`11814` @57, héritée du top-5 **HF**) en fait mesuré côté **ZML** a fait tomber le protocole avant qu'il ne coûte des heures de GPU | Exigence Régis « scientifiquement falsifiable » |
