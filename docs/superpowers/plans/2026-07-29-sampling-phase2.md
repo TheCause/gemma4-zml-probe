@@ -65,8 +65,14 @@ telles quelles au doc de résultats.
 - [ ] **0.3** Dump HLO **témoin** du binaire actuel, pour `S2-G` :
       `XLA_FLAGS=--xla_dump_to=/tmp/s2_hlo_before` sur un run 48 tokens.
       **Consigner** : md5 de `module_0001.zml.before_optimizations.txt`, **nombre de fichiers**,
-      **volume total**. *(Attendu, d'après GC0 : 510 fichiers, 1 905 860 octets, md5
-      `297679847aa04b719942d75d093adf2b`.)*
+      **volume total**.
+      ⚠ **[rév. 3, MESURÉ le 29 juil]** Le témoin rejoué donne **508** fichiers là où GC0 en
+      comptait **510**, avec un md5 et une taille **identiques** (`297679847aa04b719942d75d093adf2b`,
+      1 905 860 o). L'écart porte sur les **annexes d'autotuning** (`.ptx`, `.ir-with-opt.ll` —
+      147 de chaque), qui varient d'une compile à l'autre.
+      ⇒ **Le critère de S2-G est le md5 du `before_optimizations`, SEUL.** Le nombre de fichiers
+      et le volume sont des **indicateurs de fraîcheur** (le dump a bien été régénéré), **jamais
+      un critère d'égalité** : en faire un ferait échouer S2-G à tort.
 - [ ] **0.4** Figer `RUN_ARGS` dans un tableau bash **une fois pour toutes** et le réutiliser
       partout. Un argument qui bouge entre AVANT et APRÈS casse l'A/B à un seul facteur.
 - [ ] **0.5** Commit : `chore(s2): témoins HLO et RUN_ARGS figés`.
