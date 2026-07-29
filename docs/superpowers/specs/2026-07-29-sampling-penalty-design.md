@@ -1,319 +1,370 @@
-# Spec — repetition penalty + sampling : faire du 12B un moteur d'inférence conforme
+# Spec — sampling : faire du 12B un moteur d'inférence conforme (phase 2)
 
-> **Date** : 2026-07-29 · **Statut** : rév. 1, à relire · **Machine cible** : 3090 (12B) + M4 (oracle)
+> **Date** : 2026-07-29 · **Révision 2** · **Machines** : 3090 (runner) + M4 (oracle)
 >
-> **Rapport à la spec du 27 juil** (`2026-07-27-sampling-repetition-penalty-design.md`, rév. 4,
-> deux tours de revue) : elle reste la **source de vérité de la phase 1** (repetition penalty).
-> Ce document la **prolonge** — il ne la remplace pas et ne la réécrit pas. Il intègre ce que le
-> chantier `generation_config` (29 juil, 12 gates) a changé, et il **développe la phase 2**
-> (sampling), que la rév. 4 ne faisait qu'esquisser en cinq lignes de gates.
+> ## Autorité — à lire avant tout
 >
-> Ce qui reste valide sans modification : C1 (deux phases), C2 (host-side pur), C3 (12B seul),
-> C4 (directives `:param` à chaud), C5 (l'oracle appelle le vrai processor), F1→F7, et le design
-> de `applyRepetitionPenalty`.
+> Ce document **ne couvre QUE la phase 2 (sampling)** et **les points d'intégration** avec le
+> chantier `generation_config` livré le 29 juil.
+>
+> **La phase 1 (repetition penalty) est régie intégralement par
+> `2026-07-27-sampling-repetition-penalty-design.md` (rév. 4).** La rév. 1 du présent document
+> avait réémis ses gates sous les mêmes noms, avec des critères **plus faibles** — dont un
+> **vacueux**. Elle est réputée nulle sur la phase 1. Motif complet et 26 findings arbitrés :
+> `2026-07-29-sampling-penalty-arbitrage.md`.
+>
+> **Règle de nommage, non négociable** : les gates de la rév. 4 gardent leurs noms
+> (`RP0`…`RP7`, `SM0`…`SM3`). Les gates du présent document sont préfixés **`S2-`** (phase 2).
+> Aucun tag ne peut désigner deux contenus : `gate/rp2-pass` appartient à la rév. 4 et à elle
+> seule.
 
 ---
 
-## 1. Objectifs
+## 0. Ce qui a changé depuis la rév. 1, et pourquoi
 
-Formulés par Régis, et traduits ici en critères vérifiables.
+Trois relecteurs adversariaux et un workflow de mesure ont produit **30 corrections**. Les cinq
+qui changent la structure :
 
-**O1 — pouvoir valider chaque brique en régime déterministe avant d'activer l'aléatoire.**
-Une fonction de sampling ne se valide pas en regardant si « ça a l'air bien ». Chaque brique doit
-avoir un **régime neutre** où elle n'a pas le droit d'être aléatoire, et où elle doit rendre
-**bit-à-bit** ce que le moteur rendait avant elle.
-
-**O2 — que le 12B devienne un moteur d'inférence conforme.** Aujourd'hui il décode en greedy, un
-régime que Google **ne recommande pas** : `generation_config.json` déclare
-`do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0`. À la fin de ce chantier, le runner
-applique **8 clés sur 8** (les 2 du chantier précédent + les 4 de sampling + la penalty), et ses
-sorties sont **reproductibles à seed fixée**.
-
-**Critère de succès global, énonçable par un tiers** : `--seed 42` deux fois de suite donne le
-même texte à l'octet près ; `--repetition-penalty 1.0 --top-k 1` donne **exactement** la sortie
-greedy d'avant le chantier ; et l'oracle HF, à politique identique, produit la même séquence.
+| # | Fait neuf | Conséquence |
+|---|---|---|
+| **D1** | La rév. 1 avait réécrit la phase 1 en moins bien | La phase 1 est rendue à la rév. 4. Ce document ne la touche plus. |
+| **D2** | `zig` **absent du PATH**, **zéro** `zig_test` dans `BUILD.bazel` (vérifié) | Aucun `zig test`. Les selftests passent par `--selftest-*`, patron de `--selftest-gencfg` livré le 29 juil. La rév. 4 avait **déjà** tranché cela (amendement 1) ; la rév. 1 l'avait réintroduit. |
+| **D3** | **Les témoins 48 et 124 sont DÉTERMINISTES** — mesuré (F17) | Le gate-pont peut s'y adosser. La bistabilité est **prompt-spécifique**, pas une propriété générale du 12B. |
+| **D4** | `--temperature 0` : HF **lève une `ValueError`** (mesuré, F15) | **Divergence assumée avec la rév. 4**, qui prévoyait « cas spécial branché sur `argmax` ». La rév. 4 décidait sans connaître ce fait. On reproduit HF. |
+| **D5** | Le critère de succès de la rév. 1 était **inatteignable** | « l'oracle HF produit la même séquence » est impossible avec deux RNG distincts. Réécrit en §1. |
 
 ---
 
-## 2. Faits établis par lecture de la source (transformers 5.14.1, venv `g12b`)
+## 1. Objectifs et critère de succès
 
-**F8 — l'ordre des processors, mesuré et non supposé.** `_get_logits_processor` les instancie
-dans cet ordre (rang réel dans la liste complète de 23) :
+**O1 — valider chaque brique en régime déterministe avant d'activer l'aléatoire.** Chaque brique
+a un régime neutre où elle n'a pas le droit d'être aléatoire, et où elle doit rendre **bit-à-bit**
+ce que le moteur rendait avant elle.
 
-```
- 4. RepetitionPenaltyLogitsProcessor
-14. SuppressTokensLogitsProcessor
-16. TemperatureLogitsWarper
-18. TopKLogitsWarper
-19. TopPLogitsWarper
-```
+**O2 — moteur d'inférence conforme.** `generation_config.json` déclare
+`do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0`. Le greedy est un régime que Google
+**ne recommande pas**.
 
-⇒ **Penalty → Suppress → Temperature → TopK → TopP**. Deux conséquences non triviales :
+**Critère de succès — réécrit (D5), et atteignable :**
 
-1. **La température s'applique AVANT top-p.** Beaucoup d'implémentations font l'inverse. Comme
-   `top_p` raisonne sur les probabilités **après softmax**, diviser par `T` change la masse
-   cumulée, donc **le nombre de tokens retenus**. L'ordre n'est pas cosmétique.
-2. La température est en revanche **sans effet sur top-k** : la division par `T > 0` est monotone
-   croissante, donc elle préserve l'ordre des logits. Écrit ici pour qu'on ne « corrige » pas un
-   jour cet ordre en croyant bien faire.
-
-**F9 — `TopKLogitsWarper` garde les ex æquo du k-ième.**
-
-```python
-indices_to_remove = scores < torch.topk(scores, top_k)[0][..., -1, None]
-scores_processed = scores.masked_fill(indices_to_remove, self.filter_value)
-```
-
-L'inégalité est **stricte** : tout token dont le logit **égale** celui du k-ième est **conservé**.
-Une implémentation naïve « garder les k premiers indices du tri » diverge donc dès qu'il y a une
-égalité au rang k. Sur un vocabulaire de 262 144 logits f32, ce n'est pas une hypothèse d'école.
-
-**F10 — `TopPLogitsWarper` trie en ASCENDANT et retranche par le bas.**
-
-```python
-sorted_logits, sorted_indices = torch.sort(scores, descending=False)
-cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-sorted_indices_to_remove = cumulative_probs <= (1 - self.top_p)
-sorted_indices_to_remove[..., -self.min_tokens_to_keep:] = 0
-```
-
-Ce **n'est pas** la formulation habituelle (tri descendant, garder tant que le cumul reste sous
-`p`). Les deux coïncident au centre et **diffèrent aux bords** — égalités, `min_tokens_to_keep`,
-et le fait que le test soit `<=` et non `<`. On reproduit **cette** formulation, pas celle qu'on
-croit connaître. `min_tokens_to_keep` protège les **derniers** éléments du tri ascendant,
-c'est-à-dire les **plus probables**.
-
-**F11 — `filter_value` vaut `-inf` par défaut**, sur les deux warpers. Cohérent avec le choix déjà
-fait au chantier précédent (`-inf` plutôt que `finfo.min`, qui déborderait sous multiplication).
-
-**F12 — le prérequis RP-1 est en grande partie levé.** La spec rév. 4 exigeait de refonder
-l'oracle de décode 12B en fp32 (il était bf16 par construction, `69:371` refusant `--compute-fp32`
-hors teacher-force). Cette garde a été **levée le 29 juil** (Task 6 du chantier `generation_config`),
-et le mode décode fp32 a **tourné** : coût mesuré **69,75 s/token** (médiane tokens 2-4) contre
-28,57 s/token en bf16. RP-1 devient une **vérification**, plus un chantier.
-
-**F13 — deux mécanismes de sélection cohabiteront.** `gencfg.select()` (chantier précédent)
-choisit dans le **top-5 pré-trié** en *sautant* les ids supprimés — il n'écrit **pas** `-inf`.
-L'argument d'exactitude qui le fonde (« rang brut ≤ 3 ») **ne vaut que là**. Dès qu'une brique de
-ce chantier s'arme, on travaille sur le **vecteur complet** et la suppression doit y être appliquée
-comme HF la fait. Le raisonnement « inverser penalty et suppression est inoffensif car
-`-inf × p = -inf` » (spec `generation_config` §4.6) **ne s'applique donc pas** au chemin top-5.
+1. `--seed 42` deux fois ⇒ **ids identiques** (comparés sur la seule ligne `generated`, cf. V3).
+2. `--repetition-penalty 1.0 --top-k 1` ⇒ ids **bit-identiques** au greedy d'avant le chantier.
+3. En teacher-forcing, à chaque position, **l'ensemble des tokens survivants** après
+   `penalty → suppress → T → topK → topP` est **identique** à celui de HF, et les probabilités
+   renormalisées coïncident à 1e-6. *(C'est déterministe — contrairement aux séquences tirées.)*
 
 ---
 
-## 3. Claims falsifiables — prédictions PRÉ-ENREGISTRÉES
+## 2. Faits établis (mesurés, avec l'instrument nommé)
 
-> Exigence Régis (`feedback_falsifiabilite_aussi_en_ingenierie`, 28 juil) : chaque claim porte une
-> prédiction chiffrée et **ce qui la tuerait**, committées **avant** la première mesure.
+**F8 — ordre des processors.** `_get_logits_processor` compte **26** `processors.append(...)`.
+Rangs réels : `RepetitionPenalty` **4**, `SuppressTokens` **15**, `Temperature` **17**,
+`TopK` **19**, `TopP` **20**.
+⇒ **Penalty → Suppress → Temperature → TopK → TopP.**
+⚠ Existent entre nos étapes, **inertes ici** mais à nommer : `SuppressTokensAtBegin` (**16**) et
+**`TopHLogitsWarper` (18)** — ce dernier **casserait l'adjacence Temperature→TopK** s'il était
+armé.
+*(La rév. 1 annonçait 4/14/16/18/19 sur 23 : sa sonde comptait les classes dédupliquées, pas les
+`append`. Un fait annoncé « mesuré » l'avait été avec un instrument faux.)*
 
-**S1 — « le chemin complet, en régime neutre, est indiscernable du chemin greedy ».**
-Prédiction : avec `--repetition-penalty 1.0 --top-k 1` (sampling armé, aléatoire neutralisé), les
-ids générés sont **bit-identiques** à ceux du chemin greedy actuel, sur le témoin 48 **et** le
-témoin 124. **Ce qui la tue** : un seul id différent. Pas de tolérance — les deux chemins calculent
-le même argmax sur les mêmes logits.
+**F8a — la température s'applique AVANT top-p, et cela change le résultat.** Mesuré sur V=4096,
+`top_p = 0,95` : `T=0,5 → 14` survivants, `T=1,0 → 521`, `T=2,0 → 2313`. L'ordre n'est pas
+cosmétique.
 
-**S2 — « la penalty reproduit HF ».** Prédiction : sur le témoin 200 en teacher-forcing fp32 avec
-`penalty = 1.15`, `n_match == n_total − 1`, l'unique mismatch autorisé étant **@47** (le tie
-bistable déjà instruit). **Ce qui la tue** : un mismatch ailleurs qu'à 47.
+**F8b — la température N'EST PAS neutre vis-à-vis de top-k en f32.** La division est monotone au
+sens **large** : l'arrondi peut **fusionner** deux logits distincts en une égalité ; si elle tombe
+au rang k, la règle stricte de F9 fait **survivre un token de plus**. Contre-exemple mesuré :
+`[100, 12.5308094, 12.5308104, 1]`, `top_k=2` → 2 survivants ; après `/0.7` → **3**.
+*(La rév. 1 affirmait l'inverse, en contradiction avec sa propre F9, et cette phrase était
+destinée à être gravée en commentaire.)*
 
-**S3 — « les warpers reproduisent HF, y compris aux bords ».** Prédiction : le selftest host-only
-rend **100 %** sur des cas incluant explicitement (a) une **égalité exacte au rang k**, (b) un
-`top_p` qui tombe **pile** sur une frontière de cumul, (c) `min_tokens_to_keep` mordant. **Ce qui
-la tue** : un seul cas de bord divergent — et ce sont précisément les cas que F9/F10 rendent
-probables.
+**F8c — `temperature: 1.0` ⇒ HF n'instancie PAS le warper** (`temperature is not None and
+temperature != 1.0`). **Donc la température est ABSENTE de la chaîne réelle de ce modèle** : un
+gate « config Google complète » ne l'exercerait **jamais**. D'où **S2-T**, gate dédié à `T ≠ 1`.
 
-**S4 — « le tirage suit la distribution ».** Prédiction : χ² sous α = 0,01 sur 10 000 tirages,
-distribution théorique calculée par une implémentation **indépendante** (torch), binning à ~10
-catégories (effectif attendu ~1000, σ ≈ 31). **Ce qui la tue** : χ² au-delà du seuil. **Non-vacuité
-exigée** : un biais injecté de 5 % doit **FAIL** le test — sinon le test ne discrimine rien.
+**F9 — `TopKLogitsWarper` : les ex æquo du k-ième SURVIVENT.** `scores < topk(...)[..., -1]`,
+inégalité **stricte**. Mesuré : `[3,2,1,1,1]`, `k=3` → **5** survivants ; 64 logits égaux,
+`k=8` → **64**. **`top_k` ne borne pas le nombre de survivants.**
+Deux lignes que la rév. 1 avait coupées : `self.top_k = max(top_k, min_tokens_to_keep)` (`__init__`)
+et `top_k = min(self.top_k, scores.size(-1))` (`__call__`).
 
-**S5 — « le graphe ne bouge toujours pas ».** Prédiction : HLO pré-optimisation **byte-identique**
-au témoin, comme au chantier précédent. **Ce qui la tue** : un md5 différent — signe qu'un
-`Tensor.Rng` ou un warper a fui dans le graphe.
+**F10 — `TopPLogitsWarper` trie en ASCENDANT et retranche par le bas** (`cum <= 1 - top_p`),
+`min_tokens_to_keep` protégeant la **queue** du tri ascendant (= les plus probables).
+Contre-exemple **disjoint** mesuré (le plus discriminant) : 8 logits égaux, `top_p = 0,25` →
+HF garde **{6,7}**, la formulation naïve descendante garde **{0,1}** — **intersection vide**.
+Aucun test de cardinalité ne l'attraperait. Sans égalité exacte, les deux formulations divergent
+encore **4 fois sur 2000** tirages aléatoires (V=4096) par pur arrondi de sommation.
 
-**S6 — « le surcoût du D2H complet est borné ».** Le chemin complet rapatrie 262 144 f32 (~1 Mo)
-par step au lieu de ~48 octets. Prédiction : perte de débit **< 15 %** sur un run de 200 tokens
-(référence 9,0 tok/s). **Ce qui la tue** : une perte supérieure — auquel cas il faudra arbitrer
-(topK in-graph élargi, au prix de S5).
+**F11 — `filter_value = -inf`** sur les deux warpers.
 
-> ⚠ **Aucune de ces prédictions n'est un vœu** : S6 en particulier est un chiffre que je n'ai pas
-> mesuré. S'il tombe, c'est le design qui est à revoir, pas le seuil.
+**F14 — `torch.sort` n'est PAS stable par défaut, ET son comportement DÉPEND DE LA TAILLE.**
+Mesuré : pour n ≤ 64 les ex æquo ressortent en ordre d'index ; à partir de n ≥ 256, **non**.
+Sur le vocabulaire réel (262 144, tout égal, `top_p=0,5`) HF rend 131 072 survivants dont
+l'index 0, **en ensemble non contigu**.
+⇒ **Une fixture d'edge-case écrite à n ≤ 64 exerce un AUTRE chemin que la production.**
+Conséquence contractuelle : l'identité exacte des survivants sur ex æquo **n'est pas garantie**.
+La comparaison porte sur la **classe d'équivalence** (multiset trié des logits survivants + masse
+de probabilité), et **au moins un cas de fixture est à n = 262 144**.
+
+**F15 — `--temperature 0` : HF lève une `ValueError`, avant tout forward.** Aucune validation dans
+`generation_config` (`.validate()` passe) ; le garde-fou est dans
+`TemperatureLogitsWarper.__init__` (`not (temperature > 0)`), et le warper **est** construit
+(`0.0 != 1.0`), donc l'exception part à la construction de la `LogitsProcessorList`.
+⚠ **Piège mesuré** : `> 0` **ne suffit pas**. `T = 1e-45` (dénormal) **passe** le garde-fou et
+produit `[inf, inf, inf, 0] → softmax = [nan, nan, nan, nan]` (`inf - inf`). Reproduire HF
+littéralement hériterait de ce trou.
+
+**F16 — coûts mesurés sur la cible** (VM 3090, PCIe 4.0 ×16, Ryzen 7 5800X ; ⚠ *déviation de
+custody* : `gemma4_g12auto` était résident à 22 210 MiB pendant la mesure — les absolus sont à
+requalifier sur GPU libre, le **delta** entre bras absorbe l'essentiel du biais) :
+
+| opération | coût | % d'un step (9,09 ms) |
+|---|---|---|
+| D2H 1 MiB **pinned**, marginal | **52,2 µs** | 0,6 % |
+| D2H 1 MiB **pageable** | +51 µs de plus | — |
+| `partial_sort` top-64 sur 262 144 | **90,5 µs** | 1,0 % |
+| softmax plein vocab | 817 µs | 9,0 % |
+| **`std::sort` complet** | **16 176 µs** | **183 %** |
+| bras K=5 (baseline) | 5,87 µs | — |
+
+⇒ Le surcoût **dépend entièrement de l'algorithme host** : 1,55 % bien implémenté, **183 % avec
+un tri complet**. Le seuil de la rév. 1 (« < 15 % ») ne pouvait ni distinguer 1,55 % de 10,8 %,
+ni être atteint par une implémentation correcte.
+
+**F17 — les témoins 48 et 124 sont REPRODUCTIBLES.** Campagne dédiée du 29 juil, **flux séparés**,
+chaque run **recompilant à neuf** (38-40 s, aucun cache XLA) :
+
+| témoin | runs | trajectoires distinctes | marge la plus fine | rapport au jitter |
+|---|---|---|---|---|
+| **48** | **23/23 identiques** | **1** | 0,0924 @ pos 43 | **~90×** son jitter |
+| **124** | **13/13 identiques** | **1** | 0,0136 @ pos **120** | **~3,1×** son spread |
+
+Les compiles **diffèrent réellement** (`max|Δ logit|` = 1,3e-2 à 1,7e-2) : la variabilité
+d'autotuning accusée d'avoir fait basculer `@47` **a été exercée 20 fois**, et les témoins y ont
+résisté. Plus fort encore : les témoins archivés datent du **26 juil**, produits par un binaire
+**antérieur** au chantier `generation_config`, et le binaire du 29 juil les reproduit
+**bit-identiques** — ils ont survécu à un rebuild **et** à un changement de source.
+
+⇒ **La bistabilité est une propriété de la position @47 du prompt « zero story » (marge 0,004587),
+pas une propriété du 12B en génération libre.** Nuance importante au finding, à propager.
+
+⚠ **Réserve nommée sur le 124** : la marge @120 (0,0136) n'est qu'à ~3× de son spread de compile,
+et toute la fragilité est concentrée dans les **15 derniers tokens** (zone de clôture avant EOS) ;
+sur les indices 0..109 la marge la plus fine remonte à 0,092. **Durcissement retenu, gratuit** :
+le gate porte sur les **110 premiers ids**. Si le gate échoue un jour, **regarder la position 120
+avant d'accuser le code**.
 
 ---
 
-## 4. Design — les deux chemins, et le pont entre eux
+## 3. Claims falsifiables — PRÉ-ENREGISTRÉES
+
+**S2-C1 — le chemin complet, en régime neutre, est indiscernable du chemin greedy.**
+Prédiction : `--repetition-penalty 1.0 --top-k 1` ⇒ ids **bit-identiques**, témoins 48 (48 ids) et
+124 (**110 premiers ids**, F17). **Ce qui la tue** : un id différent, hors ex æquo instrumenté.
+
+**S2-C2 — les warpers reproduisent HF, y compris aux bords ET à l'échelle réelle.**
+Prédiction : selftest **100 %** sur une fixture contenant au minimum (a) le cas **disjoint** de
+F10, (b) `min_tokens_to_keep` mordant, (c) l'égalité au rang k de F9, (d) **au moins un cas à
+n = 262 144** (F14). **Ce qui la tue** : un seul cas de bord divergent. **Ce qui la rend vacueuse
+si on l'omet** : ne tester qu'à n ≤ 64.
+
+**S2-C3 — le tirage suit la distribution.** χ² à α = 0,01, **n = 10 000**, **k = 10 ids
+distincts** (`top_k = 10` exactement — pas des bins agrégés, sinon une permutation d'ids **dans**
+un bin est invisible). Distribution théorique par implémentation **indépendante** (torch).
+**Non-vacuité** : injection **half-split** (+b sur k/2, −b sur k/2) à **b = 10 %** doit **FAIL**.
+*Dérivation* : en half-split λ = n·b², **indépendant de k** ⇒ puissance ≥ 99,98 % à k ∈ {10,32,64}.
+*(La rév. 1 exigeait 5 % en mono-catégorie : χ² = 2,78 contre 21,67 critique — elle n'aurait pas
+mordu. Et en mono-catégorie il faudrait 18,7 % à k=10 mais **67,5 %** à k=64, ce qui ne serait plus
+un biais mais un sampler cassé.)*
+
+**S2-C4 — le graphe ne bouge pas.** HLO pré-optimisation **byte-identique**, avec **fraîcheur
+prouvée** : répertoire de dump vidé, mtime postérieur à l'édition, nombre de fichiers **et** volume
+publiés des deux côtés (patron GC0 : 510 fichiers, 1 905 860 o). **Ce qui la tue** : md5 différent
+⇒ un `Tensor.Rng` a fui dans le graphe.
+
+**S2-C5 — le surcoût du chemin complet est borné.** Prédiction : Δ médian du bloc
+{D2H + sample} ≤ **250 µs/step** (≈2,8 %, soit ~1,8× le coût mesuré d'une implémentation correcte).
+**Ce qui la tue** : Δ ≥ **900 µs/step** (softmax plein vocab ou pire).
+
+---
+
+## 4. Design — les deux chemins et le pont
 
 ### 4.1 Chemin A (inchangé) — greedy nu
-
-`repetition_penalty == 1.0` **et** sampling désactivé. Le graphe rapatrie le top-5 (~48 octets),
-`gencfg.select()` choisit. **Strictement le code d'aujourd'hui**, prouvé par les 12 gates du
-chantier précédent. Aucune ligne n'y est touchée.
+`penalty == 1.0` et sampling désactivé : top-5 rapatrié (~48 o), `gencfg.select()`. Strictement le
+code prouvé par les 12 gates du chantier précédent.
 
 ### 4.2 Chemin B — dès qu'une brique s'arme
+Vecteur complet rapatrié (il **sort déjà** du graphe, F1) puis, dans l'ordre de F8 :
+`penalty → suppress(-inf) → ÷T → topK → topP → argmax|tirage`.
 
-Le vecteur complet de logits est rapatrié (il **sort déjà** du graphe, F1 : 7 sorties, logits en
-3ᵉ, aujourd'hui non lus), puis traité **dans l'ordre de F8** :
+⚠ **Algorithme imposé** : `partial_sort` / heap top-K, **jamais** un tri complet (F16 : 183 % d'un
+step). Mémoire hôte **pinned** exigée et vérifiée (pageable = +51 µs/step pour rien).
 
-```
-logits[V] ──penalty(hist)──▶ ──suppress(-inf)──▶ ──÷T──▶ ──topK──▶ ──topP──▶ ──argmax|tirage──▶ token
-```
+### 4.3 `S2-PONT` — le gate-pont, refondu
 
-**Ce que le chemin B doit garantir** : quand toutes les briques sont en régime neutre, il produit
-le **même token** que le chemin A. C'est S1, et c'est le cœur de l'objectif O1.
+**Ce que la rév. 1 faisait mal** : elle comparait un run chemin-B à un témoin chemin-A **stocké**
+(deux forwards, deux compiles). Or GC2 a mesuré `n_suppress_hits = 0` sur les témoins 48/124 : le
+gate tournait sur les deux seuls témoins où A et B **ne peuvent pas** diverger.
 
-### 4.3 Le gate-pont (RP-PONT) — la pièce maîtresse
+**Forme retenue** : faire tourner **les deux sélecteurs sur le MÊME vecteur de logits, au MÊME
+step, dans le MÊME processus** — les deux sorties du graphe (top-5 **et** logits complets) sont
+disponibles simultanément. Insensible à la bistabilité **par construction**, et exerçant **chaque**
+step.
 
-Deux chemins qui choisissent un token, c'est deux occasions de diverger en silence. Le pont est
-donc un gate **à règle d'arrêt dure**, exécuté **avant** toute mesure de qualité :
+**Critères** : `n_steps_compared == n_generated` · `n_disagree == 0` · **et** les compteurs de
+non-vacuité **par branche**, tous non nuls : `n_suppress_hits ≥ 1` (⇒ **utiliser un témoin où la
+suppression mord** — le témoin 200 teacher-forcé mord @57), `n_exact_top_ties` publié.
+*(`n_full_path > 0` seul est **trop faible** : satisfait par 1 step sur 124.)*
 
-- `--repetition-penalty 1.0 --top-k 1` sur les témoins 48 et 124 → ids **bit-identiques**.
-- Le compteur `n_full_path` (nombre de steps passés par le chemin B) doit être **non nul** :
-  sinon le gate a validé le chemin A contre lui-même. **C'est le détecteur de vacuité intégré**,
-  et il est obligatoire — le chantier précédent a produit un contrôle qui ne pouvait pas échouer,
-  on ne recommence pas.
+⚠ **Réserve de tie-break** : l'identité A↔B suppose l'accord entre l'`argmax` host (« premier
+indice gagnant ») et l'ordre du `topK` in-graph, que `gencfg.zig:21-25` documente comme **non
+vérifié**. Un désaccord sur un **tie exact** est un **verdict distinct**, publié, pas un STOP
+silencieux.
 
-### 4.4 Ce qui doit être dit dans le code
-
-- La garde `suppress.len + 1 > TOP_K` (chantier précédent) protège **le chemin A uniquement**.
-  Sur le chemin B elle est sans objet. Le commentaire doit nommer lequel des deux elle protège,
-  sinon un futur lecteur la croira universelle.
-- `gencfg.isSuppressed()` reste la **fonction unique** de suppression (exigence §4.7 de la spec
-  précédente) : le chemin B l'appelle pour écrire `-inf`, il n'en réimplémente pas la logique.
-
----
-
-## 5. Design — `zml_runner/sampling.zig`
-
-**Responsabilité unique** : transformer un vecteur de logits en un token. **Aucune dépendance
-ZML** (des `f32` nus) ⇒ testable par `zig test`, sans GPU, sans PJRT, sans poids. C'est ce qui rend
-O1 praticable : on itère en secondes, pas en minutes de compile.
-
-```zig
-pub const Params = struct {
-    repetition_penalty: f32 = 1.0,  // 1.0 = neutre
-    temperature: f32 = 1.0,         // 1.0 = neutre (HF n'instancie PAS le warper à 1.0, F8)
-    top_k: u32 = 0,                 // 0 = désactivé
-    top_p: f32 = 1.0,               // 1.0 = neutre
-    min_tokens_to_keep: u32 = 1,    // défaut HF
-    seed: ?u64 = null,              // null = argmax (pas de tirage)
-};
-
-/// Penalty IN-PLACE, au plus une fois par token distinct (F3). Signe commande l'opération.
-pub fn applyRepetitionPenalty(logits: []f32, hist: []const u32, penalty: f32, seen: *Bitset) void;
-
-/// -inf sur les ids supprimés. Délègue à gencfg.isSuppressed — pas de seconde implémentation.
-pub fn applySuppression(logits: []f32, policy: *const gencfg.GenCfg) void;
-
-/// ÷ temperature. JAMAIS × (1/T) : l'équivalence mathématique casse la bit-exactitude f32.
-pub fn applyTemperature(logits: []f32, t: f32) void;
-
-/// F9 : élimine STRICTEMENT sous le k-ième ⇒ les ex æquo du k-ième SURVIVENT.
-pub fn applyTopK(logits: []f32, k: u32) void;
-
-/// F10 : tri ASCENDANT, cumsum des softmax, retrait par le bas (`<= 1 - p`), min_tokens_to_keep
-/// protégeant la QUEUE du tri ascendant (= les plus probables).
-pub fn applyTopP(logits: []f32, p: f32, min_keep: u32) void;
-
-/// Tirage multinomial sur les logits filtrés. RNG **host** seedé par (seed, step) — jamais le
-/// RNG device (F4 : non garanti déterministe entre backends/versions).
-pub fn sample(logits: []const f32, rng: *Rng) u32;
-
-/// argmax host, tie-break explicite (premier indice gagnant).
-pub fn argmax(logits: []const f32) u32;
-```
-
-**Trois interdits, chacun adossé à un gate** :
-
-1. **`× (1/penalty)` et `× (1/T)`** — mathématiquement équivalents, ils cassent la bit-exactitude
-   attendue. La division reste une division.
-2. **Retranscrire une formule de warper depuis la doc ou la mémoire.** Les fixtures sont produites
-   par les **vrais** warpers HF (C5) : retranscrire ferait comparer deux transcriptions du même
-   auteur, et une inversion de branche commise des deux côtés passerait le gate.
-3. **Allouer par step.** Bitset et buffer de logits alloués **une fois**, dimensionnés au vocab
-   runtime. Sinon 200 tokens × 20 prompts = plusieurs Gio brassés, et le critère RSS saute de
-   bonne foi.
+### 4.4 La garde `suppress.len + 1 > TOP_K` — décision prise
+Elle vit dans `gencfg.fromLists` (`gencfg.zig:207`) et **refuse de charger la politique**, avant
+tout choix de chemin : elle est donc **globale**, pas « chemin A seulement ». Elle est **maintenue
+telle quelle** (la relâcher casserait GC4(c), gate vert et taggé). Le commentaire doit dire qu'elle
+borne l'**argument de rang du chemin A** tout en s'appliquant globalement — c'est une contrainte
+plus forte que nécessaire, assumée.
 
 ---
 
-## 6. Design — oracle et fixtures
+## 5. `zml_runner/sampling.zig` et la surface CLI
 
-**Fixtures des warpers** (`scripts/72_sampling_fixture.py`, 72 = premier numéro libre) — patron
-**GC1**, qui a rendu 8/8 hier et attrapé un double-free : cas de logits + résultat attendu calculé
-par les **vrais** `TemperatureLogitsWarper` / `TopKLogitsWarper` / `TopPLogitsWarper`, plus le
-sidecar des cas de bord. **Les cas de bord sont la raison d'être de la fixture** — S3 nomme les
-trois qui doivent y figurer.
+Fonctions **pures** sur `f32` nus, sans dépendance ZML ⇒ exerçables par `--selftest-sampling`
+(host-only, **pas** `zig test`, D2).
 
-**Oracle de bout en bout** : `scripts/69_u8_gen_oracle.py`, déjà porteur de la politique de
-décodage. On y ajoute `--repetition-penalty` et les paramètres de sampling, **pris au vrai
-processor HF**, avec `script_md5` et `gen_policy` déjà au manifest.
+`applyRepetitionPenalty` · `applySuppression` (délègue à `gencfg.isSuppressed`, pas de seconde
+implémentation) · `applyTemperature` · `applyTopK` (**doit porter `min_tokens_to_keep`** :
+`k_eff = min(max(k, min_keep), vocab)`, F9) · `applyTopP` (**F10 à la lettre** : tri ascendant,
+`<=`, `min_keep` en queue) · `sample` (RNG **host**) · `argmax`.
 
----
+**Trois interdits, chacun adossé à un gate** : pas de `× (1/x)` au lieu d'une division (casse la
+bit-exactitude) · pas de retranscription de formule (fixtures issues des **vrais** processors,
+**y compris pour la penalty**) · **aucune allocation par step** (bitset et buffer alloués une fois).
 
-## 7. Gates
+### Gardes en ACCEPTATION — jamais en rejet
 
-### Phase 1 — déterministe (`RP`)
+> Règle héritée de la rév. 4 §8 : `p <= 0 → rejet` **laisse passer `NaN`**. Toute comparaison avec
+> `NaN` étant fausse, `NaN` échoue toute acceptation et **passe** tout rejet.
 
-| Gate | Contenu | PASS (pré-enregistré) |
+| Flag | Défaut neutre | Garde |
 |---|---|---|
-| **RP-0** | Témoins figés + HLO avant toute édition | dumps non vides, md5 consignés |
-| **RP-1** | L'instrument est fp32 (F12) | un run décode `--compute-fp32` aboutit ; coût consigné |
-| **RP-PONT** | **Le pont** : `penalty 1.0`, `top-k 1` | ids **bit-identiques** aux témoins 48 et 124 **et** `n_full_path > 0` — **FAIL ⇒ STOP** |
-| **RP-2** | Selftest `zig test` de `applyRepetitionPenalty` | 100 % des cas, dont dédup et signe |
-| **RP-3** | Penalty vs HF, teacher-forcé fp32 | `n_match == n_total − 1`, unique mismatch **@47** (S2) |
-| **RP-4** | Non-vacuité de la penalty | (a) sans dédup ⇒ FAIL ; (b) signe inversé ⇒ FAIL ; (c) `penalty=1.0` ⇒ ids inchangés |
-| **RP-5** | Graphe et mémoire | HLO **byte-identique** (S5) ; RSS stable sur 200 tokens |
-| **RP-6** | **Coût du chemin complet** | débit mesuré vs 9,0 tok/s ; **< 15 %** de perte (S6) |
+| `--repetition-penalty` | `1.0` | `!(p > 0 and isFinite(p))` ⇒ `error.InvalidPenalty` |
+| `--temperature` | `1.0` | `!(t >= T_MIN and isFinite(t))` ⇒ `error.InvalidTemperature` |
+| `--top-k` | `0` (désactivé, convention HF) | `parseInt(u32)`, **plus** `!(k <= vocab)` ⇒ rejet explicite, **jamais un clamp silencieux** |
+| `--top-p` | `1.0` | `!(p > 0 and p <= 1)` ⇒ `error.InvalidTopP` |
+| `--seed` | `null` (**pas** `0` : `0` est une graine légitime) | `parseInt(u64)` ; **absent alors que le tirage est armé ⇒ `error.SeedRequired`** — jamais d'ensemencement par l'horloge |
+| `--min-tokens-to-keep` | `1` | `!(m >= 1 and m <= vocab)` ⇒ rejet (`m = 0` ferait paniquer `argmax` sur une slice vide) |
 
-### Phase 2 — stochastique (`SM`), livrée après la phase 1
+**`--temperature 0` — décision D4, divergence datée avec la rév. 4.** HF **lève une `ValueError`**
+(F15) ; la rév. 4 prévoyait « brancher sur `argmax` » sans connaître ce fait. **On reproduit HF** :
+rejet, avec le message renvoyant vers `--top-k 1` pour du greedy déterministe.
 
-| Gate | Contenu | PASS (pré-enregistré) |
+**`T_MIN` — divergence délibérée, déclarée.** HF accepte `T = 1e-45` et produit des `NaN` (F15).
+On impose `T_MIN` tel que `max|logit| / T ≤ 3,4e38` ; logits Gemma bornés par le softcap 30
+⇒ `T_MIN = 1e-30`. **Écrit comme divergence**, pas comme reproduction.
+
+---
+
+## 6. Gates — phase 2
+
+| Gate | Contenu | PASS pré-enregistré |
 |---|---|---|
-| **SM-0** | Régimes **dégénérés**, 10 seeds | `top-k 1` avec `T ≠ 0` ⇒ ids identiques aux 10 seeds **et** == greedy |
-| **SM-1** | Selftest warpers sur fixtures | 100 %, **cas de bord inclus** (S3) |
-| **SM-2** | Distributionnel | χ² α = 0,01, distribution théorique **indépendante** ; biais 5 % ⇒ FAIL (S4) |
-| **SM-3** | Reproductibilité | même seed ⇒ sortie identique à l'octet |
-| **SM-4** | Non-vacuité du RNG | ≥ k sorties distinctes sur N seeds, k et N **calculés depuis la fixture avant** la mesure |
-| **SM-5** | Bout en bout vs HF | config Google complète ; séquences identiques **ou** écarts tous sous le seuil, publiés |
+| **S2-PONT** | Les deux sélecteurs, même vecteur, même step, même processus (§4.3) | `n_disagree == 0` · `n_steps_compared == n_generated` · `n_suppress_hits ≥ 1` · `n_exact_top_ties` publié — **FAIL ⇒ STOP** |
+| **S2-U** | `--selftest-sampling` sur fixtures des **vrais** warpers | **100 %**, avec les 4 classes de bord de S2-C2 dont **un cas à n = 262 144** ; comparaison par **classe d'équivalence** (F14) ; **compteurs d'antécédent** non nuls, patron GC1 |
+| **S2-T** | **Température exercée** (`T = 0,7`), teacher-forcé | ensembles de survivants == HF sur 200 positions. **Sans ce gate, `applyTemperature` ne serait validé nulle part** (F8c) |
+| **S2-D** | Distributionnel (S2-C3) | χ² α=0,01, k=10 **ids distincts** ; **non-vacuité half-split b=10 % ⇒ FAIL** ; **un seul re-run, seed pré-déclarée, deux échecs = FAIL** |
+| **S2-R** | Reproductibilité | même seed ⇒ **ligne `generated` identique** (V3) |
+| **S2-N** | Non-vacuité du RNG | ≥ k sorties distinctes sur N seeds, **k et N calculés depuis la fixture AVANT** la mesure · `n_draws > 0` · assertion dure **`logits[token_tiré] > -inf`** à chaque step, comptée |
+| **S2-E** | Équivalence bout-en-bout (D5-3) | **ensembles de survivants** identiques à HF sur 200 positions ; probabilités renormalisées à 1e-6 |
+| **S2-P** | Surcoût (S2-C5) | chronomètre **in-process**, bras **alternés ABAB dans le MÊME processus**, test des signes sur 48 paires · PASS ≤ 250 µs/step · **non-vacuité obligatoire : le bras `std::sort` complet doit être exécuté une fois et FAIL** |
+| **S2-G** | Graphe (S2-C4) | HLO byte-identique **avec fraîcheur prouvée** (dump vidé, mtime, nb fichiers, volume) |
 
-**Règle d'arrêt** : RP-PONT, RP-3, RP-5 et SM-2 FAIL ⇒ **STOP**. Aucune requalification sans
-décision écrite de Régis.
-
----
-
-## 8. Vigilances pré-enregistrées
-
-1. **Un gate de fidélité position-par-position doit être TEACHER-FORCÉ.** La trajectoire libre du
-   12B est **bistable** (`FINDING_NONDETERMINISME_TRAJECTOIRE.md`) : un critère posé sur une
-   génération libre échouerait à tort ~45 % du temps. Les gates en roue libre sont **statistiques**.
-2. **Séparer stdout et stderr** dans toute capture destinée à un grep (piège 24) : `> out 2> err`.
-3. **Un détecteur ne doit pas pouvoir matcher la ligne de configuration** qui mentionne la valeur
-   cherchée (piège 25) — restreindre à la ligne qui porte la donnée, puis contre-prouver.
-4. **La penalty comprime les marges** (÷1,15 sur la branche positive) : elle fabrique donc des
-   quasi-ties. C'est pourquoi RP-1 (instrument fp32) précède RP-3, et pourquoi l'ε de quasi-tie
-   est **dérivé** du bruit mesuré (2e-3) et non deviné.
-5. **`temperature: 1.0` ⇒ HF n'instancie pas le warper** (F8). Ne pas porter une division par 1.0
-   « pour la forme » : elle n'est pas neutre en f32 sur toutes les valeurs.
+**Règle d'arrêt** : S2-PONT, S2-U, S2-D et S2-G ⇒ **STOP**. Aucune requalification sans décision
+écrite de Régis.
 
 ---
 
-## 9. Hors périmètre, et dettes écrites
+## 7. Vigilances
 
-**Hors périmètre** (décision Régis, 29 juil — périmètre « conformité de génération ») : multi-tour
-avec contexte accumulé · stop sequences · streaming token par token · batching du 12B (B > 1) ·
-beam search · `no_repeat_ngram_size` · câblage E2B.
+**V1 — un gate position-par-position doit être teacher-forcé**, sauf sur les témoins **dont le
+déterminisme est mesuré** (F17 : 48 et 124, ce dernier borné à 110 ids). Ailleurs : critère
+statistique.
 
-**Dettes** : l'**E2B** ne sort pas ses logits du graphe (`gen_auto.zig:753`, 6 sorties) — le câbler
-exigerait +1 sortie au tuple racine, donc un arbitrage HLO. Et l'**équivalence de l'arrêt**
-runner ↔ HF n'est prouvée par aucun gate (héritée du chantier précédent).
+**V2 — séparer stdout et stderr** dans toute capture destinée à un grep (`> out 2> err`).
+
+**V3 — un détecteur ne doit matcher ni la ligne de configuration, ni le bruit d'environnement.**
+Corollaire nouveau : S2-R et S2-N comparent la **seule ligne `generated`** — sinon l'écho
+`seed=<n>` rendrait N sorties trivialement distinctes (**S2-N ne pourrait plus échouer**) et un
+horodatage empêcherait S2-R de réussir. Contre-prouver **dans les deux sens**.
+
+**V4 — `temperature: 1.0` ⇒ ne pas instancier le warper**, comme HF (F8c). *(Motif corrigé : la
+rév. 1 justifiait cela par « `x / 1.0` n'est pas neutre en f32 », ce qui est **faux** — la division
+par 1,0 est exacte en IEEE-754. La conduite était bonne, son motif était une supposition.)*
+
+**V5 — la penalty comprime les marges** (÷1,15) : elle fabrique des quasi-ties. C'est pourquoi
+l'instrument fp32 précède les gates de penalty. ⚠ **Précision (rév. 2)** : HF **upcaste en fp32
+avant tout processor** (`_sample` : `.to(copy=True, dtype=torch.float32)`), quel que soit le dtype
+du forward. Le forward fp32 de ce projet a un motif **distinct** — l'oracle bf16 fabrique des ties
+artificiels (leçon J2) — et **ce motif-là reste valide**. Ne pas écrire « HF fait un forward fp32 ».
+
+**V6 — interaction penalty × EOS, non instruite** : pénaliser un id EOS présent dans l'historique
+modifie sa probabilité, **donc l'arrêt**. La dette « équivalence de l'arrêt » existe déjà ; la
+penalty l'**aggrave**.
+
+**V7 — l'état inter-prompts croît.** Ce chantier ajoute bitset, buffer de logits **et état RNG**.
+`seed` est associée à **(seed, index de token DANS le prompt courant)** — remise à zéro par prompt,
+comme le compteur de suppression (R12, prouvé par GC10). Sans cette décision, S2-R serait vrai en
+one-shot et faux en session.
 
 ---
 
-## 10. Ordre d'exécution
+## 8. Hors périmètre et dettes
 
-1. RP-0, RP-1 (témoins et instrument) — **avant toute édition**
-2. `sampling.zig` + `zig test` (RP-2) — sans GPU
-3. Câblage du chemin B + **RP-PONT** — la mécanique complète, en régime neutre
-4. Penalty armée : RP-3, RP-4, RP-5, RP-6
-5. Warpers + fixtures : SM-1 (sans GPU), puis SM-0
-6. Tirage : SM-2, SM-3, SM-4
-7. SM-5, documentation, passe de nuance sur la claim (le gate GC11 doit rester vert), PR
+**Hors périmètre** (décision Régis, périmètre « conformité de génération ») : multi-tour avec
+contexte accumulé · stop sequences · streaming · batching B>1 · beam search ·
+`no_repeat_ngram_size` · câblage E2B.
+
+**Dettes écrites** :
+- **E2B** : ne sort pas ses logits du graphe (`gen_auto.zig:753`) ⇒ « reproduit `generate()` »
+  reste **faux** pour lui.
+- **Équivalence de l'arrêt** runner ↔ HF : prouvée par aucun gate (héritée), **aggravée** par V6.
+- **RP7 « la récitation est-elle levée » : SUSPENDU** (décision datée du 29 juil). Le symptôme
+  d'origine du chantier n'a **jamais été reproduit** (3 témoins greedy, hypothèse réfutée) : le
+  gate est inexécutable faute de cas. Il se **ré-arme** si un prompt qui récite est trouvé.
+- **Ancrages de ligne de la rév. 4 §3.2 périmés** depuis le merge (`in_gen_phase` `:1363`→`:1755`,
+  `generateOnce` `:1296`→`:1680`, sites `:1244/:1254/:1283`→`:1624/:1634/:1663`). Ils sont
+  **indicatifs** ; la règle anti-off-by-one (`hist.append(fed)` en tête d'itération) reste valide.
+- **Custody de F16** : mesures prises GPU non vierge (22 210 MiB résidents). Les **absolus** sont à
+  requalifier sur GPU libre ; les **deltas** entre bras portent le verdict.
+
+---
+
+## 9. Ordre d'exécution
+
+1. Phase 1 **selon la rév. 4** (RP0 → RP7), sans modification.
+2. `sampling.zig` + fixtures des vrais warpers + **S2-U** (host-only).
+3. Chemin B câblé + **S2-PONT** (STOP).
+4. **S2-T**, **S2-E** (teacher-forcés).
+5. **S2-D**, **S2-R**, **S2-N** (stochastique).
+6. **S2-P**, **S2-G**.
+7. Documentation, passe de nuance (GC11 doit rester vert), PR.
+
+---
+
+## 10. Historique de révision
+
+**Rév. 1** (29 juil) — réfutée par trois revues adversariales et un workflow de mesure : phase 1
+réécrite en moins bien, `zig test` inexistant réintroduit, gate RP-3 vacueux, gate-pont posé là où
+les deux chemins ne peuvent pas diverger, χ² non discriminant, seuil de débit ni atteignable ni
+mordant, deux tables de gates en collision de noms.
+
+**Rév. 2** (29 juil) — la phase 1 est rendue à la rév. 4 ; préfixe `S2-` pour éviter toute
+collision ; F8/F9/F10 corrigés et complétés (F14 tri non stable, F15 `T=0` et dénormaux, F16 coûts
+mesurés, F17 déterminisme des témoins) ; gate-pont refondu en comparaison intra-processus ; seuils
+recalculés (χ² half-split 10 %, surcoût 250 µs/step avec non-vacuité par le bras `std::sort`) ;
+gardes en acceptation pour les 6 paramètres ; `--temperature 0` aligné sur HF (divergence datée
+avec la rév. 4) ; `T_MIN` déclaré comme divergence délibérée.
