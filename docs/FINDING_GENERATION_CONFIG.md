@@ -1,8 +1,15 @@
 # Finding — le portage n'applique pas `generation_config.json`
 
-> **Date** : 2026-07-27 · **Statut** : établi, non corrigé · **Origine** : découvert
-> incidemment en gelant les témoins du chantier repetition penalty (un token `<image|>`
-> apparaissait en plein texte dans une génération greedy).
+> **Date** : 2026-07-27 · **Statut** : **CORRIGÉ le 29 juil 2026** (12 gates verts —
+> `docs/GENERATION_CONFIG_RESULTS.md`) · **Origine** : découvert incidemment en gelant les témoins
+> du chantier repetition penalty (un token `<image|>` apparaissait en plein texte dans une
+> génération greedy).
+>
+> **Ce qui a été mesuré à la correction** : `258882` passe de **11/20 runs à 0/20** (p = 1,16e-07,
+> gate GC3) ; l'oracle cesse de partager l'angle mort (`n_match` 199 → 198, gate GC5) ; le graphe
+> est **byte-identique** au témoin (GC0) ; et la trajectoire libre du runner corrigé est
+> **60/60 identique** à un décodage HF greedy appliquant la même politique (GC8), dès lors qu'elle
+> ne bascule pas sur le tie bistable de la position 47.
 >
 > **Décision Régis** : corriger **avant** le chantier repetition penalty — la couche de
 > politique de décodage doit exister avant qu'on y greffe une penalty.
