@@ -56,6 +56,68 @@ VOCAB = 262144
 SOFTCAP = 30.0
 TOPK = 5
 HEAD_CHUNK = 64  # teacher-force : positions par chunk (64 × 262144 × bf16 ≈ 32 Mo)
+# Version minimale de transformers exigée : la sémantique de SuppressTokensLogitsProcessor et la
+# normalisation `eos_token_id: int → [int]` sont lues à cette version (spec §4.1/§4.3). Un oracle
+# qui tournerait sur une autre version validerait une sémantique qu'on n'a pas relue.
+TRANSFORMERS_MIN = (5, 14, 1)
+
+
+def script_md5() -> str:
+    """md5 de CE fichier. GC7 l'exige au rapport : la VM n'est pas un dépôt git et sa copie du
+    script a DÉJÀ été périmée une fois (tf_probe/tf200.json produit par un script absent du chemin
+    canonique). Un rapport qui ne dit pas quel code l'a produit n'est pas traçable."""
+    with open(os.path.abspath(__file__), "rb") as fh:
+        return hashlib.md5(fh.read()).hexdigest()
+
+
+def build_gen_policy(model, disabled: bool):
+    """Politique de décodage, prise à la SOURCE : le processor de transformers, construit depuis
+    `model.generation_config` peuplé par `from_pretrained`. Jamais une réimplémentation locale.
+
+    POURQUOI CE BLOC EXISTE — finding du 27 juil (docs/FINDING_GENERATION_CONFIG.md) : cet oracle
+    faisait un argmax NU, exactement comme le runner ZML. L'instrument était donc aveugle au MÊME
+    endroit que son sujet, et aucun gate ne pouvait détecter que `suppress_tokens` n'était appliqué
+    nulle part. Runner et oracle changent dans le même mouvement — c'est la condition pour que le
+    mode --oracle reste une comparaison valide (spec §4.4, corollaire non négociable).
+
+    Rend `(processor|None, description)`.
+    """
+    import transformers  # importé localement, comme dans load_model_and_tok (HF_HOME d'abord)
+
+    ver = tuple(int(x) for x in transformers.__version__.split(".")[:3])
+    assert ver >= TRANSFORMERS_MIN, (
+        f"transformers {transformers.__version__} < {'.'.join(map(str, TRANSFORMERS_MIN))} : "
+        "la sémantique de la politique de décodage n'a été relue qu'à partir de cette version"
+    )
+    gc = model.generation_config
+    sup = list(gc.suppress_tokens) if getattr(gc, "suppress_tokens", None) else []
+    eos = getattr(gc, "eos_token_id", None)
+    eos = [eos] if isinstance(eos, int) else (list(eos) if eos else [])
+    assert getattr(gc, "begin_suppress_tokens", None) in (None, []), (
+        "begin_suppress_tokens présente : sémantique temporelle non implémentée (spec §4.1)"
+    )
+    desc = {
+        "applied": (not disabled) and bool(sup),
+        "suppress_tokens": sup,
+        "eos_token_id": eos,
+        "source": "model.generation_config (from_pretrained)",
+        "processor": "transformers.generation.logits_process.SuppressTokensLogitsProcessor",
+        "note": "SUPPRESSION seulement — l'arrêt EOS n'est PAS appliqué par cet oracle "
+                "(mode --oracle du runner : suppression ON, arrêt OFF, décision Régis n°3)",
+    }
+    if disabled or not sup:
+        return None, desc
+    from transformers.generation.logits_process import SuppressTokensLogitsProcessor
+    return SuppressTokensLogitsProcessor(sup, device="cpu"), desc
+
+
+def apply_policy(lg2d: torch.Tensor, proc):
+    """Applique la politique sur une COPIE — l'ordre est imposé (plan 4.2) : les asserts de
+    l'appelant portent sur les logits BRUTS, la politique vient après, et le topk après elle.
+    Inverser reviendrait à asserter sur des `-inf` fabriqués par nous."""
+    if proc is None:
+        return None
+    return proc(torch.zeros((lg2d.shape[0], 1), dtype=torch.long), lg2d.clone())
 
 
 def anon_path(p: str) -> str:
@@ -124,17 +186,41 @@ def encode_prompt(tok, prompt: str):
     return enc, ids, S
 
 
-def step_top5(logits_1d: torch.Tensor):
-    """top-5 (+marge top1−top2) d'un vecteur logits [V] — f32 pour les marges."""
+def step_top5(logits_1d: torch.Tensor, proc=None):
+    """top-5 (+marge top1−top2) d'un vecteur logits [V] — f32 pour les marges.
+
+    Ordre IMPOSÉ (plan 4.2) : les asserts portent sur les logits BRUTS, la politique s'applique
+    ENSUITE sur une copie, le topk après elle. Asserter après la politique reviendrait à tester la
+    finitude de `-inf` qu'on a nous-mêmes écrits.
+
+    Rend `(idxs_bruts, vals_bruts, marge_brute, max_abs, politique|None)`.
+    """
     lg = logits_1d.float()
     assert torch.isfinite(lg).all(), "logits non finis"
     max_abs = float(lg.abs().max())
     assert max_abs <= SOFTCAP, f"softcap VIOLÉ : max|logits|={max_abs} > {SOFTCAP}"
     vals, idxs = torch.topk(lg, TOPK)
-    return idxs.to(torch.int32), vals, float(vals[0] - vals[1]), max_abs
+    pol = None
+    if proc is not None:
+        lg_p = apply_policy(lg.unsqueeze(0), proc)[0]
+        pvals, pidxs = torch.topk(lg_p, TOPK)
+        # Avec V=262144 et |S|=2, il reste toujours ≥ 5 candidats finis : un -inf ici signalerait
+        # une liste de suppression aberrante, et json.dump écrirait `-Infinity` (JSON non standard).
+        assert torch.isfinite(pvals).all(), "top-5 POST-politique contient un -inf"
+        pol = (pidxs.to(torch.int32), pvals)
+    return idxs.to(torch.int32), vals, float(vals[0] - vals[1]), max_abs, pol
 
 
 def mode_decode(args, model, tok, tpl_sha, t_load, versions):
+    proc, gen_policy = build_gen_policy(model, args.no_gen_policy)
+    print(f"GENPOLICY: {gen_policy}", flush=True)
+    # Prérequis GC8 : l'instrument fp32 doit être disponible ICI aussi, sinon le seuil de kill
+    # dérivé en fp32 ne s'appliquerait pas au gate qui l'utilise (plan 6.1).
+    compute_dtype = "bfloat16"
+    if args.compute_fp32:
+        n_hooked = install_fp32_hooks(model.model, extra=(model.lm_head,))
+        compute_dtype = "float32"
+        print(f"calcul fp32 armé (mode décode) : {n_hooked} sous-modules hookés", flush=True)
     enc, prompt_ids, S = encode_prompt(tok, args.prompt)
     n = int(args.n_tokens)
     eot_id = 106  # <turn|> (mesuré, cf gemma4_g12auto.zig) — informatif seulement : en mode
@@ -145,16 +231,36 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     with torch.no_grad():
         out = model(**enc, use_cache=True)
     t_prefill = time.monotonic() - t0
-    assert out.logits.dtype == torch.bfloat16, f"logits {out.logits.dtype} != bf16 (modèle réel)"
+    # Le dtype ATTENDU dépend de l'instrument : bf16 par défaut (modèle réel), fp32 sous
+    # --compute-fp32 (hooks par-module). L'assert restait câblé sur bf16 — il a mordu au premier
+    # run fp32 en mode décode, ce qui est exactement son rôle : il refusait un dtype qu'il ne
+    # connaissait pas plutôt que de laisser passer un instrument non déclaré.
+    want_logits_dtype = torch.float32 if args.compute_fp32 else torch.bfloat16
+    assert out.logits.dtype == want_logits_dtype, \
+        f"logits {out.logits.dtype} != {want_logits_dtype} (compute_fp32={args.compute_fp32})"
     pkv = out.past_key_values
-    idxs, vals, margin, max_abs = step_top5(out.logits[0, -1, :])
-    print(f"prefill S={S} en {t_prefill:.1f} s ; s0={int(idxs[0])} marge={margin:.6f}", flush=True)
+    idxs, vals, margin, max_abs, pol = step_top5(out.logits[0, -1, :], proc)
+    # Le token retenu est celui d'APRÈS politique quand elle s'applique — c'est ce que fait le
+    # runner en mode --oracle (suppression ON). Sans cela, la fixture serait produite par un
+    # décodage que le runner ne reproduit plus, et le mode --oracle comparerait deux politiques
+    # différentes en croyant comparer deux implémentations.
+    chosen = int(pol[0][0]) if pol is not None else int(idxs[0])
+    print(f"prefill S={S} en {t_prefill:.1f} s ; s0={chosen} marge={margin:.6f}"
+          f"{'' if pol is None else f' (brut={int(idxs[0])})'}", flush=True)
 
-    seq = [int(idxs[0])]
+    seq = [chosen]
     top5_ids = torch.zeros(n, TOPK, dtype=torch.int32)
     top5_vals = torch.zeros(n, TOPK, dtype=torch.float32)
+    top5_pol_ids = torch.zeros(n, TOPK, dtype=torch.int32)
+    top5_pol_vals = torch.zeros(n, TOPK, dtype=torch.float32)
+    n_policy_bites = 0
+    stopped_at, stop_eos = None, None
     margins, times, max_abs_all = [margin], [t_prefill], [max_abs]
     top5_ids[0], top5_vals[0] = idxs, vals
+    if pol is not None:
+        top5_pol_ids[0], top5_pol_vals[0] = pol
+        if chosen != int(idxs[0]):
+            n_policy_bites += 1
 
     # --- décode greedy : n-1 steps produisent seq[1..n-1], +1 step pour `expected` (miroir 56) ---
     for k in range(1, n + 1):
@@ -163,20 +269,40 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
             out = model(input_ids=torch.tensor([[seq[-1]]], dtype=torch.long),
                         past_key_values=pkv, use_cache=True)
         dt = time.monotonic() - tk
-        idxs, vals, margin, max_abs = step_top5(out.logits[0, -1, :])
-        seq.append(int(idxs[0]))
+        idxs, vals, margin, max_abs, pol = step_top5(out.logits[0, -1, :], proc)
+        chosen_k = int(pol[0][0]) if pol is not None else int(idxs[0])
+        seq.append(chosen_k)
         times.append(dt)
         if k < n:  # le step n ne produit que expected[n-1], pas un step de génération du gate
             top5_ids[k], top5_vals[k] = idxs, vals
+            if pol is not None:
+                top5_pol_ids[k], top5_pol_vals[k] = pol
+                if chosen_k != int(idxs[0]):
+                    n_policy_bites += 1
             margins.append(margin)
             max_abs_all.append(max_abs)
             print(f"  marge top1-top2 @ gen={k} : {margin:.6f} (top1={int(idxs[0])} top2={int(idxs[1])})"
+                  f"{'' if pol is None or chosen_k == int(idxs[0]) else f' SUPPRIMÉ -> {chosen_k}'}"
                   f"  [{dt:.2f} s]", flush=True)
         else:
             print(f"  step expected-only (produit expected[{n - 1}]={seq[-1]}) [{dt:.2f} s]", flush=True)
+        # Arrêt EOS (prérequis GC8). Sémantique HF (stopping_criteria.py:534, 579-581) : « any of »
+        # sans priorité, le token est concaténé PUIS testé — il FAIT DONC PARTIE de la sortie.
+        if args.gen_policy_stop and chosen_k in gen_policy["eos_token_id"]:
+            stopped_at, stop_eos = k, chosen_k
+            print(f"  arrêt EOS à gen={k} (id={chosen_k}, eos={gen_policy['eos_token_id']})", flush=True)
+            break
 
-    fed = seq[:n]
-    expected = seq[1:n + 1]
+    # Troncature quand l'arrêt a mordu. ⚠ Ce mode ne produit PAS une fixture d'oracle standard :
+    # `fed`/`expected` y sont bornés par l'arrêt et non par `--n-tokens`. C'est voulu — GC8 compare
+    # des trajectoires ARRÊT COMPRIS — et c'est la raison pour laquelle le drapeau est off par
+    # défaut : `u8_gen48` a été produite sans arrêt et doit le rester.
+    n_eff = (stopped_at + 1) if stopped_at is not None else n
+    if stopped_at is not None:
+        top5_ids, top5_vals = top5_ids[:n_eff], top5_vals[:n_eff]
+        top5_pol_ids, top5_pol_vals = top5_pol_ids[:n_eff], top5_pol_vals[:n_eff]
+    fed = seq[:n_eff]
+    expected = seq[1:n_eff + 1]
     # Chrono D6 : médiane des tokens 2-4 (le token 0 = prefill mmap/warm-up, le 1 = encore chaud).
     med_2_4 = statistics.median(times[2:5])
     min_margin = min(margins)
@@ -188,13 +314,22 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     print(f"aperçu réponse HF : {tok.decode(fed, skip_special_tokens=True)[:300]!r}", flush=True)
 
     positions = torch.arange(S, S + n, dtype=torch.int32)  # positions[0] == S (check runner)
-    save_file({
+    print(f"politique : a mordu {n_policy_bites} fois sur {n} tokens "
+          f"({'ACTIVE' if proc is not None else 'INACTIVE'})", flush=True)
+    tensors = {
         "positions": positions.contiguous(),
         "fed": torch.tensor(fed, dtype=torch.int32),
         "expected": torch.tensor(expected, dtype=torch.int32),
+        # `top5_ids`/`top5_vals` restent LE BRUT (schéma inchangé, plan 4.3) : les gates
+        # historiques les lisent, et la marge brute est l'instrument de requalification
+        # pré-enregistré de U8/W4g. Le post-politique s'AJOUTE, il ne remplace pas.
         "top5_ids": top5_ids.contiguous(),
         "top5_vals": top5_vals.contiguous(),
-    }, args.out)
+    }
+    if proc is not None:
+        tensors["top5_policy_ids"] = top5_pol_ids.contiguous()
+        tensors["top5_policy_vals"] = top5_pol_vals.contiguous()
+    save_file(tensors, args.out)
 
     manifest = {
         "source": "69_u8_gen_oracle.py (mode décode — Task 9 Step 9.1, plan J2)",
@@ -218,6 +353,11 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
         "chat_template_sha256": tpl_sha,
         "weights": anon_path(args.weights),
         "fixture_keys_lues_par_le_runner": ["positions", "fed"],
+        "gen_policy": {**gen_policy, "n_bites": n_policy_bites,
+                       "stop_applied": bool(args.gen_policy_stop),
+                       "stopped_at_gen": stopped_at, "stop_eos_id": stop_eos},
+        "compute_dtype": compute_dtype,
+        "script_md5": script_md5(),
         "versions": versions,
     }
     with open(args.out + ".manifest.json", "w") as fh:
@@ -227,6 +367,8 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
 
 def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
     """U9-iv (D10) : UN prefill de [prompt ++ ids[:-1]] ; argmax+top-5 par position au fil de l'eau."""
+    proc, gen_policy = build_gen_policy(model, args.no_gen_policy)
+    print(f"GENPOLICY: {gen_policy}", flush=True)
     _, prompt_ids, S = encode_prompt(tok, args.prompt)
     with safe_open(args.teacher_force, framework="pt") as f:
         gen = f.get_tensor("ids").to(torch.long)
@@ -297,17 +439,34 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
     t2 = time.monotonic()
     n_match = 0
     margins, mismatches, top5_all = [], [], []
+    top5_policy_all, n_policy_bites = [], 0
     for lo in range(S - 1, T, HEAD_CHUNK):
         hi = min(lo + HEAD_CHUNK, T)
         with torch.no_grad():
             lg = head(hs[:, lo:hi, :]).float()[0]  # [c, V]
         vals, idxs = torch.topk(lg, TOPK, dim=-1)
+        # Politique APRÈS le topk brut, sur une COPIE (plan 4.2) : `top5_per_pos` doit rester le
+        # brut, sinon les gates historiques liraient autre chose que ce qu'ils lisaient hier.
+        lg_p = apply_policy(lg, proc)
+        pvals, pidxs = None, None
+        if lg_p is not None:
+            pvals, pidxs = torch.topk(lg_p, TOPK, dim=-1)
+            assert torch.isfinite(pvals).all(), "top-5 POST-politique contient un -inf"
         for j in range(hi - lo):
             k = lo - (S - 1) + j
-            got_id, want_id = int(idxs[j, 0]), int(gen[k])
+            # `got_id` = l'argmax de la politique EFFECTIVE. C'est lui qui doit être confronté aux
+            # ids du runner : le runner corrigé applique la même politique, et c'est tout l'objet
+            # du chantier que les deux côtés cessent de faire un argmax nu chacun de son côté.
+            got_id = int(pidxs[j, 0]) if lg_p is not None else int(idxs[j, 0])
+            want_id = int(gen[k])
             margin = float(vals[j, 0] - vals[j, 1])
             margins.append(round(margin, 6))
             top5_all.append({"ids": idxs[j].tolist(), "vals": [round(float(v), 4) for v in vals[j]]})
+            if lg_p is not None:
+                top5_policy_all.append({"ids": pidxs[j].tolist(),
+                                        "vals": [round(float(v), 4) for v in pvals[j]]})
+                if int(pidxs[j, 0]) != int(idxs[j, 0]):
+                    n_policy_bites += 1
             if got_id == want_id:
                 n_match += 1
             else:
@@ -339,6 +498,10 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
                                  "pas ce script (Amendement 2)"},
         "margins_per_pos": margins,
         "top5_per_pos": top5_all,
+        # Ajouté, jamais substitué : `top5_per_pos` reste le BRUT (plan 4.3).
+        **({"top5_policy_per_pos": top5_policy_all} if proc is not None else {}),
+        "gen_policy": {**gen_policy, "n_bites": n_policy_bites},
+        "script_md5": script_md5(),
         "chrono_s": {"load": round(t_load, 1), "prefill_backbone": round(t_fwd, 1),
                      "head_sweep": round(t_head, 1), "host": args.host_label},
         "chat_template_sha256": tpl_sha, "weights": anon_path(args.weights),
@@ -365,11 +528,32 @@ def main() -> None:
                     help="teacher-force uniquement : calcul fp32 sur stockage bf16 (hooks "
                          "par-couche) — restaure la parité d'instrument avec les oracles J1 "
                          "(46/56 : poids fp32) que le 12B monolithique interdit (RAM)")
+    # Défaut = politique ON. C'est le sens du chantier : l'oracle sans politique était l'ANGLE
+    # MORT (il faisait le même argmax nu que le runner). Le flag existe pour le contre-test à un
+    # seul facteur de GC5 — deux runs du même script, même md5, un seul drapeau de différence.
+    ap.add_argument("--no-gen-policy", action="store_true",
+                    help="désactive la politique de décodage (suppress_tokens) — contre-test "
+                         "GC5 : restaure l'argmax nu d'avant le chantier")
+    # Prérequis GC8 (plan 6.2) : `mode_decode` n'a AUCUN arrêt EOS — l'eot_id y est « informatif
+    # seulement » (le mode --oracle du runner ne s'arrête pas non plus). GC8 compare des
+    # trajectoires ARRÊT COMPRIS, il lui faut donc un arrêt. Défaut OFF pour ne pas casser la
+    # reproduction de `u8_gen48`, qui a été produite sans arrêt.
+    ap.add_argument("--gen-policy-stop", action="store_true",
+                    help="mode décode : s'arrêter sur les eos_token_id de la politique "
+                         "(défaut off — u8_gen48 a été produite sans arrêt)")
     ap.add_argument("--host-label", default="M4",
                     help="étiquette chrono D6 (M4|VM) — JAMAIS le hostname réel (anonymisation)")
     args = ap.parse_args()
+    # ⚠ La garde « --compute-fp32 n'existe qu'en --teacher-force » est LEVÉE (prérequis GC8,
+    # plan 6.1). Raison : GC8 compare la trajectoire libre du runner corrigé à un décodage HF
+    # greedy appliquant la même politique, ARRÊT COMPRIS, et son seuil de kill (1,873e-3) a été
+    # dérivé en fp32. Le laisser tourner en bf16 aurait été un CHANGEMENT D'INSTRUMENT
+    # SILENCIEUX — précisément la faute qui a produit les requalifications en cascade de J2.
+    # Le mode décode par DÉFAUT reste bf16 : la reproduction de `u8_gen48` n'est pas touchée.
     if args.compute_fp32 and not args.teacher_force:
-        ap.error("--compute-fp32 n'existe qu'en --teacher-force (le mode décode U8 reste bf16 tel que consigné)")
+        print("⚠ --compute-fp32 en mode DÉCODE : instrument fp32 (hooks par-module) sur un "
+              "décodage autonome. Consigné au manifest ; NE reproduit PAS `u8_gen48` (bf16).",
+              flush=True)
 
     model, tok, tpl_sha, t_load, versions = load_model_and_tok(args.weights)
     if args.teacher_force:

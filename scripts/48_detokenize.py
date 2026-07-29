@@ -34,8 +34,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> int:
     ap = argparse.ArgumentParser(description="Détokenise + valide (round-trip) une séquence de tokens.")
     ap.add_argument("fixture", nargs="?", default=str(ROOT / "gen_long.safetensors"))
-    ap.add_argument("--field", default="fed", choices=["fed", "expected"],
-                    help="tensor de tokens à décoder (défaut: fed = séquence feedée == générée)")
+    # "ids" : la clé écrite par `--out-ids` du runner (les ids GÉNÉRÉS). Sans elle, un artefact
+    # de run libre n'était pas lisible par ce script — les fixtures d'oracle portent `fed`, les
+    # sorties de runner portent `ids`, et seule la première famille était acceptée.
+    ap.add_argument("--field", default="fed", choices=["fed", "expected", "ids"],
+                    help="tensor de tokens à décoder (défaut: fed = séquence feedée == générée ; "
+                         "`ids` = sortie --out-ids du runner)")
     ap.add_argument("--max-chars", type=int, default=2000, help="tronque le texte affiché")
     args = ap.parse_args()
 

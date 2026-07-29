@@ -1,5 +1,13 @@
 # gemma4-zml-probe — Documentation complète
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 > Documentation de référence du projet : ce qu'il est, ce qu'il sait faire, comment l'utiliser.
 > Rédigée le 9 juillet 2026 (état = fin du chantier G2, PR `generation-longue` → `main`).
 > Entrée rapide en anglais : [`README.md`](../README.md). Carte visuelle : [`CARTOGRAPHIE_portage.md`](CARTOGRAPHIE_portage.md).

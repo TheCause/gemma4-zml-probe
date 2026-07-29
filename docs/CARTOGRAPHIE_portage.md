@@ -1,5 +1,13 @@
 # CARTOGRAPHIE — Portage du moteur d'inférence Gemma-4 → ZML
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 > **Source de vérité texte** d'une planche de facilitation graphique (sketchnote) résumant tout le
 > portage. À recopier tel quel si la planche est ré-éditée — un re-render par image-gen corrompt
 > systématiquement les termes techniques (PJRT, choose1d, v_norm sans scale, MLP 12288…) ; éditer le

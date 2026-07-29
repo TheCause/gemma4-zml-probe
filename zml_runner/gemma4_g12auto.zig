@@ -16,6 +16,13 @@
 //       [--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram]
 //       [--dump-top5] [--out-ids f] [--window-vacuity f] [--no-prealloc]
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
+//       [--selftest-gencfg f (GC1 : politique generation_config, host-only, sans GPU ni tokenizer)]
+//       [--gen-config FICHIER] [--no-gen-config]
+// Politique de décodage (spec 2026-07-28) : `suppress_tokens` + EOS multiples de
+// generation_config.json, appliqués HOST-SIDE sur le top-5 rapatrié. Découverte automatique à
+// côté du checkpoint (1 hop de symlink) ; `--gen-config` force le fichier, `--no-gen-config` la
+// désactive. ⚠ Seules 2 des 8 clés sont appliquées — `do_sample/top_k/top_p/temperature` NE le
+// sont PAS (le log les nomme dans `ignored=[…]`).
 // Mode --oracle : loggue en plus la marge top1−top2 par step de génération (protocole de flip W4g).
 // --dump-top5 : top-5 par step aussi en mode LIBRE (requis U9). --out-ids : ids générés →
 // safetensors (requis U9-ii/iv). --window-vacuity : replay teacher-forcé in-process, fenêtre
@@ -28,6 +35,10 @@ const zml = @import("zml");
 const engine = @import("engine.zig");
 const mem_probe = @import("mem_probe.zig");
 const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit derrière g12.zig)
+// Politique de décodage `generation_config.json` (suppress_tokens + EOS multiples), HOST-SIDE :
+// spec 2026-07-28-generation-config-design §4.2 — `engine.zig` reste à 0 octet, le graphe ne
+// bouge pas (GC0 le prouve). Le module porte AUSSI `TOP_K`, déclaration unique de la constante 5.
+const gencfg = @import("gencfg.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 // ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
@@ -132,6 +143,16 @@ const Args = struct {
     allow_cpu: bool = false,
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
+    selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
+    // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
+    // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
+    // (sans snapshot ni symlink) : sans ce flag, la découverte échouerait et un gate historique
+    // mourrait en silence.
+    gen_config: ?[]const u8 = null,
+    // Échappatoire explicite : restaure EXACTEMENT le comportement d'avant le chantier. Ce n'est
+    // pas une commodité, c'est l'instrument du contre-test de non-vacuité GC4(a) — même binaire,
+    // une donnée de moins.
+    no_gen_config: bool = false,
     force_vram: bool = false,
     // Nouveaux flags 12B (plan Task 8 point 8 — AUCUN n'existait dans la base clonée w4auto) :
     dump_top5: bool = false, // top-5 par step en mode LIBRE (requis U9)
@@ -146,6 +167,9 @@ const usage =
     "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
     "[--force-vram] [--dump-top5] [--out-ids f] [--window-vacuity ids.safetensors] [--no-prealloc] " ++
     "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
+    "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
+    "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
+    "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
     "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)]";
 
@@ -228,6 +252,22 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.selftest_gather = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-gencfg")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-gencfg attend une valeur (fixture .safetensors ; le sidecar <fixture>.manifest.json est requis à côté)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_gencfg = process_args[i];
+        } else if (std.mem.eql(u8, a, "--gen-config")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--gen-config attend une valeur : un CHEMIN DE FICHIER (…/generation_config.json), pas un répertoire", .{});
+                return error.MissingArgument;
+            }
+            args.gen_config = process_args[i];
+        } else if (std.mem.eql(u8, a, "--no-gen-config")) {
+            args.no_gen_config = true;
         } else {
             log.err("argument inconnu: {s}\n{s}", .{ a, usage });
             return error.InvalidArgument;
@@ -555,6 +595,244 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
 }
 
 // ============================================================================================
+// GC1 — selftest de la politique de décodage `generation_config.json`, SANS GPU ni tokenizer
+// (spec docs/superpowers/specs/2026-07-28-generation-config-design.md §4.5bis).
+//
+// TROIS familles de choses sont exercées, donc TROIS véhicules :
+//   1. SÉLECTION   — fixture safetensors (`top5_idx` {N,5} i32, `top5_val` {N,5} f32,
+//      `expect_tok` {N} i32, `expect_rank` {N} i32), produite par `scripts/71_gc1_fixture.py`
+//      depuis le VRAI `SuppressTokensLogitsProcessor` de transformers : `expect_tok` est
+//      l'argmax du vecteur COMPLET post-suppression (262 144 logits). Le cas confronte donc
+//      notre sélection sur top-5 pré-trié à la sémantique HF — c'est précisément ce qui rend
+//      la claim C2 testable au lieu d'être postulée (§4.2).
+//   2. VALIDATIONS — sidecar `<fixture>.manifest.json`, liste `validation_cases` :
+//      {nom, `eot_id`, `content` = le JSON LITTÉRAL du generation_config à parser,
+//      `expect_error` = @errorName attendu (ou "" si le cas doit être ACCEPTÉ)}.
+//      ⚠ `content` est une CHAÎNE, pas un objet : le selftest doit exercer le parser sur du
+//      texte réel (y compris malformé), pas sur un objet déjà re-sérialisé par nos soins.
+//      ⚠ L'`eot_id` est porté par la donnée : le tokenizer n'est PAS chargé sur ce chemin
+//      (early-return avant `:899`), donc le contrôle croisé `EotNotInEosList` ne peut pas le
+//      mesurer (plan Task 2 point 2.4).
+//   3. DÉCOUVERTE  — liste `discovery_cases` du même sidecar : {nom, `ckpt`, et soit
+//      `expect_path`, soit `expect_error`}. Les topologies (symlink ABSOLU et RELATIF, cas
+//      introuvable) sont fabriquées par l'étape shell du plan — aucun selftest du repo ne crée
+//      de symlink, on ne commence pas ici.
+//
+// PASS = 100 % des cas de sélection ET des cas de validation ET des cas de découverte, ET les
+// SIX compteurs de non-vacuité tous non nuls. Un chemin qu'un selftest n'exerce pas, il ne l'a
+// pas validé : chaque compteur à zéro est un FAIL, pas un warning (leçon « test à l'antécédent
+// vide », feedback_test_vacuite_antecedent).
+// ============================================================================================
+fn selftestGencfg(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    // ---- Véhicule 2/3 : le sidecar (lu d'abord — il porte aussi la politique de sélection) ----
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}.manifest.json", .{fixture_path});
+    defer allocator.free(manifest_path);
+    var mf = std.Io.Dir.cwd().openFile(io, manifest_path, .{ .mode = .read_only }) catch |err| {
+        log.err("--selftest-gencfg : sidecar illisible ({s}) : {s} — requis (porte les cas de validation et de découverte)", .{ manifest_path, @errorName(err) });
+        return error.MissingManifest;
+    };
+    defer mf.close(io);
+    const mlen: usize = @intCast(try mf.length(io));
+    const mtext = try allocator.alloc(u8, mlen);
+    defer allocator.free(mtext);
+    if (try mf.readPositionalAll(io, mtext, 0) != mlen) return error.ShortRead;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, mtext, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const sel_obj = (root.get("selection") orelse {
+        log.err("--selftest-gencfg : clé 'selection' absente de {s}", .{manifest_path});
+        return error.MissingManifest;
+    }).object;
+    const vocab_size: u32 = @intCast((sel_obj.get("vocab_size") orelse return error.MissingManifest).integer);
+    const sel_eot_id: u32 = @intCast((sel_obj.get("eot_id") orelse return error.MissingManifest).integer);
+    const sup_arr = (sel_obj.get("suppress_tokens") orelse return error.MissingManifest).array;
+    const eos_arr = (sel_obj.get("eos_token_id") orelse return error.MissingManifest).array;
+
+    const sup_raw = try allocator.alloc(u32, sup_arr.items.len);
+    defer allocator.free(sup_raw);
+    for (sup_arr.items, 0..) |v, i| sup_raw[i] = @intCast(v.integer);
+    const eos_raw = try allocator.alloc(u32, eos_arr.items.len);
+    defer allocator.free(eos_raw);
+    for (eos_arr.items, 0..) |v, i| eos_raw[i] = @intCast(v.integer);
+
+    // La politique de sélection passe par le MÊME constructeur validant que le runner : un
+    // selftest qui fabriquerait sa GenCfg à la main testerait une copie, pas le code livré.
+    var policy = try gencfg.fromLists(allocator, manifest_path, sup_raw, eos_raw, &.{}, .{
+        .vocab_size = vocab_size,
+        .eot_id = sel_eot_id,
+    });
+    defer policy.deinit(allocator);
+
+    // ---- Véhicule 1 : les cas de SÉLECTION ----
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const top5_idx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "top5_idx");
+    defer allocator.free(top5_idx);
+    const top5_val = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "top5_val");
+    defer allocator.free(top5_val);
+    const expect_tok = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "expect_tok");
+    defer allocator.free(expect_tok);
+    const expect_rank = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "expect_rank");
+    defer allocator.free(expect_rank);
+
+    const k: usize = gencfg.TOP_K;
+    const n_cases: usize = expect_tok.len;
+    if (n_cases == 0) {
+        log.err("--selftest-gencfg : 0 cas de sélection — un PASS vacueux ({s})", .{fixture_path});
+        return error.EmptyFixture;
+    }
+    if (top5_idx.len != n_cases * k or top5_val.len != n_cases * k or expect_rank.len != n_cases) {
+        log.err("--selftest-gencfg : formes incohérentes — top5_idx={d} top5_val={d} expect_tok={d} expect_rank={d} (N={d}, TOP_K={d})", .{ top5_idx.len, top5_val.len, n_cases, expect_rank.len, n_cases, k });
+        return error.ShapeMismatch;
+    }
+
+    var n_sel_ok: usize = 0;
+    var n_bit_top1: usize = 0; // compteur 1/6 : cas où la suppression a réellement mordu
+    var n_ties: usize = 0; // C2 : compter les égalités exactes, la réserve du §4.2
+    for (0..n_cases) |c| {
+        var idx: [gencfg.TOP_K]usize = undefined;
+        for (0..k) |j| idx[j] = @intCast(top5_idx[c * k + j]);
+
+        const sel = policy.select(&idx) catch |err| {
+            log.err("cas de sélection {d} : {s} (top5_idx={any})", .{ c, @errorName(err), idx });
+            return err;
+        };
+        const want_tok: usize = @intCast(expect_tok[c]);
+        const want_rank: usize = @intCast(expect_rank[c]);
+        if (sel.tok == want_tok and sel.rank == want_rank) {
+            n_sel_ok += 1;
+        } else {
+            log.err("cas de sélection {d} FAIL — got tok={d} rank={d}, want tok={d} rank={d} (top5_idx={any})", .{ c, sel.tok, sel.rank, want_tok, want_rank, idx });
+        }
+        if (want_rank != 0) n_bit_top1 += 1;
+        for (1..k) |j| {
+            if (top5_val[c * k + j] == top5_val[c * k + j - 1]) n_ties += 1;
+        }
+    }
+
+    // ---- Véhicule 2 : les cas de VALIDATION (§4.1) ----
+    var n_val_ok: usize = 0;
+    var n_val_total: usize = 0;
+    var n_eot_not_in_eos: usize = 0; // compteur 2/6
+    var n_out_of_range: usize = 0; // compteur 3/6
+    var n_begin_suppress: usize = 0; // compteur 4/6
+    var n_eos_empty: usize = 0; // compteur 5/6
+    var n_dedup: usize = 0; // compteur 6/6
+
+    if (root.get("validation_cases")) |vc| {
+        for (vc.array.items) |case_v| {
+            const case = case_v.object;
+            const name = (case.get("name") orelse return error.MissingManifest).string;
+            const content = (case.get("content") orelse return error.MissingManifest).string;
+            const eot_id: u32 = @intCast((case.get("eot_id") orelse return error.MissingManifest).integer);
+            const want_err = if (case.get("expect_error")) |e| e.string else "";
+            n_val_total += 1;
+
+            var cfg = gencfg.parseFromSlice(allocator, content, name, .{
+                .vocab_size = vocab_size,
+                .eot_id = eot_id,
+            }) catch |err| {
+                const got = @errorName(err);
+                if (std.mem.eql(u8, got, want_err)) {
+                    n_val_ok += 1;
+                    if (std.mem.eql(u8, got, "EotNotInEosList")) n_eot_not_in_eos += 1;
+                    if (std.mem.eql(u8, got, "SuppressIdOutOfRange")) n_out_of_range += 1;
+                    if (std.mem.eql(u8, got, "BeginSuppressUnsupported")) n_begin_suppress += 1;
+                    if (std.mem.eql(u8, got, "EosListEmpty")) n_eos_empty += 1;
+                } else {
+                    log.err("cas de validation '{s}' FAIL — erreur {s}, attendu {s}", .{ name, got, if (want_err.len == 0) "ACCEPTÉ" else want_err });
+                }
+                continue;
+            };
+            defer cfg.deinit(allocator);
+
+            if (want_err.len != 0) {
+                log.err("cas de validation '{s}' FAIL — ACCEPTÉ, alors que {s} était attendu", .{ name, want_err });
+                continue;
+            }
+            // Cas accepté : si le manifest annonce une déduplication, elle doit avoir eu lieu.
+            if (case.get("expect_suppress_len")) |want_len| {
+                const want: usize = @intCast(want_len.integer);
+                if (cfg.suppress.len != want) {
+                    log.err("cas de validation '{s}' FAIL — suppress.len={d}, attendu {d} (déduplication)", .{ name, cfg.suppress.len, want });
+                    continue;
+                }
+                if (case.get("is_dedup_case")) |b| {
+                    if (b.bool) n_dedup += 1;
+                }
+            }
+            n_val_ok += 1;
+        }
+    }
+
+    // ---- Véhicule 3 : la DÉCOUVERTE 1-hop (§4.1) ----
+    var n_disc_ok: usize = 0;
+    var n_disc_total: usize = 0;
+    if (root.get("discovery_cases")) |dc| {
+        for (dc.array.items) |case_v| {
+            const case = case_v.object;
+            const name = (case.get("name") orelse return error.MissingManifest).string;
+            const ckpt = (case.get("ckpt") orelse return error.MissingManifest).string;
+            const want_err = if (case.get("expect_error")) |e| e.string else "";
+            n_disc_total += 1;
+
+            const got_path = gencfg.discoverAlloc(allocator, io, null, ckpt) catch |err| {
+                const got = @errorName(err);
+                if (std.mem.eql(u8, got, want_err)) {
+                    n_disc_ok += 1;
+                } else {
+                    log.err("cas de découverte '{s}' FAIL — erreur {s}, attendu {s}", .{ name, got, if (want_err.len == 0) "un chemin" else want_err });
+                }
+                continue;
+            };
+            defer allocator.free(got_path);
+
+            if (want_err.len != 0) {
+                log.err("cas de découverte '{s}' FAIL — a résolu {s}, alors que {s} était attendu", .{ name, got_path, want_err });
+                continue;
+            }
+            const want_path = (case.get("expect_path") orelse return error.MissingManifest).string;
+            if (std.mem.eql(u8, got_path, want_path)) {
+                n_disc_ok += 1;
+            } else {
+                log.err("cas de découverte '{s}' FAIL — got={s} want={s}", .{ name, got_path, want_path });
+            }
+        }
+    }
+
+    // ---- Verdict : exactitude ET non-vacuité ----
+    const exact_ok = (n_sel_ok == n_cases) and (n_val_ok == n_val_total) and (n_disc_ok == n_disc_total);
+    const vac = [_]struct { name: []const u8, n: usize }{
+        .{ .name = "id supprimé top-1", .n = n_bit_top1 },
+        .{ .name = "EotNotInEosList", .n = n_eot_not_in_eos },
+        .{ .name = "SuppressIdOutOfRange", .n = n_out_of_range },
+        .{ .name = "BeginSuppressUnsupported", .n = n_begin_suppress },
+        .{ .name = "EosListEmpty", .n = n_eos_empty },
+        .{ .name = "doublons dédupliqués", .n = n_dedup },
+    };
+    var vac_ok = true;
+    for (vac) |v| {
+        if (v.n == 0) {
+            log.err("NON-VACUITÉ FAIL — le cas « {s} » n'a été exercé 0 fois : ce chemin n'est PAS validé", .{v.name});
+            vac_ok = false;
+        }
+    }
+    log.info("GC1 non-vacuité : top1_supprimé={d} eot_not_in_eos={d} out_of_range={d} begin_suppress={d} eos_empty={d} dedup={d} | égalités exactes rencontrées={d} (C2)", .{ n_bit_top1, n_eot_not_in_eos, n_out_of_range, n_begin_suppress, n_eos_empty, n_dedup, n_ties });
+
+    if (exact_ok and vac_ok) {
+        log.info("SELFTEST GENCFG PASS — sélection {d}/{d}, validations {d}/{d}, découverte {d}/{d}, 6/6 compteurs non nuls", .{ n_sel_ok, n_cases, n_val_ok, n_val_total, n_disc_ok, n_disc_total });
+    } else {
+        log.err("SELFTEST GENCFG FAIL — sélection {d}/{d}, validations {d}/{d}, découverte {d}/{d}, non-vacuité={}", .{ n_sel_ok, n_cases, n_val_ok, n_val_total, n_disc_ok, n_disc_total, vac_ok });
+        return error.SelftestGencfgFailed;
+    }
+}
+
+// ============================================================================================
 // 12B (plan Task 8 point 2) : `Tabs` (embed_tokens_per_layer, L3 E2B) est SUPPRIMÉ — la clé
 // `embed_tokens_per_layer.weight` N'EXISTE PAS au checkpoint 12B (ple_dim=0), createTensor
 // crasherait (précédent w4.zig:56-58). Le selftest-gather est adapté EMB-ONLY pour la même
@@ -707,7 +985,68 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 // (`top5Of` SUPPRIMÉ, Task 4 historique). top1 = next token ; top5 entier = diagnostic --oracle
 // (spec docs/L3_INGRAPH_DESIGN.md §4, vigilance ties d'argmax). Struct inchangée : même usage par
 // le reste de la boucle (`gen_top5`, diagnostic FAIL Step 5.3).
-const Top5 = struct { idx: [5]usize, val: [5]f32 };
+// ⚠ La taille vient de `gencfg.TOP_K` — DÉCLARATION UNIQUE (spec §4.2) : ce type, le `topK`
+// in-graph et la boucle de lecture en étaient trois copies du littéral `5`, et la garde
+// `suppress.len + 1 > TOP_K` de la politique de décodage raisonne sur cette valeur. Trois copies,
+// c'est trois occasions qu'elles divergent en silence.
+const Top5 = struct { idx: [gencfg.TOP_K]usize, val: [gencfg.TOP_K]f32 };
+
+// Vocabulaire du contrat U0 (docs/U_12B_CONTRACT.md — `tokenizer.json` du snapshot : 262 144
+// entrées, dont 24 `added_tokens`). Sert UNIQUEMENT à borner les ids de suppression au moment du
+// fail-fast, avant que les poids soient chargés. La valeur est CONTRÔLÉE contre
+// `model.embed_tokens.dim(.voc)` dès que celui-ci existe : un checkpoint d'un autre vocab fait
+// échouer le run au lieu de valider silencieusement une politique bornée de travers.
+const VOCAB_CONTRACT: u32 = 262144;
+
+// Ligne de log de la politique — UNE par run, c'est ce que les gates greppent.
+// ⚠ LE FORMAT EST IMPOSÉ, PAS LAISSÉ AU `{any}` DE ZIG : `{any}` sur une slice produit
+// `{ 258883, 258882 }` (accolades, espaces) là où les gates attendent `[258883,258882]`. GC2 est
+// un gate à règle d'arrêt DURE : il FAIL à tort sur cette seule différence de rendu. D'où la
+// boucle de formatage manuelle ci-dessous, et la chaîne exacte pré-enregistrée à la spec §4.1.
+fn joinList(allocator: std.mem.Allocator, items: []const u32) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (items, 0..) |v, i| {
+        if (i != 0) try out.append(allocator, ',');
+        const s = try std.fmt.allocPrint(allocator, "{d}", .{v});
+        defer allocator.free(s);
+        try out.appendSlice(allocator, s);
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+fn joinKeys(allocator: std.mem.Allocator, items: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (items, 0..) |v, i| {
+        if (i != 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, v);
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+fn logGencfg(allocator: std.mem.Allocator, policy: *const gencfg.GenCfg, is_oracle: bool) !void {
+    if (!policy.enabled) {
+        log.info("GENCFG: DÉSACTIVÉ (--no-gen-config) — politique de décodage non appliquée", .{});
+        return;
+    }
+    const sup = try joinList(allocator, policy.suppress);
+    defer allocator.free(sup);
+    const eos = try joinList(allocator, policy.eos);
+    defer allocator.free(eos);
+    // `ignored` est DÉRIVÉ des clés présentes au fichier, jamais codé en dur : sans ce segment, le
+    // log laisserait croire que « generation_config.json est appliqué » tout court, alors que ce
+    // chantier n'en applique que 2 clés sur 8.
+    const ign = try joinKeys(allocator, policy.ignored);
+    defer allocator.free(ign);
+    log.info("GENCFG: {s} suppress={s} eos={s} ignored={s} (mode={s})", .{
+        policy.path, sup, eos, ign, if (is_oracle) "oracle" else "libre",
+    });
+}
 
 // ============================================================================================
 // Garde VRAM au lancement (docs/VRAM_CHECK_DESIGN.md) — incident du 11 juil 2026 : Ollama à
@@ -822,7 +1161,9 @@ const G12Step = struct {
         const logits, const slk, const slv, const flk, const flv = m.forwardStageGen(0, N12, false, true, p, cache, h0, ctrl);
         // Forme struct à un champ EXIGÉE par `Tensor.topK` (cf zml/nn.zig:1558, seul site d'appel
         // réel dans les sources ZML : `logits.topK(.{ .voc = .voc }, k, .{})`).
-        const t5 = logits.topK(.{ .voc = .voc }, 5, .{});
+        // `gencfg.TOP_K` est un comptime de MÊME VALEUR que le littéral `5` d'avant : le
+        // StableHLO émis est identique, et GC0 le prouve (md5 du dump before_optimizations).
+        const t5 = logits.topK(.{ .voc = .voc }, gencfg.TOP_K, .{});
         // DONATION des caches (spec 2026-07-26 cache-donation) : les 4 caches de sortie aliasent
         // les buffers d'ENTRÉE (reuseBuffer → input_output_alias à la compile) — supprime le
         // double-buffering (2×5,6 GiB à 8k, le mur M3). Contrat : le host ne relit JAMAIS un
@@ -867,7 +1208,7 @@ pub fn run(init: std.process.Init) !void {
     // au lancement (garde AVANT tout early-return de mode). ===
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
-        args.selftest_gather != null))
+        args.selftest_gather != null or args.selftest_gencfg != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -876,6 +1217,14 @@ pub fn run(init: std.process.Init) !void {
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
+        return;
+    }
+
+    // === GC1 : --selftest-gencfg — même patron d'early-return, AVANT tokenizer/VRAM/Platform.
+    // Le chemin est host-only par construction : c'est ce qui rend le gate exécutable sans GPU
+    // (spec §4.5bis) et ce qui interdit d'y mesurer l'eot_id (il vient de la fixture). ===
+    if (args.selftest_gencfg) |fixture_path| {
+        try selftestGencfg(allocator, io, fixture_path);
         return;
     }
 
@@ -951,6 +1300,30 @@ pub fn run(init: std.process.Init) !void {
     // Tourne AUSSI en --allow-cpu : ce flag ne force pas le CPU (l'init .cuda est tentée d'abord,
     // --allow-cpu ne tolère que le repli) — sur machine sans GPU, nvidia-smi absent → warn +
     // continue, donc pas de blocage à tort. Seul --force-vram saute la garde. ===
+    // === Politique de décodage `generation_config.json` (spec 2026-07-28 §4.1) — chargée ICI :
+    // APRÈS l'early-return `--ids-only` et l'eot_id mesuré au tokenizer (le contrôle croisé
+    // `EotNotInEosList` en dépend), et AVANT la garde VRAM. FAIL-FAST : un fichier de politique
+    // invalide doit coûter une seconde, pas une compile GPU de 40 s.
+    //
+    // ⚠ `vocab_size` : le vrai vocab se mesure sur `model.embed_tokens.dim(.voc)`, qui n'existe
+    // qu'APRÈS le chargement des poids — donc après ce point. On borne ici sur la constante de
+    // contrat U0, et on CONTRÔLE ce choix contre la mesure dès qu'elle est disponible (recherche
+    // `VOCAB_CONTRACT` plus bas) : un checkpoint dont le vocab diffère fait échouer le run, il ne
+    // passe pas en silence. Un hardcode non contrôlé serait un pari ; celui-ci est falsifiable.
+    if (args.gen_config != null and args.no_gen_config) {
+        log.err("--gen-config et --no-gen-config sont contradictoires\n{s}", .{usage});
+        return error.ConflictingFlags;
+    }
+    var policy = if (args.no_gen_config)
+        try gencfg.disabled(allocator, eot_id)
+    else
+        try gencfg.load(allocator, io, args.gen_config, args.ckpt, .{
+            .vocab_size = VOCAB_CONTRACT,
+            .eot_id = eot_id,
+        });
+    defer policy.deinit(allocator);
+    try logGencfg(allocator, &policy, args.oracle_path != null);
+
     if (args.force_vram) {
         log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
     } else {
@@ -1237,11 +1610,18 @@ pub fn run(init: std.process.Init) !void {
     // === Dispatch one-shot / résident (spec repl-mode 2026-07-26) — même chemin de code :
     // generateOnce porte la génération complète (gardes, cache zéros, boucle steps, verdicts). ===
     const vocab = model.embed_tokens.dim(.voc);
+    // Contrôle croisé de la constante utilisée pour borner la politique au fail-fast (cf
+    // `VOCAB_CONTRACT`) : c'est ce qui empêche ce hardcode d'être un pari silencieux. Un
+    // checkpoint d'un autre vocab s'arrête ici plutôt que de tourner avec une borne fausse.
+    if (vocab != @as(i64, VOCAB_CONTRACT)) {
+        log.err("vocab du checkpoint = {d} ≠ VOCAB_CONTRACT = {d} : la politique de décodage a été bornée sur une valeur qui n'est pas celle de ce modèle", .{ vocab, VOCAB_CONTRACT });
+        return error.VocabContractMismatch;
+    }
     // Writer stdout UNIQUE pour toute la session (fix R1 : un 2e writer sur le même fd
     // entrelace ses octets avec le premier — une seule file d'écriture).
     var stdout_w = std.Io.File.stdout().writer(io, &.{});
     if (!args.repl) {
-        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -1251,7 +1631,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1280,7 +1660,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1293,7 +1673,11 @@ pub fn run(init: std.process.Init) !void {
 // in-graph, verdicts (--oracle/--out-ids en one-shot ; détok stdout en libre). Types opaques
 // (exe compilé, Bufferized du modèle, tokenizer) passés en anytype POINTEURS — un seul chemin de
 // code pour one-shot ET résident. AUCUN état ne survit entre deux appels (R1 le vérifie).
-fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+// `policy` est passée PAR POINTEUR (spec §4.2bis) et non copiée : les trois sites d'appel
+// ci-dessous (one-shot, 1er prompt du REPL, prompts suivants du REPL) doivent partager LA même
+// politique. Un oubli sur l'un des trois la rendrait silencieusement inopérante dans ce mode —
+// c'est exactement ce que le gate GC10 vérifie.
+fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -1329,6 +1713,14 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     // du détok et le verdict A3 en dépendent. `.oracle` = sortie par compte fed.len (mode --oracle).
     const StopReason = enum { oracle, eot, max_tokens, l_max };
     var stop_reason: StopReason = .oracle;
+    // Id de l'EOS qui a réellement arrêté la génération. Avec TROIS EOS possibles, « arrêt : EOT »
+    // ne dit plus lequel : GC6 exige que le log NOMME l'id.
+    var stop_eos_id: i64 = -1;
+    // Nombre de steps DE GÉNÉRATION où la suppression a changé le token choisi. Déclaré en tête de
+    // `generateOnce` : c'est ce qui réalise la remise à zéro par prompt en `--repl` (R12) et le
+    // rend vérifiable par simple lecture. C'est le détecteur de vacuité intégré du chantier — un
+    // gate de mordant qui rapporte 0 n'a rien prouvé.
+    var n_suppress_hits: usize = 0;
 
     var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
@@ -1377,16 +1769,41 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         const t5i = t5i_s.items(i32);
         const t5v = t5v_s.items(f32);
         var top5: Top5 = undefined;
-        for (0..5) |j| {
+        for (0..gencfg.TOP_K) |j| {
             top5.idx[j] = @intCast(t5i[j]);
             top5.val[j] = t5v[j];
         }
-        const tok: i64 = @intCast(top5.idx[0]);
+        // === Politique de décodage (spec §4.2) — REMPLACE l'ancien `top5.idx[0]` nu. La
+        // sélection est INCONDITIONNELLE : la garder sous `in_gen_phase` serait un vrai bug, car
+        // s0 (produit au dernier step de prefill) ne serait plus filtré. Seul le COMPTEUR est
+        // gardé, parce qu'en prefill le token est jeté.
+        const sel = policy.select(&top5.idx) catch |e| {
+            log.err("step {d} : {s} — les {d} ids du top-5 sont tous supprimés (top5={any})", .{ step, @errorName(e), gencfg.TOP_K, top5.idx });
+            return e;
+        };
+        const tok: i64 = @intCast(sel.tok);
+        if (in_gen_phase and sel.rank != 0) n_suppress_hits += 1;
         if (in_gen_phase) try gen_top5.append(allocator, top5);
         // W4g (protocole de flip) : marge top1−top2 par step de génération, mode oracle seulement.
-        if (in_gen_phase and oracle_ids != null) log.info("  marge top1-top2 @ gen={d} : {d:.6} (top1={d} top2={d})", .{ gen_top5.items.len - 1, top5.val[0] - top5.val[1], top5.idx[0], top5.idx[1] });
+        // ⚠ La marge BRUTE ne suffit plus dès que la suppression mord : elle parle de deux tokens
+        // dont le premier n'est pas celui qu'on a retenu. Cette marge est l'instrument de
+        // requalification pré-enregistré des gates U8/W4g — on publie donc AUSSI la marge
+        // DÉCISIONNELLE (entre le rang retenu et le rang non supprimé suivant), seule grandeur
+        // qui parle du choix réellement fait. C'est également l'unique instrument de
+        // l'histogramme `rank_used` exigé par la claim C2 : sans lui, C2 n'a pas de mesure.
+        if (in_gen_phase and oracle_ids != null) {
+            var next_free: ?usize = null;
+            for (sel.rank + 1..gencfg.TOP_K) |j| {
+                if (!policy.isSuppressed(top5.idx[j])) {
+                    next_free = j;
+                    break;
+                }
+            }
+            const marge_dec: f32 = if (next_free) |j| top5.val[sel.rank] - top5.val[j] else std.math.nan(f32);
+            log.info("  marge top1-top2 @ gen={d} : {d:.6} (top1={d} top2={d}) rank_used={d} chosen={d} marge_decisionnelle={d:.6}", .{ gen_top5.items.len - 1, top5.val[0] - top5.val[1], top5.idx[0], top5.idx[1], sel.rank, sel.tok, marge_dec });
+        }
         // --dump-top5 (U9) : top-5 par step aussi en mode LIBRE (w4auto ne le loggait qu'en --oracle).
-        if (in_gen_phase and dump_top5) log.info("  top5 @ gen={d} : idx={any} val={any}", .{ gen_top5.items.len - 1, top5.idx, top5.val });
+        if (in_gen_phase and dump_top5) log.info("  top5 @ gen={d} : idx={any} val={any} rank_used={d} chosen={d}", .{ gen_top5.items.len - 1, top5.idx, top5.val, sel.rank, sel.tok });
 
         // cache swap (motif gemma4_gen_long_gpu.zig:139-168) : deinit l'ancien, adopte le nouveau.
         var old_cache = cache_buf;
@@ -1421,8 +1838,16 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         if (oracle_ids) |fx| {
             if (generated.items.len >= fx.len) break; // stop_reason reste .oracle
         } else {
-            if (tok == @as(i64, @intCast(eot_id))) {
+            // Arrêt multi-EOS (spec §4.3) : sémantique HF « any of », sans priorité, le token
+            // étant concaténé PUIS testé (il fait donc partie de la sortie — c'est déjà ce que
+            // fait le runner, seul l'élargissement 1 → 3 était à faire).
+            // ⚠ Hors mode `--oracle` uniquement (décision Régis n°3) : là-bas c'est la fixture qui
+            // borne le nombre de positions comparées, un arrêt n'y a pas de sens — tandis que la
+            // SUPPRESSION, elle, doit être exercée des deux côtés, sans quoi l'angle mort du
+            // finding §5 persisterait.
+            if (policy.isEos(tok)) {
                 stop_reason = .eot;
+                stop_eos_id = tok;
                 break;
             }
             if (generated.items.len >= max_tokens) {
@@ -1449,6 +1874,12 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     cache_buf.sl_v.deinit();
     cache_buf.fl_k.deinit();
     cache_buf.fl_v.deinit();
+
+    // Détecteur de vacuité du chantier (§4.2bis). Dénominateur = les tokens GÉNÉRÉS, jamais les
+    // steps : le prefill (27-28 steps sur les témoins) diluerait la mesure au point de la rendre
+    // illisible. Un gate de mordant qui lit `0 fois` n'a rien prouvé — c'est le prompt qu'il faut
+    // changer, pas le critère.
+    log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
 
     const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1510,7 +1941,7 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         log.info("mode libre : {d} tokens générés (EOT_ID={d}, max_tokens={d})", .{ generated.items.len, eot_id, max_tokens });
         log.info("generated = {any}", .{generated.items});
         switch (stop_reason) {
-            .eot => log.info("arrêt : early-stop EOT", .{}),
+            .eot => log.info("arrêt : early-stop EOS id={d} (eos={any}, any-of sans priorité)", .{ stop_eos_id, policy.eos }),
             .max_tokens => log.info("arrêt : max-tokens ({d})", .{max_tokens}),
             .l_max => log.info("arrêt : garde L_MAX", .{}),
             .oracle => unreachable, // .oracle n'est atteignable qu'avec --oracle (branche du dessus)
@@ -1540,7 +1971,7 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         // Verdict A3 (le critère numérique N == index_EOT_expected + 2 est vérifié côté contrôleur
         // contre la fixture ; ici on rend N et la raison d'arrêt VISIBLES).
         if (stop_reason == .eot) {
-            log.info("A3 : stop early-EOT après {d} tokens (dernier = EOT_ID={d})", .{ generated.items.len, eot_id });
+            log.info("A3 : stop early-EOS après {d} tokens (dernier = {d} ; EOT_ID mesuré = {d})", .{ generated.items.len, stop_eos_id, eot_id });
         }
     }
 }

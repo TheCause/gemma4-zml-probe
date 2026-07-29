@@ -1,5 +1,13 @@
 # gemma4-zml-probe
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 **[ZML](https://github.com/zml/zml)** — the Zig + MLIR + OpenXLA inference compiler — built and
 **proven against HuggingFace Transformers one operation at a time**, then grown into an autonomous

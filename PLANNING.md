@@ -24,6 +24,91 @@
 - **E1 rerun PASS 4/4** (`f74b8df`) : neutralité des édits G2 confirmée aux 3 niveaux (source/G1/E1).
 - **Cette session (9 juil)** : PR `generation-longue` → `main` + rafraîchissement de ce PLANNING.
 
+## 🔴 État 27 juillet 2026 — chantier `generation_config` PRIORITAIRE (découvert incidemment)
+
+**Le portage n'applique pas `generation_config.json`.** Découvert en gelant les témoins du
+chantier repetition penalty : le runner émet `<image|>` (id 258882) **en greedy** au milieu d'un
+texte. A/B à un seul facteur sur le vrai 12B → le forward ZML est **innocenté** (ses logits
+reproduisent HF, `<image|>` gagne de 0,25), mais Google déclare
+`"suppress_tokens": [258883, 258882]` et **trois** `eos_token_id` `[1, 106, 50]`, que ni le
+runner ni l'oracle n'implémentent. **`69_u8_gen_oracle.py` partage l'angle mort** : il fait aussi
+un argmax nu, donc aucun gate existant ne pouvait détecter l'écart.
+Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
+
+À faire, dans cet ordre (décision Régis, 27 juil) :
+
+- [x] **Cadrage (28-29 juil)** — spec `docs/superpowers/specs/2026-07-28-generation-config-design.md`
+      (**rév. 3**, deux tours de revue adversariale, 86 findings arbitrés) + plan
+      `docs/superpowers/plans/2026-07-29-generation-config.md` (8 tâches, 12 gates).
+      **Pré-enregistrement** §2bis (5 claims falsifiables + prédictions chiffrées + « ce qui tue la
+      claim ») committé **avant la première mesure** — exigence Régis « scientifiquement falsifiable ».
+      Décisions Régis : périmètre **12B seul** · passe de nuance sur la claim **dans** ce chantier ·
+      mode `--oracle` = suppression **ON**, arrêt EOS **OFF**.
+- [x] **Task 0 (29 juil)** — témoins vérifiés **réutilisables** (source `zml_runner/` inchangée
+      depuis le 26 juil, md5 local ≡ VM 4/4) ; **GC9 répondu** ; **GC12 mesuré** (N=20).
+- [x] **`suppress_tokens` + 3 EOS dans le runner (29 juil)** — politique **host-side** dans
+      `zml_runner/gencfg.zig` (le graphe ne bouge pas : **GC0** md5 HLO identique au témoin,
+      `engine.zig` 0 octet). **GC1** selftest 8/8 · 12/12 · 4/4 · 6/6 non-vacuité ·
+      **GC2** témoins 48 et 124 bit-identiques · **GC3** `258882` **11/20 → 0/20**, p = 1,16e-07.
+- [x] **Aligner `69_u8_gen_oracle.py` (29 juil)** — politique prise au **vrai**
+      `SuppressTokensLogitsProcessor`, aux deux sites. **GC5** `n_match` **199 → exactement 198**
+      (branche nue reproduisant les chiffres du 27 juil **au chiffre près**) · **GC7** variante A
+      199/200 unique mismatch @47, variante B **200/200 zéro mismatch**.
+- [x] **Passe de nuance sur la claim (29 juil)** — **GC11** : 8/8 documents vivants portent la
+      portée « argmax sur les logits bruts ». Gate **scripté** (`scripts/gc11_claim_scope.sh`),
+      contre-preuve exercée dans les deux sens.
+- [ ] **Reste du chantier** : GC4 / GC6 / GC10 (en cours), **GC8** (test décisif de C1, coût
+      **mesuré** 69,75 s/token en fp32 → n=60 ≈ 1 h 15), puis doc de clôture et PR.
+- [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
+      leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
+      coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour
+      eux, et doit rester écrite comme telle.
+- [ ] **⚠ D11 impacté** : `70_u8_corrupt.py` écrit son checkpoint à plat (sans snapshot ni
+      symlink) → la découverte automatique y échoue. Il doit passer
+      `--gen-config <dq>/generation_config.json` — un chemin de **fichier**, pas un répertoire.
+- [ ] **Puis** le chantier repetition penalty (spec + plan déjà écrits et revus, ci-dessous)
+
+## 🔴 29 juillet 2026 — FINDING : la trajectoire libre du 12B est BISTABLE
+
+Découvert en Task 0, **avant toute modification de code**. 20 runs identiques du même binaire :
+**exactement 2 trajectoires** (11/20 et 9/20), **un unique** point de bifurcation **@47** (marge
+0,004587 ≈ 5× le bruit d'un logit), **149 des 200 ids** en aval. Positions 0..46 parfaitement
+déterministes. Taux 45 % = signature d'un **tie**, pas d'un bruit.
+
+- **La divergence @47 du finding `generation_config` §9 est EXPLIQUÉE** : ZML produit lui-même les
+  deux valeurs. **Le forward est innocenté.**
+- **2 gates pré-enregistrés retirés avant d'avoir coûté du GPU** (« ids 0..56 bit-identiques »,
+  « reproduit le témoin bit-à-bit ») : ils auraient échoué **45 % du temps** pour une cause
+  étrangère au chantier. **Contrôle qui échoue À TORT** — 3ᵉ membre de la famille. Remplacés par un
+  critère **statistique** (`<image|>` dans 0/20 après vs **11/20** avant, p ≈ 6e-8 sous H0).
+- **⚠ Les témoins du 27 juil ne sont PAS « caducs »** comme annoncé plus haut : ils sont valides
+  (source inchangée) — mais **un témoin de trajectoire libre n'est pas un invariant**.
+- **⚠ À ré-instruire** : les gates d'équivalence d'ids **en roue libre** (M1/M2, D1/D2, R0/R1,
+  « 1020/1020 »). Les claims **teacher-forcées** (U8 48/48, U9 1150/1150, 4041 positions) ne sont
+  **pas** affectées (marges ≥ 0,026).
+- **Règle** : un gate de fidélité position-par-position doit être **teacher-forcé**.
+
+Preuves : **`docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md`**.
+
+Deux conséquences à retenir :
+1. La claim « ids == HF » est **vraie au sens « même argmax sur les logits bruts »**, et **fausse
+   au sens « reproduit ce que `generate()` produirait »**. Nuance à écrire partout où la claim
+   apparaît.
+2. `do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0` → **le sampling est la
+   configuration NOMINALE du modèle**, pas un raffinement optionnel. La « récitation en greedy »
+   est plausiblement le symptôme d'un usage hors configuration prévue.
+   ⚠ La récitation **n'a pas pu être reproduite** : 3 témoins greedy (2/200/1150 tokens) ne
+   montrent aucune boucle (n-gramme max répété : 4 sur 200, 5 sur les 400 derniers de 1150 ;
+   diversité plate 0,62-0,76 ; le run de 1150 atteint sa propre conclusion). Le prompt qui récite
+   reste à identifier.
+
+**Chantier repetition penalty — cadrage TERMINÉ, exécution suspendue** (branche
+`sampling-penalty`) : spec rév. 4 + plan rév. 3, deux tours de revue chacun.
+Task 0 faite (3 témoins gelés, archivés en durable côté GPU). Prérequis **RP-1** identifié :
+l'oracle de décode 12B est **bf16 par construction** (`69:371` refuse `--compute-fp32` hors
+teacher-force) — l'instrument déclaré corrompu le 25 juil ; à refonder en fp32 avant d'armer la
+penalty.
+
 ### Planning courant
 
 - [x] **PR `generation-longue` → `main`** — mergée le 9 juil (PR #3, `c4d483b`).

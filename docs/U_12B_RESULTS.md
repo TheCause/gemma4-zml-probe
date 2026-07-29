@@ -1,5 +1,13 @@
 # U_12B_RESULTS — W4-J2 : Gemma 4 12B Unified w4a16 sur la 3090
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 **Chantier** : W4-J2 (2e jalon de la brique poids 4-bit, spec
 [`2026-07-18-w4-poids-4bit-12b-design.md`](superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md),
 plan [`2026-07-24-w4-j2-12b-unified.md`](superpowers/plans/2026-07-24-w4-j2-12b-unified.md) + 3 amendements).

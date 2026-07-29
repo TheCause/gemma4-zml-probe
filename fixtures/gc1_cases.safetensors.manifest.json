@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "produced_by": "scripts/71_gc1_fixture.py",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0"
+  },
+  "selection": {
+    "vocab_size": 262144,
+    "eot_id": 106,
+    "suppress_tokens": [
+      258883,
+      258882
+    ],
+    "eos_token_id": [
+      1,
+      106,
+      50
+    ],
+    "n_cases": 8,
+    "n_cases_ou_la_suppression_mord": 4,
+    "case_names": [
+      "reel_pos57_du_temoin",
+      "aucun_supprime",
+      "supprime_rang2_inoffensif",
+      "supprime_rang5_inoffensif",
+      "deux_supprimes_en_tete",
+      "deux_supprimes_disjoints",
+      "egalite_exacte_top1_supprime",
+      "egalite_exacte_en_queue"
+    ]
+  },
+  "validation_cases": [
+    {
+      "name": "nominal_gemma4_12b",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [258883, 258882], \"do_sample\": true, \"top_k\": 64, \"top_p\": 0.95, \"temperature\": 1.0, \"bos_token_id\": 2, \"pad_token_id\": 0}",
+      "expect_error": "",
+      "expect_suppress_len": 2
+    },
+    {
+      "name": "eot_present_dans_eos",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": []}",
+      "expect_error": "",
+      "expect_suppress_len": 0
+    },
+    {
+      "name": "eot_absent_des_eos",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 50], \"suppress_tokens\": [258883, 258882]}",
+      "expect_error": "EotNotInEosList"
+    },
+    {
+      "name": "eos_scalaire_normalise",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": 106, \"suppress_tokens\": [258883, 258882]}",
+      "expect_error": "",
+      "expect_suppress_len": 2
+    },
+    {
+      "name": "eos_liste_vide",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [], \"suppress_tokens\": []}",
+      "expect_error": "EosListEmpty"
+    },
+    {
+      "name": "eos_absent",
+      "eot_id": 106,
+      "content": "{\"suppress_tokens\": [258883, 258882]}",
+      "expect_error": "EosListEmpty"
+    },
+    {
+      "name": "begin_suppress_present",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [258883, 258882], \"begin_suppress_tokens\": [220]}",
+      "expect_error": "BeginSuppressUnsupported"
+    },
+    {
+      "name": "suppress_id_hors_vocab",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [262144]}",
+      "expect_error": "SuppressIdOutOfRange"
+    },
+    {
+      "name": "suppress_id_negatif",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [-1]}",
+      "expect_error": "SuppressIdOutOfRange"
+    },
+    {
+      "name": "suppress_doublons",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [258882, 258883, 258882, 258883]}",
+      "expect_error": "",
+      "expect_suppress_len": 2,
+      "is_dedup_case": true
+    },
+    {
+      "name": "suppress_trop_long_pour_top_k",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [258883, 258882, 258880, 258881, 258884]}",
+      "expect_error": "SuppressListTooLongForTopK"
+    },
+    {
+      "name": "json_malforme",
+      "eot_id": 106,
+      "content": "{\"eos_token_id\": [1, 106, 50], \"suppress_tokens\": [",
+      "expect_error": "GenerationConfigInvalid"
+    }
+  ],
+  "discovery_cases": [
+    {
+      "name": "direct_a_cote_du_ckpt",
+      "ckpt": "/tmp/gc1_disco/plain/model.safetensors",
+      "expect_path": "/tmp/gc1_disco/plain/generation_config.json"
+    },
+    {
+      "name": "symlink_absolu_1_hop",
+      "ckpt": "/tmp/gc1_disco/weights_abs/model.safetensors",
+      "expect_path": "/tmp/gc1_disco/snap_abs/generation_config.json"
+    },
+    {
+      "name": "symlink_relatif_1_hop",
+      "ckpt": "/tmp/gc1_disco/weights_rel/model.safetensors",
+      "expect_path": "/tmp/gc1_disco/snap_rel/generation_config.json"
+    },
+    {
+      "name": "introuvable_fichier_regulier",
+      "ckpt": "/tmp/gc1_disco/orphan/model.safetensors",
+      "expect_error": "GenerationConfigNotFound"
+    }
+  ]
+}
