@@ -17,6 +17,11 @@ sur **chaque** run GPU.
 
 **Spec:** `docs/superpowers/specs/2026-07-29-sampling-penalty-design.md` (**rév. 3**).
 
+**Plan rév. 2** — la rév. 1 a été relue (exécutabilité, couverture, faisabilité Zig) : **couverture
+bonne** (5 gates, 4 claims, 7 dettes sur 8), mais **11 bloquants d'exécutabilité**. Le motif : je
+spécifiais le *quoi* et le *pourquoi* en laissant le *comment* — or le comment est là où le
+chantier se joue. Les trous sont comblés ci-dessous ; les corrections portent la mention **[rév. 2]**.
+
 **⚠ Périmètre — phase 2 SEULEMENT.** La repetition penalty (phase 1) a son propre plan :
 `docs/superpowers/plans/2026-07-27-sampling-repetition-penalty.md` (rév. 3), régi par la spec
 rév. 4 du 27 juil. **Les gates `SM0…SM3` de cette spec-là sont SUPERSÉDÉS** (spec rév. 3 §0) :
@@ -75,11 +80,18 @@ telles quelles au doc de résultats.
 
 - [ ] **Step 1.1 — écrire le selftest D'ABORD** (il doit échouer à la compilation).
 
-Dans `gemma4_g12auto.zig`, ajouter le drapeau `--selftest-sampling <fixture>` aux **quatre**
-endroits, puis l'early-return **sur le même patron que `--selftest-gencfg`** (avant tokenizer,
-VRAM et Platform) :
+**[rév. 2]** Dans `gemma4_g12auto.zig` : ajouter **l'import**, le drapeau aux **six** endroits
+(cf. Task 4 Step 4.0), **un stub** de `selftestSampling`, et l'early-return.
 
 ```zig
+const sampling = @import("sampling.zig");   // ← SANS CETTE LIGNE le rouge de 1.2 n'a pas lieu
+
+/// Stub : le corps réel est écrit en Task 3. Il existe dès maintenant pour que la Task 1 compile
+/// seule — sinon Step 1.5 échouerait sur « undeclared identifier », un rouge qui ne prouve rien.
+fn selftestSampling(_: std.mem.Allocator, _: std.Io, _: []const u8) !void {
+    return error.NotImplemented;
+}
+
 // === S2-U : selftest des warpers, host-only. Même patron d'early-return que --selftest-gencfg :
 // c'est ce qui rend le gate exécutable sans GPU, et ce qui interdit d'y mesurer quoi que ce soit
 // qui dépende du modèle. ===
@@ -92,12 +104,16 @@ if (args.selftest_sampling) |fixture_path| {
 - [ ] **Step 1.2 — builder, et vérifier que ça ÉCHOUE**
 
 ```bash
-ZML_REMOTE=… ZML_DST=… zml_runner/deploy_to_3090.sh
+ZML_REMOTE=… ZML_DST=… zml_runner/deploy_to_3090.sh   # ← renseigner les deux variables
 ssh "$ZML_REMOTE" 'cd /data/rqz_workspace/zml && ./bazel.sh build //examples/rqz:gemma4_g12auto 2>&1 | tail -20'
 ```
 
-Attendu : `error: unable to load 'sampling.zig': FileNotFound`. **C'est le rouge.** S'il compile,
-c'est que l'import n'a pas été écrit — corriger avant de continuer.
+Attendu : `error: unable to load 'sampling.zig': FileNotFound`. **C'est le rouge.**
+
+⚠ **[rév. 2] Ce message a DEUX causes distinctes** — ne pas les confondre :
+1. le fichier n'existe pas encore (**le rouge voulu, ici**) ;
+2. le fichier existe mais n'est pas dans les `srcs` Bazel, donc absent du sandbox (**Step 1.4**).
+Après avoir créé le fichier, si le message persiste, c'est la cause 2.
 
 - [ ] **Step 1.3 — écrire `zml_runner/sampling.zig`**
 
@@ -127,15 +143,48 @@ pub fn applyTemperature(logits: []f32, t: f32) void {
 /// k=8 → 64 survivants). Une implémentation « garder les k premiers du tri » diverge dès la
 /// première égalité.
 /// `k_eff = min(max(k, min_keep), len)` reproduit __init__ + le "safety check" de __call__.
-pub fn applyTopK(logits: []f32, k: u32, min_keep: u32) void {
+pub fn applyTopK(logits: []f32, k: u32, min_keep: u32, heap_buf: []f32) void {
     if (k == 0) return; // convention HF : désactivé
     const k_eff = @min(@max(k, min_keep), logits.len);
     if (k_eff >= logits.len) return;
-    // seuil = valeur du k_eff-ième plus grand ; sélection partielle, JAMAIS un tri complet
-    // (spec F16 : un tri complet coûte 177,95 % d'un step).
-    const kth = kthLargest(logits, k_eff);
+    const kth = kthLargest(logits, k_eff, heap_buf);
     for (logits) |*x| {
         if (x.* < kth) x.* = FILTER; // STRICT — c'est tout le sujet
+    }
+}
+
+/// [rév. 2] Valeur du k-ième plus grand, SANS MUTER `logits`. Min-heap borné à k : O(n·log k),
+/// une seule passe, zéro allocation (le buffer est fourni par l'appelant, alloué UNE FOIS).
+///
+/// ⚠ POURQUOI PAS UN QUICKSELECT IN-PLACE. `logits` est indexé par **ID DE TOKEN** : permuter le
+/// tableau casse la correspondance indice↔token. Le filtrage resterait juste en *multiset*, mais
+/// `argmax`/`sample` rendraient un token FAUX — et ce bug serait **invisible** à une comparaison
+/// par classe d'équivalence. C'est pourquoi S2-U compare AUSSI les indices (Task 3 Step 3.2).
+///
+/// ⚠ POURQUOI PAS LA STD. Vérifié par compilation sur le toolchain du projet : `std.sort` n'offre
+/// AUCUN `select`/`nth_element` en 0.16-dev (« struct 'sort' has no member named 'select' ») —
+/// seulement des tris **complets**, à 177,95 % d'un step (spec F16). On écrit donc le heap.
+fn kthLargest(logits: []const f32, k: usize, heap_buf: []f32) f32 {
+    std.debug.assert(heap_buf.len >= k);
+    const h = heap_buf[0..k];
+    for (logits[0..k], 0..) |v, i| h[i] = v;
+    // heapify min : h[0] est le plus PETIT des k plus grands vus jusqu'ici
+    var i = k / 2;
+    while (i > 0) { i -= 1; siftDown(h, i); }
+    for (logits[k..]) |v| {
+        if (v > h[0]) { h[0] = v; siftDown(h, 0); }
+    }
+    return h[0]; // = le k-ième plus grand
+}
+
+fn siftDown(h: []f32, start: usize) void {
+    var root = start;
+    while (2 * root + 1 < h.len) {
+        var child = 2 * root + 1;
+        if (child + 1 < h.len and h[child + 1] < h[child]) child += 1;
+        if (h[root] <= h[child]) return;
+        std.mem.swap(f32, &h[root], &h[child]);
+        root = child;
     }
 }
 
@@ -147,20 +196,82 @@ pub fn applyTopK(logits: []f32, k: u32, min_keep: u32) void {
 /// ⚠ Le masque revient dans l'espace vocabulaire par un scatter dont le tenseur de BASE est le
 /// masque trié lui-même : un scatter naïf produit un masque juste dans l'espace TRIÉ et faux
 /// dans l'espace vocabulaire.
-pub fn applyTopP(allocator: std.mem.Allocator, logits: []f32, p: f32, min_keep: u32) !void {
+/// [rév. 2] AUCUN allocateur : les trois scratch sont alloués UNE FOIS hors boucle (interdit
+/// « aucune allocation par step », spec §5). `idx` et `prob` font `len`, `mask` fait `len` bits.
+pub fn applyTopP(logits: []f32, p: f32, min_keep: u32, s: *Scratch) void {
     if (p >= 1.0) return;
-    // … tri ascendant des indices, softmax, cumsum, masque `cum <= 1-p`,
-    //   puis `mask[len - min_keep ..] = false`, puis application par indice d'origine.
+    const n = logits.len;
+    // 1. ordre ASCENDANT des indices, par valeur de logit (tri complet ici : on ne peut pas
+    //    couper, la cumsum part du plus petit — c'est le prix de la formulation de HF).
+    for (s.idx[0..n], 0..) |*e, i| e.* = @intCast(i);
+    std.mem.sortUnstable(u32, s.idx[0..n], logits, ascByLogit);
+    // 2. softmax dans l'ordre ascendant (max soustrait pour la stabilité)
+    const mx = logits[s.idx[n - 1]];
+    var sum: f32 = 0;
+    for (s.idx[0..n], 0..) |id, r| { s.prob[r] = @exp(logits[id] - mx); sum += s.prob[r]; }
+    // 3. cumsum, puis masque `cum <= 1 - p` — le `<=` EST le critère (F10), pas un `<`
+    var cum: f32 = 0;
+    const thr = 1.0 - p;
+    for (s.prob[0..n], 0..) |pr, r| { cum += pr / sum; s.rm[r] = (cum <= thr); }
+    // 4. min_tokens_to_keep protège la QUEUE du tri ascendant (= les plus probables)
+    const keep = @min(@as(usize, min_keep), n);
+    for (s.rm[n - keep .. n]) |*b| b.* = false;
+    // 5. « scatter » : appliquer PAR INDICE D'ORIGINE. Écrire le masque dans l'ordre trié puis
+    //    l'appliquer positionnellement produirait un masque juste dans l'espace TRIÉ et FAUX
+    //    dans l'espace vocabulaire (spec F10, note d'implémentation).
+    for (s.idx[0..n], 0..) |id, r| { if (s.rm[r]) logits[id] = FILTER; }
 }
 
-/// Tirage multinomial sur les logits FILTRÉS. RNG **host** seedé par (seed, index de token DANS
-/// LE PROMPT COURANT) — jamais le RNG device (non garanti déterministe entre backends).
-/// ⚠ Invariant à asserter par l'appelant : le token rendu vérifie logits[t] > -inf.
-pub fn sample(logits: []const f32, rng: *std.Random.DefaultPrng) u32 { … }
+fn ascByLogit(logits: []const f32, a: u32, b: u32) bool { return logits[a] < logits[b]; }
+
+/// Scratch alloué UNE FOIS par `run()`, dimensionné au vocab runtime.
+pub const Scratch = struct { idx: []u32, prob: []f32, rm: []bool, heap: []f32 };
+
+/// Tirage multinomial sur les logits FILTRÉS (les `-inf` donnent une proba nulle).
+/// ⚠ [rév. 2] Le RNG est fourni PAR L'APPELANT, déjà construit, et **avance** d'un tirage à
+/// l'autre — il n'est PAS re-seedé à chaque token. Il est réinitialisé à `seed` **au début de
+/// chaque prompt** (spec §5 « état par prompt »), ce qui est la condition de S2-R en `--repl`.
+/// Sans cette règle écrite, re-seeder par token et avancer passent tous deux S2-R en donnant des
+/// sorties différentes.
+/// ⚠ Invariant assertable par l'appelant : le token rendu vérifie `logits[t] > -inf`.
+pub fn sample(logits: []const f32, rng: std.Random) u32 {
+    var sum: f32 = 0;
+    var mx: f32 = -std.math.inf(f32);
+    for (logits) |v| { if (v > mx) mx = v; }
+    for (logits) |v| { if (v != FILTER) sum += @exp(v - mx); }
+    var r = rng.float(f32) * sum;
+    for (logits, 0..) |v, i| {
+        if (v == FILTER) continue;
+        r -= @exp(v - mx);
+        if (r <= 0) return @intCast(i);
+    }
+    return lastFinite(logits); // garde anti-arrondi : jamais un token filtré
+}
 
 /// argmax host, tie-break explicite : premier indice gagnant.
-pub fn argmax(logits: []const f32) u32 { … }
+pub fn argmax(logits: []const f32) u32 {
+    var best: usize = 0;
+    for (logits, 0..) |v, i| { if (v > logits[best]) best = i; }
+    return @intCast(best);
+}
 ```
+
+⚠ **[rév. 2] Contradiction levée** : `applyTopP` fait un **tri complet**, ce que la note générale
+interdit. La note vise le chemin `top_k`, où un `partial_sort` suffit. Pour `top_p`, la cumsum de
+HF part du **plus petit** : il n'y a pas de coupe possible. **Conséquence à mesurer, pas à
+supposer** — `M-COUT` (Task 6) doit publier le coût **avec `top_p` armé**, et la table F16 donne
+le repère : un tri complet de 262 144 f32 coûte **177,95 % d'un step**. **La sortie est dans l'ordre de HF lui-même** : `top_k` (rang 19) s'applique **avant** `top_p`
+(rang 20), donc quand `top_k` est armé, tous les logits sauf ~k valent déjà `FILTER`. Or dans le
+tri **ascendant**, les `-inf` sont **en tête** et contribuent **0** à la cumsum : les inclure ou
+les ignorer donne le même masque. **Donc on ne trie que les candidats non filtrés** — 64 éléments
+au lieu de 262 144 avec la config Google, et le coût redevient négligeable.
+
+- [ ] **Step 1.3bis — écrire cette optimisation, et la prouver** : `applyTopP` collecte d'abord
+      les indices dont `logits[i] != FILTER`, puis trie **ce sous-ensemble**. **Preuve exigée dans
+      la fixture** (Task 2) : un cas `top_k` **puis** `top_p` dont le résultat doit être identique
+      à celui du chemin non optimisé. Sans ce cas, l'optimisation est un pari.
+      ⚠ Quand `top_k` est **désactivé** (`k = 0`), le sous-ensemble vaut tout le vocabulaire et le
+      coût redevient celui du tri complet : `M-COUT` doit publier **les deux régimes**.
 
 - [ ] **Step 1.4 — ajouter `sampling.zig` aux srcs des 3 cibles** dans `zml_runner/BUILD.bazel`
       (`gemma4_g12auto`, `gemma4_g12a4k`, `gemma4_g12a8k`). Tout fichier `@import`-é doit être
@@ -182,9 +293,22 @@ pub fn argmax(logits: []const f32) u32 { … }
 > deux côtés passerait le gate. Le producteur instancie `TemperatureLogitsWarper`,
 > `TopKLogitsWarper` et `TopPLogitsWarper` et publie **leur** sortie.
 
-- [ ] **Step 2.1 — écrire le producteur.** Format safetensors : `logits_in` `{N,V}` f32,
-      `mask_expected` `{N,V}` u8 (1 = survivant), plus un sidecar JSON portant, par cas : `name`,
-      `warper`, `params`, et les **compteurs d'antécédent**.
+- [ ] **Step 2.1 — écrire le producteur.**
+      ⚠ **[rév. 2] Format 1-D concaténé, PAS `{N,V}`** : les cas ont des vocabulaires de tailles
+      **différentes** (V=8, V=5, **V=262 144**) — un tenseur rectangulaire est impossible, et le
+      **padding est fatal et silencieux** (à `0.0`, le cas « 8 logits égaux » deviendrait 262 144
+      ex æquo ; à `-inf`, `k_eff = min(max(k,min_keep), len)` serait évalué sur 262 144 au lieu
+      de 5).
+
+| clé | forme | contenu |
+|---|---|---|
+| `logits_in` | `{T}` f32 | tous les cas **concaténés** |
+| `mask_expected` | `{T}` u8 | 1 = survivant, produit par le **vrai** warper |
+| `offsets` | `{N+1}` i64 | bornes de chaque cas dans les deux tenseurs |
+
+Sidecar `<fixture>.manifest.json`, par cas : `name`, `warper`, `params` (`top_k`, `top_p`,
+`temperature`, `min_tokens_to_keep`), **`compare_mode`** (cf. Step 3.2) et les **compteurs
+d'antécédent**.
 
 - [ ] **Step 2.2 — les cas de bord OBLIGATOIRES** (spec C2). Un gate qui ne les contient pas rend
       100 % sans rien prouver :
@@ -215,14 +339,41 @@ pub fn argmax(logits: []const f32) u32 { … }
 - [ ] **Step 3.1 — écrire `selftestSampling`** sur le patron de `selftestGencfg` : lire la fixture,
       lire le sidecar, rejouer chaque cas, comparer.
 
-- [ ] **Step 3.2 — comparer par CLASSE D'ÉQUIVALENCE, pas par ensemble d'indices** (spec F14) :
-      `torch.sort` n'étant pas stable au-delà de n=128, l'identité exacte des survivants sur ex æquo
-      **n'est pas contractuelle**. Comparer le **multiset trié des logits survivants** et la **masse
-      de probabilité**. *(Comparer les indices ferait échouer le gate à tort sur les cas égalitaires
-      — et c'est précisément la classe de cas qu'on veut exercer.)*
+- [ ] **Step 3.2 — comparer selon un `compare_mode` PAR CAS, calculé par le producteur.**
+
+⚠ **[rév. 2] La règle de la rév. 1 (« toujours la classe d'équivalence ») était AVEUGLE au cas de
+bord le plus discriminant.** Vérifié : sur 8 logits **égaux** avec `top_p = 0,25`, HF garde
+**{6,7}** et la formulation naïve **{0,1}** — ensembles **disjoints**, mais **multiset identique**
+(`[0.0, 0.0]`) **et masse identique** (`0,25`). Le seul cas qui prouve la divergence ne pouvait pas
+la détecter.
+
+| `compare_mode` | Quand le producteur le pose | Ce qui est comparé |
+|---|---|---|
+| **`indices`** | logits du cas **tous distincts** **OU** `V ≤ 128` | `mask_expected` **à l'identique** — c'est le mode le plus fort, et il couvre le cas disjoint |
+| **`equivalence`** | ex æquo présents **ET** `V > 128` | multiset trié des logits survivants **+** masse de probabilité |
+
+Motif de la bascule à 128 : `torch.sort` est stable **jusqu'à n = 128** et ne l'est plus à partir
+de **129** (spec F14, mesuré). En deçà, l'ordre des ex æquo **est** reproductible, donc comparable
+par indices. Au-delà, il ne l'est pas — mais **seulement sur les ex æquo**.
+
+⚠ Le producteur **écrit `compare_mode` dans le sidecar** ; le selftest ne le devine pas. Et il
+**FAIL** si aucun cas n'est en mode `indices` : ce serait revenir à la règle aveugle.
 
 - [ ] **Step 3.3 — asserter la non-vacuité, patron GC1** : publier les compteurs et **FAIL si l'un
       vaut 0**. Un cas dont l'antécédent est vide est **inexécutable**, pas PASS.
+
+- [ ] **Step 3.3bis — [rév. 2] TRANSPORTER la fixture sur la VM.** `deploy_to_3090.sh` fait un
+      `rsync` de **`zml_runner/` uniquement** : la fixture n'y arrive **jamais**. Et le sidecar est
+      **obligatoire** — `selftestGencfg` échoue en `error.MissingManifest` sans lui.
+
+```bash
+ssh "$ZML_REMOTE" 'mkdir -p /data/gemma4-zml-probe/s2'
+scp fixtures/s2_cases.safetensors fixtures/s2_cases.safetensors.manifest.json \
+    "$ZML_REMOTE:/data/gemma4-zml-probe/s2/"
+# contrôle md5 des DEUX côtés — bloquant (la VM n'est pas un dépôt git)
+md5 -q fixtures/s2_cases.safetensors
+ssh "$ZML_REMOTE" 'md5sum /data/gemma4-zml-probe/s2/s2_cases.safetensors'
+```
 
 - [ ] **Step 3.4 — `S2-U`** : lancer sur la VM (host-only, **aucune compile GPU**).
 
@@ -232,7 +383,16 @@ ssh "$ZML_REMOTE" 'cd /data/rqz_workspace/zml && \
   --selftest-sampling /data/gemma4-zml-probe/s2/s2_cases.safetensors' > /tmp/s2u.out 2> /tmp/s2u.err
 ```
 
-PASS = **100 %** des cas **et** tous les compteurs non nuls. **FAIL ⇒ STOP.**
+**[rév. 2] Critère observable dans la sortie** — le selftest émet une ligne finale au format
+littéral suivant, que le gate grep :
+
+```
+SELFTEST SAMPLING PASS — cas <n>/<n> (indices <a>, équivalence <b>), compteurs <c>/<c> non nuls
+```
+
+PASS = les deux fractions à `n/n` et `c/c`, **et** `a ≥ 1` (au moins un cas comparé par indices).
+**FAIL ⇒ STOP.** Exit code 0 attendu ; toute sortie `DebugAllocator` (fuite, double-free) est un
+FAIL même si la ligne est présente.
 
 - [ ] **Step 3.5 — contre-preuve du gate** : muter volontairement `applyTopK` (`<` → `<=`) et
       vérifier que `S2-U` **ÉCHOUE**. Puis muter `applyTopP` (tri descendant) et vérifier qu'il
@@ -247,7 +407,33 @@ PASS = **100 %** des cas **et** tous les compteurs non nuls. **FAIL ⇒ STOP.**
 
 **Files:** Modify `zml_runner/gemma4_g12auto.zig` (flags, lecture des logits, sélection).
 
-- [ ] **Step 4.1 — les six flags**, chacun aux **quatre** endroits, avec les gardes **en
+- [ ] **Step 4.0 — [rév. 2] SIX endroits, pas quatre.** Les deux oubliés sont ceux qui font
+      échouer un flag *en silence* :
+
+| # | Endroit | Pourquoi |
+|---|---|---|
+| 1-4 | commentaire CLI d'en-tête · `Args` · `usage` · `parseArgs` | le patron connu |
+| **5** | **garde d'exclusivité `--repl`** (`gemma4_g12auto.zig:1209-1215`) | `usage` promet « exclusif de `--selftest-*` » ; sans ajout de `args.selftest_sampling != null`, `--repl --selftest-sampling f` est **accepté** et l'usage devient menteur |
+| **6** | **`generateOnce`** (`:1680`) et ses **3 sites d'appel** (`:1624`, `:1634`, `:1663`) | la fonction a déjà **20 paramètres positionnels** ; y ajouter 6 flags + la seed serait intenable |
+
+⚠ **[rév. 2] Passer un `*const SamplingCfg`, pas 7 positionnels de plus.** Même forme que
+`gencfg.GenCfg` (par pointeur, 3 sites) — et c'est ce que GC10 vérifie déjà pour la politique :
+un oubli sur l'un des trois sites rend la fonctionnalité silencieusement inopérante en `--repl`.
+
+- [ ] **Step 4.0bis — [rév. 2] définir ce qui ARME le tirage.** Aucun `--do-sample` n'existe dans
+      la spec ; sans règle, `argmax|sample` (Step 4.3) n'est pas implémentable et l'antécédent de
+      `error.SeedRequired` (« seed absente alors que le tirage est armé ») est indéfinissable.
+
+**Règle retenue** : le tirage est armé **ssi `--seed` est fourni**. Motifs : (a) c'est explicite,
+là où une dérivation du type « armé ⇔ `top_p<1` ou `top_k>1` » armerait le hasard **par effet de
+bord** d'un réglage de filtrage ; (b) elle rend `SeedRequired` inutile — on ne peut pas armer sans
+seed — donc **elle supprime une garde intestable au lieu d'en inventer une** ; (c) les warpers
+restent utilisables **sans** tirage (filtrage + `argmax`), ce qui est exactement le régime neutre
+du pont.
+⚠ Conséquence à écrire dans `usage` : **sans `--seed`, la sélection reste un `argmax`**, quels que
+soient `--top-k`/`--top-p`/`--temperature`.
+
+- [ ] **Step 4.1 — les six flags**, chacun aux **six** endroits, avec les gardes **en
       ACCEPTATION** (spec §5). ⚠ `p <= 0 → rejet` **laisse passer `NaN`** : toute comparaison avec
       `NaN` est fausse, donc `NaN` échoue toute acceptation et **passe** tout rejet.
 
@@ -272,9 +458,22 @@ if (!(t >= T_MIN and std.math.isFinite(t))) return error.InvalidTemperature;
 
 Compteurs à publier : `n_steps_compared` · `n_disagree` · `n_exact_top_ties` · `n_suppress_hits`.
 
-- [ ] **Step 4.5 — `S2-PONT`** : `--repetition-penalty 1.0 --top-k 1`, sur un témoin **où la
-      suppression MORD** (le témoin 200 teacher-forcé mord @57 — les témoins 48/124 ont
-      `n_suppress_hits = 0`, mesuré par GC2 : les y poser validerait le chemin A contre lui-même).
+- [ ] **Step 4.5 — `S2-PONT`** : régime neutre sur un témoin **où la suppression MORD** (le témoin
+      200 teacher-forcé mord @57 — les témoins 48/124 ont `n_suppress_hits = 0`, mesuré par GC2 :
+      les y poser validerait le chemin A contre lui-même).
+
+⚠ **[rév. 2] Ne PAS passer `--repetition-penalty 1.0` ici.** Ce flag est créé par le plan **phase 1**,
+dont l'exécution est suspendue (`PLANNING.md`, aucun tag `gate/rp-*`) : le runner rejetterait un
+argument inconnu et `S2-PONT` échouerait pour une raison étrangère à ce qu'il mesure. Le régime
+neutre de **ce** plan est donc :
+
+```bash
+--top-k 1        # et rien d'autre : pas de --seed (⇒ argmax), pas de --top-p, pas de --temperature
+```
+
+**Prérequis alternatif, si la phase 1 est livrée avant** : ajouter `--repetition-penalty 1.0` et
+le consigner au doc de résultats. Les deux régimes sont valides ; ce qui ne l'est pas, c'est de
+supposer l'existence d'un flag qu'aucun gate n'a livré.
 
 PASS = `n_disagree == 0` **hors égalités exactes** · `n_steps_compared == n_generated` ·
 `n_suppress_hits ≥ 1` · `n_exact_top_ties` **publié**. Un désaccord **sur une égalité exacte** est
@@ -289,8 +488,19 @@ un **verdict distinct**, pas un FAIL. **FAIL ⇒ STOP.**
 
 ## Task 5 : `S2-D` et `S2-R` — le stochastique
 
-**Files:** Modify `scripts/72_sampling_fixture.py` (bras distributionnel) · Modify le runner
-(compteurs).
+**Files:** Modify `zml_runner/gemma4_g12auto.zig` (drapeau `--selftest-draw`) · Modify
+`scripts/72_sampling_fixture.py` (bras distributionnel + calcul du χ²).
+
+- [ ] **Step 5.0 — [rév. 2] le VÉHICULE, qui manquait entièrement.** « 10 000 tirages sur des
+      logits figés » n'avait ni binaire, ni drapeau, ni format d'échange, ni lieu de calcul.
+
+| | Décision |
+|---|---|
+| **Drapeau** | `--selftest-draw <fixture> --draws N --seed S` — host-only, même patron d'early-return que `--selftest-sampling` (aucun GPU : on tire sur des logits **figés**) |
+| **Entrée** | la fixture porte une clé `draw_logits` `{V}` f32 (V = 10 ids distincts, obtenus par `top_k = 10` **exactement** — pas des bins agrégés) |
+| **Sortie** | `<fixture>.draws.safetensors`, clé `counts` `{V}` i64 |
+| **Qui calcule le χ²** | **`scripts/72_sampling_fixture.py --chi2 <draws>`**, côté Python, contre une distribution théorique **torch** — implémentation **indépendante** de celle du runner, ce qui est tout l'intérêt |
+| **Où** | le tirage sur la VM (le binaire y est), le χ² sur M1 ou M4 (Python) |
 
 - [ ] **Step 5.1 — `S2-D`** : 10 000 tirages sur des **logits figés en fixture**, `top_k = 10`
       **ids distincts** (pas des bins agrégés : une permutation d'ids **dans** un bin serait
