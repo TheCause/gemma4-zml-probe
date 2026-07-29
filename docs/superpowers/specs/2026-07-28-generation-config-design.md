@@ -461,10 +461,21 @@ choisi au-delà pourrait ne jamais apparaître, et le gate deviendrait vacueux.
 > **`<ID_FRÉQUENT>` = un id dont la PREMIÈRE occurrence dans `witness_long_before.safetensors` est
 > à un index < 57** (zone prédite bit-identique par GC3).
 
-Candidats **déjà mesurés** sur ce fichier : `4083` (1ʳᵉ occ. gen=13), **`1131`** (gen=33, 2 occ.),
-**`496`** (gen=34, 3 occ.). Les trois sont **absents des 29 `prompt_ids`**. Retenu : **`496`**
-(répété ⇒ « exactement la 1ʳᵉ occurrence » devient un critère **mordant**), d'où
-`{"eos_token_id":[1,106,50,496],"suppress_tokens":[258883,258882]}`.
+Candidats **re-mesurés sur le témoin lui-même** (29 juil, comptage direct de `generated` dans
+`witness_long_before.log` — les valeurs rapportées en revue étaient sous-estimées) :
+
+| id | 1ʳᵉ occurrence | occurrences | verdict |
+|---|---|---|---|
+| `4083` | gen=13 | **1** | écarté : une seule occurrence ⇒ « exactement la 1ʳᵉ » n'est pas mordant |
+| `1131` | gen=33 | **3** | acceptable |
+| **`496`** | **gen=34** | **11** | **RETENU** — 11 occurrences ⇒ le critère « s'arrête à la 1ʳᵉ, pas à une autre » est fortement mordant |
+
+Les trois sont **absents des 29 `prompt_ids`**. D'où
+`{"eos_token_id":[1,106,50,496],"suppress_tokens":[258883,258882]}`, avec **arrêt attendu à gen=34**.
+
+Contrôle de cohérence effectué en même temps, sur le même témoin : `258882` est à l'index **57**
+exactement, et `258883`/`1`/`50`/`106` en sont **absents** — F4 et la position du finding sont
+confirmés par mesure directe, pas seulement par citation.
 *(L'appartenance au prompt serait de toute façon sans effet côté runner : le test EOS n'est atteint
 qu'en phase génération, le prefill fait `continue` avant — `:1414-1418` vs `:1424`.)*
 
