@@ -11,6 +11,14 @@
 > **Portée** : ce finding **dépasse** le chantier `generation_config`. Il concerne toute claim de
 > fidélité établie sur une **génération libre** (roue libre), et la façon dont ce projet construit
 > ses A/B avant/après.
+>
+> ⚠ **RECTIFICATION DE PORTÉE (§7bis, mesurée le 29 juil)** : le titre est **trop général**. Deux
+> autres témoins, sur un autre prompt, sont **parfaitement déterministes** — 23/23 et 13/13, avec
+> des compiles qui diffèrent réellement (Δlogit ~1,5e-2), donc l'antécédent n'est pas vide. **La
+> bistabilité est une propriété de la position @47 de CE prompt** (marge 0,004587), pas du 12B en
+> génération libre. Ce qui décide n'est pas « roue libre ou teacher-forcé » mais **la marge
+> minimale du témoin rapportée au jitter de compile**. Les mesures des §1-§7 restent exactes sur
+> le prompt qu'elles ont mesuré.
 
 ## 1. Le fait
 
@@ -150,6 +158,64 @@ probabilité de `(9/20)^20 ≈ 6·10⁻⁸` — le gate est donc **très discrim
 ⚠ Corollaire à ne pas manquer : le mordant n'est atteignable que dans **55 %** des runs. Un gate de
 mordant à **N = 1** aurait eu **45 % de chances de ne rien voir** — et aurait été lu comme « la
 suppression ne mord pas », ou pire, comme un PASS silencieux.
+
+## 7bis. RECTIFICATION (29 juil, mesurée) — la bistabilité est PROMPT-SPÉCIFIQUE
+
+> Cette section **corrige la portée** de ce finding. Elle n'annule aucune de ses mesures : les
+> §1-§7 restent exacts **sur le prompt qu'ils ont mesuré**. Ce qui est rectifié, c'est la
+> généralisation contenue dans le titre (« la trajectoire libre du 12B n'est pas
+> auto-reproductible ») et dans la §6.
+
+**Ce qui a été mesuré** : une campagne dédiée sur **deux autres témoins**, avec un **autre
+prompt** (« Explique-moi la fenêtre glissante d'attention en trois phrases. »), flux stdout/stderr
+séparés, chaque run **recompilant le graphe à neuf** :
+
+| témoin | runs | trajectoires distinctes | marge la plus fine | rapport au jitter de compile |
+|---|---|---|---|---|
+| **48 tokens** (`gemma4_g12auto`) | **23** | **1 seule** — 23/23 identiques | 0,0924 @ pos 43 | **~90×** |
+| **124 tokens** (`gemma4_g12a4k`) | **13** | **1 seule** — 13/13 identiques | 0,0136 @ pos 120 | ~3,1× |
+
+**L'antécédent n'est pas vide** : les compiles diffèrent réellement d'un run à l'autre
+(`max |Δ logit|` = **1,3e-2 à 1,7e-2**). La variabilité d'autotuning que la §3 accuse d'avoir fait
+basculer `@47` **a donc été exercée 20 fois** — et ces témoins-là y ont résisté.
+
+**Plus fort encore** : les témoins archivés `mi_witness_{1280,4k}_ids.safetensors` datent du
+**26 juil** et ont été produits par un binaire **antérieur** au chantier `generation_config`. Le
+binaire du 29 juil, politique de décodage active, les reproduit **bit-identiques**. Ils ont donc
+survécu à un rebuild **et** à un changement de source.
+
+### Ce que cela change
+
+- **La bistabilité est une propriété de la position `@47` du prompt « zero story »** — dont la
+  marge vaut **0,004587**, soit ~5× le bruit d'un logit — **pas une propriété du 12B en génération
+  libre.** L'énoncé général était une extrapolation depuis un seul prompt.
+- **Un gate « ids == témoin » en roue libre n'est donc pas illégitime *en soi*** : il l'est sur un
+  prompt dont une position porte une marge du même ordre que le jitter de compile. Ce qui décide
+  n'est pas « roue libre ou teacher-forcé », c'est **la marge minimale du témoin rapportée au
+  jitter**. Les gates listés « à ré-instruire » en §6 peuvent être ré-instruits **par la mesure**,
+  un par un, au lieu d'être condamnés en bloc.
+- **La règle de la §6 reste la bonne par défaut** (« un gate de fidélité position-par-position doit
+  être teacher-forcé ») : elle protège sans avoir à mesurer. La mesure est ce qui permet d'y
+  déroger **explicitement**, témoin par témoin, avec le chiffre publié.
+
+### Réserve nommée sur le témoin 124
+
+Sa marge la plus fine (0,0136 @ **pos 120**) n'est qu'à **~3×** de son propre spread de compile, et
+toute sa fragilité est concentrée dans les **15 derniers tokens** (zone de clôture avant EOS) : sur
+les indices 0..109, la marge la plus fine remonte à 0,092 — la classe de sécurité du témoin 48.
+**« Jamais observé » n'est pas « ne peut pas ».** Deux conséquences opérationnelles :
+
+1. Un gate adossé au témoin 124 porte sur ses **110 premiers ids** (durcissement gratuit : les 14
+   ids retirés n'ont aucune valeur de non-régression).
+2. Si un tel gate échoue un jour, **regarder l'id à la position 120 AVANT d'accuser le code** — un
+   flip @120 cascade et changerait aussi la longueur, donc le symptôme ne dira pas de lui-même
+   qu'il s'agit de bruit.
+
+**Caveat de la campagne** : mono-machine, mono-driver, mono-binaire. Elle couvre la variabilité
+compile-à-compile (prouvée exercée), pas un changement de driver CUDA, de GPU ou de version XLA.
+
+Artefacts : `/data/gemma4-zml-probe/nd_witness_20260729/` (30 runs de campagne + 6 runs
+`--dump-top5`, `.out`/`.err`/`.safetensors` séparés, `progress.txt`).
 
 ## 8. Artefacts
 
