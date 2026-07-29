@@ -199,6 +199,39 @@ byte-identique** (U1). Architecture 12B **hétérogène** : sliding GQA 16Q/8KV 
 MQA 1×512 **K=V sans v_proj**. Résultats : [`U_12B_RESULTS.md`](U_12B_RESULTS.md), contrat :
 [`U_12B_CONTRACT.md`](U_12B_CONTRACT.md).
 
+### 2.3 quater Politique de décodage `generation_config.json` (chantier du 29 juillet 2026, 12 gates)
+
+Jusqu'au 29 juillet, le portage 12B faisait un **argmax nu** et ne s'arrêtait que sur `<turn|>`
+(106) — alors que Google déclare `"suppress_tokens": [258883, 258882]` et **trois**
+`eos_token_id` `[1, 106, 50]`. Le runner émettait donc `<image|>` (258882) **en greedy**, au
+milieu d'un texte. Le forward n'était pas en cause : c'est la **politique de décodage** qui
+manquait — et `69_u8_gen_oracle.py` partageait **le même angle mort**, si bien qu'aucun gate ne
+pouvait détecter l'écart (l'instrument était aveugle au même endroit que son sujet).
+
+**Ce qui est appliqué** : `suppress_tokens` (avant la sélection) et les **trois** EOS (arrêt
+« any of », token conservé puis strippé à la détok). **Deux clés sur huit** — `do_sample`,
+`top_k`, `top_p`, `temperature` **ne sont PAS** appliqués, et chaque run le dit dans son segment
+`ignored=[…]`, dérivé des clés réellement présentes.
+
+**Où** : `zml_runner/gencfg.zig`, **host-side**, hors du graphe. Le graphe sort déjà un top-5
+trié ; avec |S| = 2 supprimés, l'argmax post-suppression est de rang brut ≤ 3, donc déjà dans ce
+top-5. La garde `suppress.len + 1 > TOP_K` rend l'argument vrai **par construction**. Résultat :
+`engine.zig` **0 octet**, HLO **byte-identique** (GC0), zéro D2H supplémentaire.
+
+**Chiffres** : `258882` passe de **11/20 runs à 0/20** (p = 1,16e-07) · oracle `n_match`
+**199 → 198** · équivalence runner↔oracle **200/200** sur la variante que HF calcule · trajectoire
+libre **60/60 identique** à un décodage HF greedy de même politique. Détail, réserves et dettes :
+[`GENERATION_CONFIG_RESULTS.md`](GENERATION_CONFIG_RESULTS.md), finding d'origine :
+[`FINDING_GENERATION_CONFIG.md`](FINDING_GENERATION_CONFIG.md).
+
+**CLI** : découverte automatique à côté du checkpoint (**un** hop de symlink) ; `--gen-config
+<FICHIER>` force le chemin (un fichier, jamais un répertoire) ; `--no-gen-config` restaure le
+comportement d'avant le chantier ; `--selftest-gencfg <fixture>` rejoue le gate GC1 **sans GPU**.
+
+⚠ **Pas de repli silencieux** : un runner qui ne trouve pas sa politique **refuse de tourner**.
+C'est pourquoi `70_u8_corrupt.py` (contre-test D11), qui écrit son checkpoint à plat, dépose
+désormais la politique à côté de lui.
+
 ### 2.4 Briques de recherche (au-delà de Gemma)
 
 - **Socle moteur modulaire** (`engine.zig` + `gemma4_engine_e1/e2`) : moteur de decode + briques
@@ -291,6 +324,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `60`–`61` | **Batching** : constitution des oracles par lane (N × script 49) + sweep B protocolaire (attente GPU libre, cause de FAIL logguée) |
 | `62`–`70` | **W4-J2 (12B Unified)** : contrat sur pièce (62), export dq streaming + selfchecks (63), oracles par gate embed/sliding/full/chaîne/prefill (64-68), oracle décode + teacher-forcing **`--compute-fp32`** (69 — hooks par-module, l'instrument officiel des gates argmax), corruption non-vacuité (70) |
 | `30`–`33`, `45`, `spike_hadq`, `measure_k_distribution`, `test_kv_quant_generation` | Piste **TurboQuant** (quantization V, Hadamard) |
+| `71` | **Politique de décodage** : producteur de la fixture du gate GC1 — calcule `expect_tok` avec le **vrai** `SuppressTokensLogitsProcessor` de transformers sur le vecteur complet (262 144 logits), plus le sidecar des cas de validation et de découverte. C'est ce qui rend la claim C2 falsifiable au lieu de postulée |
+| `gc11_claim_scope.sh` | **Gate GC11** : vérifie que tout document vivant énonçant « == HF » porte la portée « argmax sur les logits bruts ». `--self-test` fournit la contre-preuve (un document nu, examiné seul, doit faire échouer le gate) |
 | `smoke.sh` | Build-only des runners clés (toolchain OK sans weights ni RAM) |
 | `regen_fixtures.sh`, `sweep_perf.sh`, `g2_3_sweep.sh` | Régénération des fixtures ; sweep de perf (CHUNK) ; orchestration du sweep G2.3 (one-hot par famille) |
 
@@ -301,6 +336,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | Runner | Rôle |
 |---|---|
 | `engine.zig` | Moteur de decode **chunké** partagé (stages compilés, cache threadé step-à-step) |
+| `gencfg.zig` | **Politique de décodage** `generation_config.json` (host-side) : découverte 1-hop, parsing, 6 validations, `isSuppressed`/`isEos`/`select`. Porte aussi `TOP_K` — déclaration **unique** de la constante 5, qui existait en trois copies. N'entre **pas** dans le graphe (GC0 : HLO byte-identique) |
 | `gemma4_prefill.zig` | Prefill 35 couches |
 | `gemma4_logits.zig` | Head + logits |
 | `gemma4_decode1..4.zig`, `gemma4_decprim.zig` | Decode incrémental (pilote sliding → full → e2e → boucle) |
@@ -629,7 +665,25 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
     rapporter `SEEN=0` (échouer visiblement).
 23. **En mode libre le runner early-stop à l'EOT** : pour capturer un free-run complet de
     N tokens (`--out-ids`), passer par `--oracle <fixture>` (limite = fed.len) — sinon
-    « Paris »+EOT s'arrête à 2 tokens.
+    « Paris »+EOT s'arrête à 2 tokens. ⚠ Depuis le 29 juil il y a **trois** EOS `[1, 106, 50]`,
+    pas un seul : le log de fin **nomme** l'id qui a arrêté.
+24. **`> log 2>&1` ENTRELACE stdout et stderr et TRONQUE les lignes que les gates grep**
+    (29 juil, gate GC2). La ligne `GENCFG: … suppress=[…]` était comptée **0 fois** alors qu'elle
+    avait bien été émise : le fichier n'en gardait que la fin, la réponse du modèle (stdout) ayant
+    écrasé son début. Les deux writers du runner sont corrects (fix R1 du mode REPL) ; c'est la
+    **capture** qui mélange. **Tout gate qui grep un log sépare les flux** : `> out 2> err`.
+25. **Un détecteur qui cherche une valeur dans TOUT un log peut matcher la ligne de
+    CONFIGURATION qui la mentionne** (29 juil, dépouillement de GC3). Chercher `258882` dans le
+    fichier entier matchait `suppress=[258883,258882]` : le comptage rendait **20/20 « présent »**
+    — un contrôle qui ne pouvait pas échouer. Restreindre le détecteur à la ligne qui porte la
+    donnée (`generated = {…}`), puis le **contre-prouver** sur une valeur dont on sait qu'elle est
+    présente.
+26. **`realpath` est interdit dans la découverte du checkpoint — `normpath` seulement**
+    (29 juil, re-mordu dans `70_u8_corrupt.py` alors que le commentaire deux lignes plus haut
+    l'interdisait). `weights_12b/` ne contient que des symlinks ; le fichier vit dans le SNAPSHOT
+    pointé, et un `realpath` complet atterrit dans `blobs/<sha256>`, qui ne le contient pas. **Un
+    seul hop**, et la cible peut être **relative** (cache HF) donc à résoudre contre
+    `dirname(ckpt)`.
 
 ---
 
@@ -637,7 +691,22 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
 
 **Limites assumées** (baseline de recherche, pas moteur de prod) :
 
-- Mono-séquence : pas de batching, pas de sampling (greedy only), pas de fast-prefill.
+- **Le sampling n'est pas implémenté** — et c'est une limite plus forte qu'il n'y paraît :
+  `do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0` est la configuration **NOMINALE**
+  publiée par Google pour ce modèle. Le greedy n'est donc pas « le cas simple » du modèle, c'est
+  un **régime que Google ne recommande pas**. Depuis le 29 juil, le portage applique 2 des 8 clés
+  de `generation_config.json` (suppression + EOS) et **nomme les 6 autres** dans son log.
+- **Périmètre E2B non couvert par la politique de décodage** : les runners E2B ne sortent pas les
+  logits de leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a de toute façon **pas** de
+  `suppress_tokens` — y coder `258882` en dur serait faux. Pour eux, « reproduit ce que
+  `generate()` produirait » reste **FAUX**.
+- **L'équivalence de l'ARRÊT entre le runner et HF n'est prouvée par aucun gate** : GC8 n'a
+  rencontré aucun EOS dans sa fenêtre de 60 tokens. L'arrêt multi-EOS est prouvé côté runner
+  (GC6), son équivalence avec HF ne l'est pas.
+- **La trajectoire libre du 12B est BISTABLE** sur au moins un prompt (bifurcation unique @47,
+  11/20 vs 9/20) : un gate de fidélité position-par-position **doit être teacher-forcé**, jamais
+  posé sur une génération libre. Cf [`FINDING_NONDETERMINISME_TRAJECTOIRE.md`](FINDING_NONDETERMINISME_TRAJECTOIRE.md).
+- Mono-séquence : pas de batching sur le 12B, pas de fast-prefill.
 - Multimodal (vision/audio) hors scope — chemin texte uniquement.
 - `L_MAX` plafonné à 1024 sur CPU (le compile XLA-CPU à k=2048 dépasse l'hôte ~23 Go) ; la fenêtre 512
   est quand même franchie ~2×. Sur GPU la limite est différente (VRAM du graphe).

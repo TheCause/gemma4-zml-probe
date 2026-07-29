@@ -138,6 +138,26 @@ Each runner prints `max_abs` / `mean_abs` vs the oracle and a PASS/FAIL verdict.
 # stdout: "Paris"
 ```
 
+**Decoding policy (`generation_config.json`)** — since 29 Jul 2026, the 12B runner applies the
+model's declared `suppress_tokens` and its **three** `eos_token_id`, host-side:
+
+```bash
+# Discovered automatically next to the checkpoint (ONE symlink hop). Every run logs what it
+# applies — and what it ignores:
+#   GENCFG: <path> suppress=[258883,258882] eos=[1,106,50] ignored=[do_sample,top_k,top_p,...]
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tokenizer.json> --prompt "..." --max-tokens 200
+
+--gen-config <FILE>      # force the file (a FILE, never a directory)
+--no-gen-config          # restore pre-29-Jul behaviour (the GC4 counter-test instrument)
+--selftest-gencfg <fix>  # replay gate GC1 — host-only, no GPU
+```
+
+⚠ **Only 2 of the 8 keys are applied.** `do_sample`, `top_k`, `top_p` and `temperature` are
+**not** — and `do_sample: true` is the model's *nominal* configuration, so greedy is a regime
+Google does not recommend. There is **no silent fallback**: a runner that cannot find its policy
+refuses to start. Details, figures and known debt:
+[`docs/GENERATION_CONFIG_RESULTS.md`](docs/GENERATION_CONFIG_RESULTS.md).
+
 **4-bit weights (W4)** — quantize E2B to w4a16, then decode it on GPU:
 
 ```bash
