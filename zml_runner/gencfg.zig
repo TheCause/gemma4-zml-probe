@@ -62,7 +62,15 @@ pub const GenCfg = struct {
     /// Ce n'est pas une commodité mais l'instrument du contre-test de non-vacuité GC4(a) :
     /// même binaire, une donnée de moins.
     enabled: bool,
-    /// Trié, dédupliqué, borné [0, vocab_size).
+    /// Dédupliqué, borné [0, vocab_size), et DANS L'ORDRE DU FICHIER.
+    ///
+    /// ⚠ PAS trié, contrairement à ce qu'annonçait la spec §4.2bis — parce que la §4.1 de la
+    /// MÊME spec pré-enregistre la chaîne de log littérale `suppress=[258883,258882]` (l'ordre
+    /// que Google publie), et que GC2 est un gate à règle d'arrêt DURE qui grep cette chaîne.
+    /// Trier produisait `[258882,258883]` : le même ensemble, un autre rendu, et un gate qui
+    /// FAIL à tort. La contradiction a été révélée par le log réel du run GC0. Le tri n'avait
+    /// aucune utilité fonctionnelle (`isSuppressed` est linéaire sur 2 éléments) ; il ne servait
+    /// qu'à la déduplication, qui se fait très bien en préservant l'ordre d'apparition.
     suppress: []const u32,
     /// Non vide, et contient `eot_id`.
     eos: []const u32,
@@ -164,29 +172,31 @@ pub fn fromLists(
         return error.EotNotInEosList;
     }
 
-    // — suppress : bornes, puis tri, puis déduplication. Les doublons n'ont aucun effet sur HF
-    //   mais fausseraient la garde `len + 1 > TOP_K` ci-dessous, donc ils sont retirés AVANT elle.
+    // — suppress : bornes, puis déduplication À ORDRE PRÉSERVÉ (cf le commentaire du champ
+    //   `suppress` : la chaîne de log est pré-enregistrée dans l'ordre du fichier). Les doublons
+    //   n'ont aucun effet sur HF mais fausseraient la garde `len + 1 > TOP_K` ci-dessous, donc ils
+    //   sont retirés AVANT elle.
     for (suppress_raw) |s| {
         if (s >= opts.vocab_size) {
             log.err("GENCFG: {s} — id de suppression {d} hors vocab [0,{d}) : HF l'ignorerait en silence, nous le refusons", .{ path, s, opts.vocab_size });
             return error.SuppressIdOutOfRange;
         }
     }
-    const sorted = try allocator.dupe(u32, suppress_raw);
-    defer allocator.free(sorted);
-    std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
-
-    var dedup = try allocator.alloc(u32, sorted.len);
+    var dedup = try allocator.alloc(u32, suppress_raw.len);
     errdefer allocator.free(dedup);
     var n: usize = 0;
-    for (sorted) |s| {
-        if (n == 0 or dedup[n - 1] != s) {
+    for (suppress_raw) |s| {
+        var seen = false;
+        for (dedup[0..n]) |d| {
+            if (d == s) seen = true;
+        }
+        if (!seen) {
             dedup[n] = s;
             n += 1;
         }
     }
-    if (n != sorted.len) {
-        log.warn("GENCFG: {s} — {d} doublon(s) dans suppress_tokens, dédupliqué(s) ({d} → {d})", .{ path, sorted.len - n, sorted.len, n });
+    if (n != suppress_raw.len) {
+        log.warn("GENCFG: {s} — {d} doublon(s) dans suppress_tokens, dédupliqué(s) ({d} → {d})", .{ path, suppress_raw.len - n, suppress_raw.len, n });
     }
     dedup = try allocator.realloc(dedup, n);
 
