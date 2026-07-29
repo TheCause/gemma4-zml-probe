@@ -113,10 +113,72 @@ def mode_comparaison(logits, out):
     return "indices" if (distincts or n <= SEUIL_STABLE) else "equivalence"
 
 
+# --- Bras distributionnel (S2-D) ---------------------------------------------------------------
+# ⚠ k = 10 IDS DISTINCTS, jamais des bins agrégés : une permutation d'ids À L'INTÉRIEUR d'un bin
+# serait invisible au chi2, or c'est le bug le plus probable d'un sampler (rendre l'indice trié au
+# lieu de l'id de vocabulaire). Probabilités volontairement NON uniformes mais toutes >= 5 % :
+# effectifs attendus entre 500 et 1500 à n = 10 000, loin du régime des petits effectifs.
+PROBAS_CIBLES = [0.15, 0.13, 0.12, 0.11, 0.10, 0.10, 0.09, 0.08, 0.07, 0.05]
+IDS_TIRAGE = [7, 101, 1009, 5743, 11814, 40009, 100003, 200011, 250007, 262143]
+
+
+def bras_tirage():
+    """Un vecteur de taille RÉELLE dont seuls 10 ids portent une masse connue."""
+    lg = np.full(VOCAB_REEL, -60.0, dtype=np.float32)  # e^-60 ~ 0 face aux 10 retenus
+    for i, pr in zip(IDS_TIRAGE, PROBAS_CIBLES):
+        lg[i] = float(np.log(pr))
+    return lg
+
+
+def chi2_rapport(counts, out_json):
+    """Calcul du chi2 côté PYTHON, contre une théorique torch — implémentation INDÉPENDANTE de
+    celle du runner. C'est tout l'intérêt : si les deux partageaient le code, un biais commun
+    passerait."""
+    lg = torch.tensor(bras_tirage(), dtype=torch.float32)
+    probs = torch.softmax(lg, dim=-1)
+    p_th = np.array([float(probs[i]) for i in IDS_TIRAGE], dtype=np.float64)
+    p_th = p_th / p_th.sum()
+    n = int(counts.sum())
+    exp = n * p_th
+    chi2 = float(((counts - exp) ** 2 / exp).sum())
+    # valeur critique chi2(df=9, alpha=0.01), table (scipy non garanti sur les machines du projet)
+    crit = 21.665994
+    verdict = "PASS" if chi2 <= crit else "FAIL"
+    rap = dict(n=n, k=len(IDS_TIRAGE), df=len(IDS_TIRAGE) - 1, alpha=0.01,
+               chi2=round(chi2, 4), critique=crit, verdict=verdict,
+               ids=IDS_TIRAGE, counts=[int(c) for c in counts],
+               p_theorique=[round(float(x), 6) for x in p_th],
+               attendus=[round(float(x), 2) for x in exp])
+    with open(out_json, "w") as fh:
+        json.dump(rap, fh, indent=2)
+    return rap
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default="fixtures")
+    ap.add_argument("--chi2", metavar="DRAWS_SAFETENSORS",
+                    help="S2-D : calcule le chi2 sur un histogramme produit par --selftest-draw")
+    ap.add_argument("--biais-half-split", type=float, default=0.0,
+                    help="non-vacuité S2-D : injecte +b sur k/2 catégories et -b sur l'autre "
+                         "moitié (lambda = n*b^2, INDÉPENDANT de k) — doit faire FAIL")
     args = ap.parse_args()
+
+    if args.chi2:
+        from safetensors.numpy import load_file
+        counts = load_file(args.chi2)["counts"].astype(np.float64)
+        if args.biais_half_split:
+            b, k = args.biais_half_split, len(counts)
+            tot = counts.sum()
+            counts = counts * np.array([1 + b] * (k // 2) + [1 - b] * (k - k // 2))
+            counts = counts * (tot / counts.sum())
+            print(f"⚠ biais half-split de {b:.0%} INJECTÉ (preuve de non-vacuité)")
+        rap = chi2_rapport(counts, args.chi2 + ".chi2.json")
+        print(f"S2-D chi2 = {rap['chi2']} (critique {rap['critique']}, df={rap['df']}, "
+              f"alpha={rap['alpha']}, n={rap['n']}) -> {rap['verdict']}")
+        for i, c, e in zip(rap["ids"], rap["counts"], rap["attendus"]):
+            print(f"   id {i:6d} : observé {c:5d}  attendu {e:8.2f}")
+        return
 
     ver = tuple(int(v) for v in transformers.__version__.split(".")[:3])
     assert ver >= TRANSFORMERS_MIN, f"transformers {transformers.__version__} < 5.14.1"
@@ -156,6 +218,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, "s2_cases.safetensors")
     save_file({
+        "draw_logits": bras_tirage(),
         "logits_in": np.concatenate(logits_all),
         "mask_expected": np.concatenate(mask_all),
         "offsets": np.asarray(offsets, dtype=np.int64),

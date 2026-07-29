@@ -148,6 +148,8 @@ const Args = struct {
     selftest_gather: ?[]const u8 = null,
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
+    selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
+    draws: usize = 10000,
     // Sampling phase 2 — défauts NEUTRES : sans eux, le chemin B n'est pas armé et le code
     // d'avant le chantier est strictement inchangé.
     temperature: f32 = 1.0,
@@ -180,6 +182,7 @@ const usage =
     "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
+    "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -280,6 +283,14 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.selftest_sampling = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-draw")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            args.selftest_draw = process_args[i];
+        } else if (std.mem.eql(u8, a, "--draws")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            args.draws = std.fmt.parseInt(usize, process_args[i], 10) catch return error.InvalidArgument;
         } else if (std.mem.eql(u8, a, "--temperature")) {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
@@ -1061,6 +1072,70 @@ fn selftestSampling(allocator: std.mem.Allocator, io: std.Io, fixture_path: []co
 }
 
 // ============================================================================================
+// S2-D — tirage multinomial sur des logits FIGÉS en fixture (spec phase 2, plan Task 5).
+// Écrit un histogramme `counts` que `scripts/72_sampling_fixture.py --chi2` confronte à une
+// théorique **torch** : deux implémentations INDÉPENDANTES. Si les deux partageaient le code,
+// un biais commun passerait le test sans être vu.
+// ============================================================================================
+fn selftestDraw(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8, draws: usize, seed: ?u64) !void {
+    const s = seed orelse {
+        log.err("--selftest-draw exige --seed : un tirage non reproductible n'est pas auditable (spec §5)", .{});
+        return error.SeedRequired;
+    };
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+    const lg = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "draw_logits");
+    defer allocator.free(lg);
+
+    const counts = try allocator.alloc(i64, lg.len);
+    defer allocator.free(counts);
+    @memset(counts, 0);
+
+    var prng = std.Random.DefaultPrng.init(s);
+    const rnd = prng.random();
+    var n_filtered_drawn: usize = 0;
+    for (0..draws) |_| {
+        const tok = sampling.sample(lg, rnd);
+        if (lg[tok] == sampling.FILTER) n_filtered_drawn += 1;
+        counts[tok] += 1;
+    }
+    if (n_filtered_drawn != 0) {
+        log.err("S2-D : {d} tirages ont rendu un token FILTRÉ — invariant du sampler violé", .{n_filtered_drawn});
+        return error.SampledFilteredToken;
+    }
+
+    // n'écrire que les ids réellement tirés (le vocab entier ferait 2 Mo pour 10 valeurs utiles)
+    var nz: usize = 0;
+    for (counts) |c| {
+        if (c != 0) nz += 1;
+    }
+    const out = try std.fmt.allocPrint(allocator, "{s}.draws.safetensors", .{fixture_path});
+    defer allocator.free(out);
+    const packed_counts = try allocator.alloc(i64, nz);
+    defer allocator.free(packed_counts);
+    var k: usize = 0;
+    for (counts) |c| {
+        if (c != 0) {
+            packed_counts[k] = c;
+            k += 1;
+        }
+    }
+    // Même patron d'écriture que `writeIdsSafetensors` (:1484) — on ne réinvente pas un writer.
+    const header = try std.fmt.allocPrint(allocator, "{{\"counts\":{{\"dtype\":\"I64\",\"shape\":[{d}],\"data_offsets\":[0,{d}]}}}}", .{ nz, nz * 8 });
+    defer allocator.free(header);
+    var len_le: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len_le, header.len, .little);
+    const f = try std.Io.Dir.createFile(.cwd(), io, out, .{});
+    defer f.close(io);
+    try f.writePositionalAll(io, &len_le, 0);
+    try f.writePositionalAll(io, header, 8);
+    try f.writePositionalAll(io, std.mem.sliceAsBytes(packed_counts), 8 + header.len);
+    log.info("SELFTEST DRAW — {d} tirages, seed {d}, {d} ids distincts touchés, 0 token filtré -> {s}", .{ draws, s, nz, out });
+}
+
+// ============================================================================================
 // 12B (plan Task 8 point 2) : `Tabs` (embed_tokens_per_layer, L3 E2B) est SUPPRIMÉ — la clé
 // `embed_tokens_per_layer.weight` N'EXISTE PAS au checkpoint 12B (ple_dim=0), createTensor
 // crasherait (précédent w4.zig:56-58). Le selftest-gather est adapté EMB-ONLY pour la même
@@ -1443,7 +1518,7 @@ pub fn run(init: std.process.Init) !void {
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
         args.selftest_gather != null or args.selftest_gencfg != null or
-        args.selftest_sampling != null))
+        args.selftest_sampling != null or args.selftest_draw != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -1467,6 +1542,13 @@ pub fn run(init: std.process.Init) !void {
     // exécutable sans GPU (spec phase 2, objectif O1 : itérer en secondes). ===
     if (args.selftest_sampling) |fixture_path| {
         try selftestSampling(allocator, io, fixture_path);
+        return;
+    }
+
+    // === S2-D : tirage sur logits FIGÉS. Host-only — aucun GPU, aucun modèle : c'est la
+    // distribution du sampler qu'on teste, pas celle du modèle. ===
+    if (args.selftest_draw) |fixture_path| {
+        try selftestDraw(allocator, io, fixture_path, args.draws, args.seed);
         return;
     }
 
