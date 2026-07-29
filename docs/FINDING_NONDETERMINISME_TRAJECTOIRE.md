@@ -23,7 +23,8 @@ Prompt : `"Tell me the story of the number zero, from its invention to modern ma
 `--max-tokens 200`. Binaire buildé le 26 juil ; source `zml_runner/` inchangée depuis
 (`git log -1 -- zml_runner/` = 26 juil 21:07 UTC ; md5 local ≡ VM sur les 4 fichiers).
 
-**Trois runs sur quatre donnent `5743` ; un seul donne `27069`.** Quand la trajectoire bascule à la
+**Trois runs sur quatre donnent `5743` ; un seul donne `27069`.** (Confirmé et quantifié
+en §7 : **11/20 vs 9/20** sur une campagne dédiée.) Quand la trajectoire bascule à la
 position 47, **149 des 200 ids suivants changent** — l'erreur ne se rattrape pas, elle cascade
 (greedy).
 
@@ -102,11 +103,49 @@ qui en découlait.
 jour où ils l'ont mesuré. Ce qui est en cause est leur **reproductibilité**, qui n'avait jamais été
 exercée : rejouer un gate d'équivalence d'ids en roue libre est un tirage, pas une vérification.
 
-## 7. Quantification (en cours)
+## 7. Quantification — N = 20 runs (29 juil, MESURÉE)
 
-N = 20 runs identiques, config nominale, aucun flag d'observation. À publier : taux de bifurcation
-@47 avec intervalle, et **recensement des autres positions instables** sur les 200 (le taux de 1/4
-ci-dessus est une observation sur 4 runs, **pas** une mesure).
+20 runs identiques, config nominale, aucun flag d'observation, 200 tokens chacun.
+
+### 7.1 Il n'existe que DEUX trajectoires
+
+| variante | runs | id @47 | `258882` @57 |
+|---|---|---|---|
+| **A** | **11/20** | `5743 ▁zero` | **présent** |
+| **B** | **9/20** | `27069 ▁humanity` | absent (`236775`) |
+
+**Aucune troisième variante.** Le système n'est pas « bruité » : il est **bistable**.
+
+### 7.2 Un seul point de bifurcation
+
+- **1ʳᵉ divergence : @47 pour 9 runs sur 9** — aucune autre position ne joue jamais le rôle de
+  bifurcation primaire.
+- **149 positions instables sur 200** — mais **toutes en aval** de @47 : ce sont les conséquences
+  de l'unique basculement, pas des instabilités indépendantes.
+- **Les positions 0 à 46 sont parfaitement déterministes** sur les 20 runs.
+
+⇒ Le forward est **stable partout sauf en un point**, celui où la marge (0,004587) tombe sous le
+seuil de reproductibilité de l'exécution GPU. Taux **45 %** (9/20) — un quasi pile-ou-face, ce qui
+est exactement la signature d'un tie : la marge relative y vaut ~1,8e-4 (0,0046 sur des logits ~25).
+
+### 7.3 Ligne de base pour le gate de mordant (GC3)
+
+| id | présence AVANT correction |
+|---|---|
+| **`258882`** | **11/20 runs**, **toujours** à la position 57 |
+| `258883` | **0/20** |
+| `1` (EOS) | **0/20** |
+| `50` (EOS) | **0/20** |
+| `106` (EOT) | **0/20** |
+
+**C'est le `k/N` du nouveau GC3** : après correction, `258882` doit apparaître dans **0/20**. Sous
+l'hypothèse nulle « la politique ne fait rien », observer 0/20 alors que la base est 11/20 a une
+probabilité de `(9/20)^20 ≈ 6·10⁻⁸` — le gate est donc **très discriminant**, tout en étant
+**insensible à la bifurcation**.
+
+⚠ Corollaire à ne pas manquer : le mordant n'est atteignable que dans **55 %** des runs. Un gate de
+mordant à **N = 1** aurait eu **45 % de chances de ne rien voir** — et aurait été lu comme « la
+suppression ne mord pas », ou pire, comme un PASS silencieux.
 
 ## 8. Artefacts
 
