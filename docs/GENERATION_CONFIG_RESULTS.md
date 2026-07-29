@@ -57,7 +57,18 @@ type `Top5`, le `topK` in-graph, la boucle de lecture).
 | **GC3** — mordant, critère **statistique** | **PASS** | AVANT (GC12) : `258882` dans **11/20** runs · APRÈS : **0/20** · **p = 1,159e-07** sous H0 · `n_suppress_hits ≥ 1` dans **12/20** · concordance mordant ↔ remplaçant `11814` : **12/12, zéro discordance** |
 | **GC5** — l'oracle ne partage plus l'angle mort | **PASS** | deux runs du **même** script (`script_md5 = 8605874b39b5449bb98af064fbcb5567`, identique des deux côtés), **un seul** flag de différence, tous deux `--compute-fp32`. Branche **nue** : `top5_per_pos[57].ids[0] = 258882`, top-5 `[258882, 11814, 3495, 1548, 13186]` et valeurs `[19.1645, 18.9147, 18.6035, 18.0667, 17.9584]` — **reproduction exacte** des chiffres publiés le 27 juil. Branche **politique** : `top5_policy_per_pos[57].ids[0] = 11814`, `top5_per_pos[57]` **inchangé** à `258882`. `n_match` : **199 → exactement 198**, mismatches `@47 (27069 vs 5743)` et `@57 (11814 vs 258882)` |
 | **GC7** — équivalence runner ↔ oracle, politique des **deux** côtés | **PASS** (au-delà du critère) | témoin produit APRÈS, teacher-forcé fp32. **Variante A** (@47=5743, suppression mordue) : `n_match` **199/200**, **unique mismatch @47** (27069 vs 5743, marge 0,004536), `n_bites=1` — exactement le critère pré-enregistré. **Variante B** (@47=27069) : `n_match` **200/200, ZÉRO mismatch**, `n_bites=0`. `script_md5` identique, transformers 5.14.1 |
-| GC4, GC6, GC8, GC10, GC11 | **en cours / non mesurés** | — |
+| **GC4** — non-vacuité, 3 sous-tests | **PASS** | **(a)** `--no-gen-config`, N=20 : `258882` **réapparaît dans 13/20** runs (ligne de base 11/20 — dans la fluctuation binomiale attendue), log `GENCFG: DÉSACTIVÉ` présent · **(b)** `suppress_tokens: []` : `258882` dans **5/5**, les 5 runs **vont au bout** (`max-tokens (200)`), log `suppress=[] (aucune suppression)` · **(c)** 5 ids : `error.SuppressListTooLongForTopK`, avec **0 compile** — le refus est bien un *fail-fast* AVANT le GPU |
+| **GC6** — multi-EOS exercé en run réel | **PASS** | arrêt à **exactement 35 tokens générés** = la position mesurée (`496` au 35ᵉ, 20/20 runs GC3) ; `stop_reason` **nomme** l'id : `early-stop EOS id=496 (eos={1,106,50,496})` ; token conservé dans la sortie (sémantique HF) ; contre-test acquis : sans le fichier, **20/20** runs vont à 200 |
+| **GC10** — `--repl` applique la politique | **PASS** | ligne `GENCFG:` de découverte présente ; **4 générations** ; **chaque prompt affiche « a mordu 1 fois »** — sans remise à zéro on lirait 1, 2, 3, 4 : le compteur est bien réinitialisé par prompt (R12) ; **0** occurrence de `chosen=258882` |
+| **GC11** — passe de nuance sur la claim | **PASS** | **8/8** documents de catégorie (i) portent « argmax sur les logits bruts ». Gate **scripté** (`scripts/gc11_claim_scope.sh`), contre-preuve exercée **dans les deux sens** |
+| GC8 | **en cours** | test décisif de C1 — coût **mesuré** 69,75 s/token en fp32 (vs 28,57 en bf16), n=60 ≈ 1 h 15 |
+
+**Lecture de GC10.** Le critère pré-enregistré disait « mêmes ids » — un critère
+position-par-position sur trajectoire **libre**, c'est-à-dire exactement ce que le finding bistable
+interdit. Il a été converti au moment de l'exécuter : ce qui est vérifié est la présence de la
+ligne, l'absence de tout `chosen=258882`, et la **remise à zéro du compteur**, trois propriétés
+robustes à la bistabilité. La remise à zéro est prouvée par une observation, pas par lecture du
+code : quatre prompts mordant chacun une fois, jamais cumulés.
 
 **Lecture de GC7 — pourquoi deux variantes.** Le critère pré-enregistré (« `n_match == n_total − 1`,
 unique mismatch `@47` ») suppose **implicitement** que le témoin est de la variante A. Le témoin est
