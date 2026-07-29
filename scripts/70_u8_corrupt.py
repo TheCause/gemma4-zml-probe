@@ -32,6 +32,30 @@ KEY = "model.language_model.layers.24.mlp.gate_proj.weight_scale"
 # Témoin non-touché : le packé du MÊME module (voisin immédiat dans le fichier).
 WITNESS = "model.language_model.layers.24.mlp.gate_proj.weight_packed"
 FACTOR = 100.0
+CONFIG_NAME = "generation_config.json"
+
+
+def find_generation_config(src: str) -> str | None:
+    """Localise le `generation_config.json` du checkpoint SOURCE — UN seul hop, `realpath`
+    interdit (même règle que 63_u_dequant_export.py:70-71 et zml_runner/gencfg.zig).
+
+    `weights_12b/` ne contient que des symlinks ; le fichier vit dans le SNAPSHOT pointé. Un
+    `realpath` complet atterrirait dans `blobs/<sha256>`, qui ne le contient pas non plus.
+    """
+    direct = os.path.join(os.path.dirname(src), CONFIG_NAME)
+    if os.path.exists(direct):
+        return direct
+    if os.path.islink(src):
+        target = os.readlink(src)
+        if not os.path.isabs(target):  # cache HF : cibles relatives (mesuré)
+            target = os.path.join(os.path.dirname(src), target)
+        # ⚠ `os.path.normpath`, PAS `os.path.realpath` : realpath résout TOUS les liens et
+        # atterrit dans `blobs/<sha256>`, qui ne contient pas le fichier. Erreur commise ici même
+        # à la première écriture, et attrapée par un test sur la VM (la découverte rendait None).
+        hop = os.path.join(os.path.dirname(os.path.normpath(target)), CONFIG_NAME)
+        if os.path.exists(hop):
+            return hop
+    return None
 
 
 def main() -> None:
@@ -84,6 +108,33 @@ def main() -> None:
     print(f"mean|scale| : {mean_before:.6f} -> {mean_after:.4f} (ratio {ratio:.2f}, attendu ~{FACTOR:g})", flush=True)
     assert 95.0 < ratio < 105.0, f"ratio {ratio} hors [95,105]"
     print(f"PASS : {DST} écrit ({KEY} x{FACTOR:g} in-place ; source intacte, témoin bit-égal)", flush=True)
+
+    # --- Politique de décodage (chantier `generation_config`, 29 juil 2026) ---
+    # ⚠ LE PROBLÈME QUE CECI RÈGLE : depuis ce chantier, le runner REFUSE de tourner s'il ne
+    # trouve pas sa politique (pas de repli silencieux). Or `DST` est écrit À PLAT, sans snapshot
+    # ni symlink : les 4 étapes de la découverte échouent, et D11 — un gate historique — devient
+    # inexécutable. Il mourrait EN SILENCE au prochain usage, faute d'être lancé souvent.
+    # On dépose donc la politique du checkpoint SOURCE à côté du checkpoint corrompu : la
+    # découverte nominale (étape 2, `dirname(ckpt)/generation_config.json`) la trouve, et le
+    # contre-test compare bien deux runs à politique IDENTIQUE — ce qu'il doit faire, puisqu'il
+    # porte sur les POIDS et non sur la politique.
+    src_cfg = find_generation_config(SRC)
+    dst_cfg = os.path.join(os.path.dirname(DST), CONFIG_NAME)
+    if src_cfg is None:
+        print(f"⚠ {CONFIG_NAME} INTROUVABLE depuis {SRC} — le runner refusera de tourner sur "
+              f"{DST}. Lancer D11 avec --gen-config <chemin explicite>.", flush=True)
+    else:
+        shutil.copyfile(src_cfg, dst_cfg)
+        with open(dst_cfg) as fh:
+            keys = sorted(json.load(fh).keys())
+        print(f"politique copiée : {src_cfg} -> {dst_cfg} (clés : {', '.join(keys)})", flush=True)
+
+    print("\nD11 — commande de contre-test (le --gen-config est EXPLICITE : il reste juste même "
+          "si le fichier ci-dessus disparaît) :", flush=True)
+    print(f"  gemma4_g12auto {DST} <tokenizer.json> \\\n"
+          f"    --prompt \"<prompt du témoin>\" --oracle <fixture> \\\n"
+          f"    --gen-config {dst_cfg if src_cfg else '<dq>/' + CONFIG_NAME}", flush=True)
+    print("  ⚠ --gen-config prend un CHEMIN DE FICHIER, jamais un répertoire.", flush=True)
 
 
 if __name__ == "__main__":
