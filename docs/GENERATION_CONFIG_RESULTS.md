@@ -1,8 +1,8 @@
 # `generation_config` — résultats
 
-> **Statut : CHANTIER EN COURS.** Gates verts : GC0, GC1, GC2, GC3, GC12 (Task 0). En attente :
-> GC4, GC5, GC6, GC7, GC8, GC10, GC11. Ce document n'est PAS un rapport de clôture — tout ce qui
-> n'y porte pas de chiffre n'a pas été mesuré.
+> **Statut : LES 12 GATES SONT VERTS** — GC0, GC1, GC2, GC3, GC4, GC5, GC6, GC7, GC8, GC10, GC11,
+> plus GC9 et GC12 rendus en Task 0. Chaque verdict ci-dessous porte le chiffre qui le prouve ;
+> ce qui n'a pas été mesuré est écrit comme tel (§4 « ce que GC8 ne prouve pas », §7).
 >
 > Spec : `docs/superpowers/specs/2026-07-28-generation-config-design.md` (rév. 3) ·
 > Plan : `docs/superpowers/plans/2026-07-29-generation-config.md` ·
@@ -61,7 +61,7 @@ type `Top5`, le `topK` in-graph, la boucle de lecture).
 | **GC6** — multi-EOS exercé en run réel | **PASS** | arrêt à **exactement 35 tokens générés** = la position mesurée (`496` au 35ᵉ, 20/20 runs GC3) ; `stop_reason` **nomme** l'id : `early-stop EOS id=496 (eos={1,106,50,496})` ; token conservé dans la sortie (sémantique HF) ; contre-test acquis : sans le fichier, **20/20** runs vont à 200 |
 | **GC10** — `--repl` applique la politique | **PASS** | ligne `GENCFG:` de découverte présente ; **4 générations** ; **chaque prompt affiche « a mordu 1 fois »** — sans remise à zéro on lirait 1, 2, 3, 4 : le compteur est bien réinitialisé par prompt (R12) ; **0** occurrence de `chosen=258882` |
 | **GC11** — passe de nuance sur la claim | **PASS** | **8/8** documents de catégorie (i) portent « argmax sur les logits bruts ». Gate **scripté** (`scripts/gc11_claim_scope.sh`), contre-preuve exercée **dans les deux sens** |
-| GC8 | **en cours** | test décisif de C1 — coût **mesuré** 69,75 s/token en fp32 (vs 28,57 en bf16), n=60 ≈ 1 h 15 |
+| **GC8** — test décisif de C1 | **PASS** (avec réserves écrites) | décodage HF greedy fp32, même politique, n=60. **Variante B : 60/60 identiques, ZÉRO divergence.** Variante A : 49/60, première divergence **@47** (`5743` vs `27069`) puis cascade greedy. HF y calcule `27069` avec une marge de **0,004589** — la même que celle du finding bistable (0,004587) et de GC7 (0,004536) |
 
 **Lecture de GC10.** Le critère pré-enregistré disait « mêmes ids » — un critère
 position-par-position sur trajectoire **libre**, c'est-à-dire exactement ce que le finding bistable
@@ -85,6 +85,30 @@ d'instabilité numérique, le forward est hors de cause »).
 franchie : l'instrument n'est pas en cause, et l'écart mesuré sur la branche politique est bien
 imputable à la politique. Le mismatch `@47` n'appartient pas à ce chantier — c'est le point de
 bifurcation du finding bistable, et l'oracle HF y calcule `27069`, c'est-à-dire la **variante B**.
+
+### Verdict sur C1, et ce que GC8 ne prouve PAS
+
+**C1 est ÉNONÇABLE** : sur ce prompt, la trajectoire libre du runner corrigé est **exactement**
+celle d'un décodage HF greedy appliquant la même politique — 60/60 positions, sans une seule
+divergence — **dès lors que le runner tombe du côté que HF calcule lui-même** à la position 47. La
+divergence de la variante A n'est pas un écart de forward : c'est le point de bifurcation bistable,
+où HF a lui aussi une marge de 0,0046, soit ~5× le bruit d'un logit. Elle est **au-dessus** du seuil
+de kill (1,873e-3) — ce seuil discrimine un écart d'implémentation, pas un tie numérique, et c'est
+GC9/GC12 qui ont instruit celui-ci.
+
+Trois réserves, qui doivent rester écrites :
+
+1. **L'arrêt n'a PAS été exercé.** `stopped_at_gen = None` : aucun EOS n'apparaît dans les 60
+   premiers tokens. GC8 prouve l'équivalence des **trajectoires**, pas celle de l'**arrêt**. Le
+   mécanisme d'arrêt est prouvé côté runner par GC6 ; son équivalence avec HF ne l'est par aucun
+   gate.
+2. **GC8 ne prouve pas le mordant** : `n_bites = 0` côté HF, puisque la trajectoire B ne produit
+   jamais `258882`. Le mordant est porté par GC3 (statistique) et GC5 (position 57 en
+   teacher-forcing), pas ici.
+3. **Le `script_md5` diffère entre GC5/GC7 (`8605874b…`) et GC8 (`17860a92…`)** — la Task 6 a
+   ajouté `--gen-policy-stop`, levé la garde `--compute-fp32` et élargi un assert de dtype. Le diff
+   a été vérifié : **aucune** ligne ajoutée ne touche le corps du teacher-force, donc le chemin
+   qu'exercent GC5 et GC7 est inchangé. Consigné plutôt que supposé.
 
 ## 5. Ce que les gates ont attrapé
 
@@ -125,6 +149,8 @@ Un gate qui ne trouve rien n'a pas prouvé qu'il fonctionne. Ceux-ci ont trouvé
 
 - L'arrêt sur les **vrais** EOS `1` et `50` n'est exercé par aucun corpus réel (GC6 exerce la
   mécanique multi-EOS avec un id fabriqué, pas ces ids-là).
+- **L'équivalence de l'ARRÊT entre runner et HF** n'est prouvée par aucun gate : GC8 n'a rencontré
+  aucun EOS dans sa fenêtre de 60 tokens (`stopped_at_gen = None`).
 - Le tie-break `sort`/`argmax` en cas d'**égalité exacte au sommet, non supprimée**, reste non
   vérifié. GC1 **compte** les égalités rencontrées (2) ; le cas d'un tie non supprimé au rang 0
   n'est pas exercé.
