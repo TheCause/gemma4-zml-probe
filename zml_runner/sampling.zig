@@ -66,6 +66,15 @@ pub const SamplingCfg = struct {
     n_disagree: usize = 0,
     n_exact_top_ties: usize = 0,
 
+    // M-COUT — chronomètre IN-PROCESS du bloc {D2H + warpers + sélection}, en nanosecondes.
+    // ⚠ C'est une MESURE PUBLIÉE, pas un gate : le surcoût visé (~1,6 % d'un step) est SOUS le
+    // plancher de résolution du protocole de débit du projet (bruit inter-compiles 2 à 16 %). Un
+    // seuil PASS/FAIL y serait soit inatteignable, soit incapable de distinguer 1,6 % de 10,6 %.
+    // On mesure donc là où l'effet vit — dans le bloc lui-même — et non dans le tok/s global.
+    cout_ns_total: u64 = 0,
+    cout_ns_max: u64 = 0,
+    n_cout_samples: usize = 0,
+
     /// Le CHEMIN B est armé dès qu'un warper est demandé **ou** qu'un tirage l'est. Sans quoi
     /// `--top-k 1` seul — le régime neutre du gate-pont — n'activerait pas le chemin et le gate
     /// n'aurait rien à comparer.

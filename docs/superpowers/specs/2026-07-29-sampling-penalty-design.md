@@ -1,6 +1,6 @@
 # Spec — sampling : faire du 12B un moteur d'inférence conforme (phase 2)
 
-> **Date** : 2026-07-29 · **Révision 3** (resserrée) · **Machines** : 3090 (runner) + M4 (oracle)
+> **Date** : 2026-07-29 · **Révision 4** (F16 rectifié après exécution) · **Machines** : 3090 (runner) + M4 (oracle)
 
 ## 0. Autorité — à lire avant tout
 
@@ -90,19 +90,34 @@ de probabilité — et **au moins un cas de fixture est à n = 262 144**.
 `0.0 != 1.0`). ⚠ **`> 0` ne suffit pas** : `T = 1e-45` **passe** le garde-fou et produit
 `[inf,…] → softmax = [nan,…]`.
 
-**F16 — coûts mesurés**, tous rapportés à **un step de référence de 9 090 µs** (9,0 tok/s) :
+**F16 — coûts. ⚠ RECTIFIÉ le 29 juil (rév. 4) : la BASE était fausse d'un facteur 12.**
+
+Les révisions 1 à 3 rapportaient les coûts à « un step de 8 850 à 9 091 µs ». Or 9 091 µs/step
+correspond à **110 tok/s**, alors que ce modèle fait **9,x tok/s** — soit **~106 000 µs/step**
+(mesuré sur le run de `M-COUT` : 60 tokens en 6,367 s → 9,4 tok/s).
+
+⚠ **Comment l'erreur a survécu à deux révisions** : une sonde annonçait « 110-113 tok/s » ; je l'ai
+reprise en corrigeant son **arithmétique interne** (183 % → 177,95 %, deux bases mélangées) **sans
+jamais vérifier la plausibilité physique de la base** — alors que « 9 tok/s » est écrit partout
+ailleurs dans ce dépôt. **Raffiner un chiffre faux ne le rend pas juste.**
+
+Coûts rapportés au step **réel** (~106 000 µs) :
 
 | opération | coût | % d'un step |
 |---|---|---|
-| D2H 1 MiB pinned, marginal | 52,2 µs | 0,57 % |
-| `partial_sort` top-64 sur 262 144 | 90,5 µs | 1,00 % |
-| **D2H + `partial_sort`** (implémentation visée) | 142,7 µs | **1,57 %** |
-| + softmax plein vocab | 959,7 µs | **10,56 %** |
-| **tri complet** | 16 176 µs | **177,95 %** |
+| D2H 1 MiB pinned, marginal | 52,2 µs | 0,05 % |
+| `partial_sort` top-64 sur 262 144 (C++ `-O3`) | 90,5 µs | 0,09 % |
+| **D2H + `partial_sort`** — borne basse, C++ optimisé | 142,7 µs | **0,13 %** |
+| + softmax plein vocab | 959,7 µs | 0,90 % |
+| **tri complet** | 16 176 µs | **15,2 %** — cher, mais **pas rédhibitoire** |
+| **`M-COUT` MESURÉ en conditions réelles** | **3 730 µs** (max 5 556, n=88) | **3,5 %** |
 
-*(La rév. 2 annonçait 1,55 / 10,8 / 183 % : elle mélangeait deux bases de step. Base unique
-ci-dessus.)* ⚠ **Custody** : mesures prises GPU **non vierge** (22 210 MiB résidents). Les
-**absolus** sont à requalifier ; les **écarts entre bras** portent le verdict.
+⇒ La mesure réelle vaut **~27× la borne basse C++**. ⚠ **Le binaire est compilé en `dbg`**
+(vérifié : `bazel-out/host_glibc-dbg`) — l'écart s'explique **là**, pas dans le design. Une mesure
+en `opt` reste à faire : **dette D9**.
+
+⚠ **Custody** : les coûts C++ ont été pris GPU **non vierge** (22 210 MiB résidents) ; les absolus
+sont à requalifier, les écarts entre bras portent le verdict.
 
 **F17 — les témoins 48 et 124 sont reproductibles.** Campagne du 29 juil, flux séparés, chaque run
 **recompilant à neuf** :
@@ -159,8 +174,8 @@ GC0 : 510 fichiers, 1 905 860 o). **Tue la claim** : un md5 différent ⇒ un `T
 
 **Chemin B** : vecteur complet (il **sort déjà** du graphe, rév. 4 F1, aujourd'hui non lu), puis
 `penalty → suppress(-inf) → ÷T → topK → topP → argmax|tirage` (ordre F8).
-⚠ **Algorithme imposé** : `partial_sort`/heap top-K — **jamais un tri complet** (F16 : 177,95 %
-d'un step). Mémoire hôte **pinned**.
+⚠ **Algorithme imposé** : `partial_sort`/heap top-K — **jamais un tri complet** (F16 : **15,2 %**
+d'un step, base rectifiée). Mémoire hôte **pinned**.
 
 **La garde `suppress.len + 1 > TOP_K`** vit dans `gencfg.fromLists` (`gencfg.zig:207`) et **refuse
 le chargement** de la politique : elle est donc **globale**, pas propre au chemin A. Elle est
@@ -248,7 +263,8 @@ est **sous le plancher de résolution** du protocole de débit du projet (bruit 
 | **D5** | **`RP7` (« la récitation est-elle levée »)** — proposition : **suspendre** | Le symptôme d'origine n'a **jamais été reproduit** (3 témoins greedy, hypothèse réfutée) : le gate est sans cas. ⚠ **RP7 appartient à la rév. 4** ; cette proposition doit y être portée par une décision datée, **elle n'est pas appliquée ici** |
 | **D6** | **E2B non couvert** | Ses runners ne sortent pas les logits du graphe (`gen_auto.zig:753`) |
 | **D7** | **Custody de F16** | Mesures prises GPU non vierge : absolus à requalifier |
-| **D8** | **Tie-break `argmax` host vs `topK` in-graph** non vérifié (`gencfg.zig:21-25`) | S2-PONT le **publie** (`n_exact_top_ties`) au lieu de le supposer résolu |
+| **D8** | **Tie-break `argmax` host vs `topK` in-graph** non vérifié (`gencfg.zig:21-25`) | S2-PONT le **publie** (`n_exact_top_ties`, observé à **0**) au lieu de le supposer résolu |
+| **D9** | **`M-COUT` mesuré en build `dbg`** (3 730 µs/step, 3,5 %) | Une mesure en `opt` reste à faire. L'écart de ~27× avec la borne C++ s'explique par le mode de compilation, pas par le design — mais ce n'est **pas prouvé** tant que la mesure `opt` n'est pas faite |
 
 ---
 
@@ -291,6 +307,8 @@ exécutables, la règle de nommage **réinstallait** la contradiction qu'elle de
 étaient mal transcrits** (bascule `torch.sort` 64/256 au lieu de **128/129** ; 183 % au lieu de
 **177,95 %**, deux bases de step mélangées ; « 20 compiles » au lieu de **36** ; une marge attribuée
 au mauvais témoin).
+
+**Rév. 4** (29 juil, après exécution) — **F16 rectifié : la base du calcul était fausse d'un facteur 12** (9 091 µs/step ⇔ 110 tok/s, alors que le modèle fait 9,x tok/s ⇒ ~106 000 µs). Les révisions 1-3 raffinaient un chiffre faux sans vérifier sa plausibilité. Conséquences : le tri complet coûte **15,2 %** d'un step et non 178 % ; la borne basse visée est **0,13 %** et non 1,57 % ; et `M-COUT` **mesuré** vaut **3,5 %** (3 730 µs), en build `dbg` — dette **D9** ouverte pour la mesure en `opt`.
 
 **Rév. 3** — **resserrement** : 9 gates → **5 gates + 1 mesure publiée**, chacun passant trois
 filtres (exécutable · capable d'échouer · antécédent non vide). Supersession de `SM0…SM3` rendue

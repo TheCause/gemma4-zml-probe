@@ -2134,6 +2134,7 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         // Si rien n'est armé, le chemin A ci-dessus reste STRICTEMENT le code d'avant : mêmes
         // ~48 octets de D2H, aucune lecture du vecteur complet. ===
         if (scfg.pathArmed()) {
+            const t_b0: std.Io.Timestamp = .now(io, .awake); // M-COUT : début du bloc mesuré
             var lg_s = try r_logits.toSliceAlloc(allocator, io);
             defer lg_s.free(allocator);
             const lg = lg_s.items(f32);
@@ -2177,6 +2178,13 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
                 }
             }
             tok = @intCast(tok_b);
+
+            // M-COUT — le bloc entier {D2H + warpers + sélection}, seul endroit où le surcoût
+            // vit réellement. Mesurer le tok/s global le noierait dans le bruit inter-compiles.
+            const dt: u64 = @intCast(t_b0.untilNow(io, .awake).toNanoseconds());
+            scfg.cout_ns_total += dt;
+            if (dt > scfg.cout_ns_max) scfg.cout_ns_max = dt;
+            scfg.n_cout_samples += 1;
         }
         if (in_gen_phase) try gen_top5.append(allocator, top5);
         // W4g (protocole de flip) : marge top1−top2 par step de génération, mode oracle seulement.
@@ -2277,6 +2285,11 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
     if (scfg.pathArmed()) {
         log.info("S2-PONT: steps_comparés={d} désaccords={d} égalités_exactes={d} (chemin B armé)", .{ scfg.n_steps_compared, scfg.n_disagree, scfg.n_exact_top_ties });
+        if (scfg.n_cout_samples > 0) {
+            const moy_us = @as(f64, @floatFromInt(scfg.cout_ns_total)) / @as(f64, @floatFromInt(scfg.n_cout_samples)) / 1000.0;
+            const max_us = @as(f64, @floatFromInt(scfg.cout_ns_max)) / 1000.0;
+            log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step, max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, max_us, scfg.n_cout_samples });
+        }
     }
 
     const elapsed_ns = elapsed.toNanoseconds();
