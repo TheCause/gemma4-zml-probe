@@ -37,10 +37,40 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
 
 À faire, dans cet ordre (décision Régis, 27 juil) :
 
+- [x] **Cadrage (28-29 juil)** — spec `docs/superpowers/specs/2026-07-28-generation-config-design.md`
+      (**rév. 3**, deux tours de revue adversariale, 86 findings arbitrés) + plan
+      `docs/superpowers/plans/2026-07-29-generation-config.md` (8 tâches, 12 gates).
+      **Pré-enregistrement** §2bis (5 claims falsifiables + prédictions chiffrées + « ce qui tue la
+      claim ») committé **avant la première mesure** — exigence Régis « scientifiquement falsifiable ».
+      Décisions Régis : périmètre **12B seul** · passe de nuance sur la claim **dans** ce chantier ·
+      mode `--oracle` = suppression **ON**, arrêt EOS **OFF**.
+- [x] **Task 0 (29 juil)** — témoins vérifiés **réutilisables** (source `zml_runner/` inchangée
+      depuis le 26 juil, md5 local ≡ VM 4/4) ; **GC9 répondu** ; **GC12 mesuré** (N=20).
 - [ ] **`suppress_tokens`** (logits → -inf avant l'argmax) + **3 EOS** dans le runner
 - [ ] **Aligner `69_u8_gen_oracle.py` en même temps** — sinon l'angle mort persiste
-- [ ] **Reprendre les témoins** : ceux du 27 juil figent `<image|>` et deviennent caducs
 - [ ] **Puis** le chantier repetition penalty (spec + plan déjà écrits et revus, ci-dessous)
+
+## 🔴 29 juillet 2026 — FINDING : la trajectoire libre du 12B est BISTABLE
+
+Découvert en Task 0, **avant toute modification de code**. 20 runs identiques du même binaire :
+**exactement 2 trajectoires** (11/20 et 9/20), **un unique** point de bifurcation **@47** (marge
+0,004587 ≈ 5× le bruit d'un logit), **149 des 200 ids** en aval. Positions 0..46 parfaitement
+déterministes. Taux 45 % = signature d'un **tie**, pas d'un bruit.
+
+- **La divergence @47 du finding `generation_config` §9 est EXPLIQUÉE** : ZML produit lui-même les
+  deux valeurs. **Le forward est innocenté.**
+- **2 gates pré-enregistrés retirés avant d'avoir coûté du GPU** (« ids 0..56 bit-identiques »,
+  « reproduit le témoin bit-à-bit ») : ils auraient échoué **45 % du temps** pour une cause
+  étrangère au chantier. **Contrôle qui échoue À TORT** — 3ᵉ membre de la famille. Remplacés par un
+  critère **statistique** (`<image|>` dans 0/20 après vs **11/20** avant, p ≈ 6e-8 sous H0).
+- **⚠ Les témoins du 27 juil ne sont PAS « caducs »** comme annoncé plus haut : ils sont valides
+  (source inchangée) — mais **un témoin de trajectoire libre n'est pas un invariant**.
+- **⚠ À ré-instruire** : les gates d'équivalence d'ids **en roue libre** (M1/M2, D1/D2, R0/R1,
+  « 1020/1020 »). Les claims **teacher-forcées** (U8 48/48, U9 1150/1150, 4041 positions) ne sont
+  **pas** affectées (marges ≥ 0,026).
+- **Règle** : un gate de fidélité position-par-position doit être **teacher-forcé**.
+
+Preuves : **`docs/FINDING_NONDETERMINISME_TRAJECTOIRE.md`**.
 
 Deux conséquences à retenir :
 1. La claim « ids == HF » est **vraie au sens « même argmax sur les logits bruts »**, et **fausse
