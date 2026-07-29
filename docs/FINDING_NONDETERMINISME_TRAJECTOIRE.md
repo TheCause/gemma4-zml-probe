@@ -1,8 +1,12 @@
 # Finding — la trajectoire libre du 12B n'est pas auto-reproductible
 
-> **Date** : 2026-07-29 · **Statut** : établi (A/B répliqué des deux côtés), quantification en cours
-> (N=20) · **Origine** : découvert en Task 0 du chantier `generation_config`, **avant toute
-> modification de code**, en cherchant à transformer une prédiction dérivée en fait mesuré.
+> **Date** : 2026-07-29 · **Statut** : **ÉTABLI ET QUANTIFIÉ** (A/B répliqué des deux côtés ;
+> campagne N=20 — §7) · **Origine** : découvert en Task 0 du chantier `generation_config`, **avant
+> toute modification de code**, en cherchant à transformer une prédiction dérivée en fait mesuré.
+>
+> **Résultat en une ligne** : le 12B en génération libre est **bistable** sur ce prompt — deux
+> trajectoires (11/20 et 9/20), un **unique** point de bifurcation (@47, marge 0,004587), et
+> 149 des 200 ids qui en dépendent.
 >
 > **Portée** : ce finding **dépasse** le chantier `generation_config`. Il concerne toute claim de
 > fidélité établie sur une **génération libre** (roue libre), et la façon dont ce projet construit
@@ -57,7 +61,7 @@ Ce finding le démontre **sur le token choisi**, et non plus seulement sur les b
 > « En roue libre, HF diverge de ZML **dès l'index 47** : ZML `5743 ▁zero` vs HF `27069 ▁humanity`
 > — marge 0,004587. C'est du bruit au niveau du tie, mais ce n'est **pas instruit**. »
 
-**Il est maintenant instruit** : ZML produit **lui-même** `27069` une fois sur quatre. La lecture
+**Il est maintenant instruit** : ZML produit **lui-même** `27069` dans **9 runs sur 20** (§7). La lecture
 « ZML diverge de HF à cette position » présupposait que ZML avait *une* réponse à cette position.
 **Il n'en a pas.** À cette marge, comparer un run ZML à un run HF ne mesure pas une différence entre
 les deux implémentations — cela échantillonne un tirage.
@@ -72,8 +76,8 @@ Le chantier `generation_config` avait pré-enregistré (spec rév. 2, §5) :
 - **GC3** : « ids 0..56 **bit-identiques** au témoin AVANT » ;
 - **GC4(a)** : « `--no-gen-config` reproduit le témoin AVANT **bit-à-bit** ».
 
-Ces deux critères **échouent aléatoirement** — environ 1 fois sur 4 sur l'échantillon observé —
-pour une raison **sans aucun rapport** avec ce qu'ils prétendent mesurer. Pire : le mordant du gate
+Ces deux critères **échouent aléatoirement — 45 % du temps** (mesuré, §7 : 9 runs sur 20) — pour une
+raison **sans aucun rapport** avec ce qu'ils prétendent mesurer. Pire : le mordant du gate
 (`258882` @57) **disparaît** quand la trajectoire bifurque en amont, puisque la position 57 n'est
 plus atteinte dans le même contexte.
 
