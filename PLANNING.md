@@ -57,8 +57,27 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
 - [x] **Passe de nuance sur la claim (29 juil)** — **GC11** : 8/8 documents vivants portent la
       portée « argmax sur les logits bruts ». Gate **scripté** (`scripts/gc11_claim_scope.sh`),
       contre-preuve exercée dans les deux sens.
-- [ ] **Reste du chantier** : GC4 / GC6 / GC10 (en cours), **GC8** (test décisif de C1, coût
-      **mesuré** 69,75 s/token en fp32 → n=60 ≈ 1 h 15), puis doc de clôture et PR.
+- [x] **Chantier CLOS et MERGÉ (29 juil)** — **PR #18**, merge `a1f9668`, **12 gates verts**,
+      11 tags `gate/gc-*-pass`. GC4 (3 sous-tests) · GC6 (arrêt à exactement 35 tokens, id nommé) ·
+      GC8 (**60/60 identique** au décodage HF greedy de même politique) · GC10 (`--repl`, compteur
+      remis à zéro par prompt) · GC11 (passe de nuance **scriptée**, contre-preuve dans les deux
+      sens). Résultats : `docs/GENERATION_CONFIG_RESULTS.md`.
+- [x] **Correctif D11 (29 juil)** — `70_u8_corrupt.py` dépose la politique à côté de son checkpoint
+      à plat : sans cela, un gate historique serait mort **en silence** au prochain usage.
+
+## ⏳ Sampling phase 2 — spécifié et planifié, ZÉRO ligne de code (29 juil)
+
+- [x] **Spec** `docs/superpowers/specs/2026-07-29-sampling-penalty-design.md` **rév. 3** —
+      **5 gates + 1 mesure publiée**, 8 dettes nommées. Resserrée après vérification : les 9 gates
+      de la rév. 2 avaient tous une faille, 3 n'étaient pas exécutables.
+- [x] **Plan** `docs/superpowers/plans/2026-07-29-sampling-phase2.md` **rév. 2** — 8 tâches,
+      **zéro `…` de code** (la rév. 1 avait 11 bloquants d'exécutabilité).
+- [x] **Registre** `2026-07-29-sampling-penalty-arbitrage.md` — 42 findings arbitrés, 3 **nuancés**.
+- [ ] **Exécuter** : Task 0 → **S2-U** (host-only, **zéro GPU**) → S2-PONT (STOP) → S2-D/S2-R → S2-G.
+- [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
+      Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
+- [ ] ⚠ **Dette D1** : `applyTopP` n'aura **aucune couverture GPU** — sa seule couverture est la
+      fixture. Déclarée, pas tue.
 - [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
       leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
       coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour
