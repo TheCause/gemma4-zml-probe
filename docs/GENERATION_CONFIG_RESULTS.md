@@ -24,7 +24,7 @@ sujet.
 
 Modèle : `docs/MASKS_INGRAPH_RESULTS.md` §« périmètre ».
 
-- **« ids == HF » reste VRAIE** au sens « même argmax sur les **logits bruts** » — un critère plus
+- **« ids == HF » reste VRAIE** au sens « même argmax sur les logits bruts » — un critère plus
   strict que comparer deux `generate()`. Les gates historiques mesurent bien ce qu'ils disent.
 - **Ce chantier rend vraie la seconde lecture** — « reproduit ce que `generate()` produirait » —
   **pour le 12B en mode libre**, et **seulement** pour lui.

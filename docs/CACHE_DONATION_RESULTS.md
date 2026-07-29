@@ -1,5 +1,13 @@
 # Donation des caches KV — Résultats (chantier du 26 juillet 2026, soir)
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 > Spec (spec+plan combinés, niveau léger) : `docs/superpowers/specs/2026-07-26-cache-donation-design.md`
 > Base : PR #15 (masques in-graph) — mur M3 : OOM 8k par double-buffering des caches KV.
 > Branche `cache-donation`.

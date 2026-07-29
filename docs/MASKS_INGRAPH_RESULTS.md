@@ -1,5 +1,13 @@
 # Masques in-graph — Résultats (chantier du 26 juillet 2026)
 
+> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
+> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
+> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
+> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
+> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
+> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
+> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+
 > Spec : `docs/superpowers/specs/2026-07-26-masques-ingraph-design.md` (approuvée revue 2)
 > Plan : `docs/superpowers/plans/2026-07-26-masks-ingraph.md` (approuvé revue 2)
 > Niveau de travail : léger. Branche `masks-ingraph`.
