@@ -45,6 +45,47 @@ pub const Scratch = struct {
     }
 };
 
+
+/// Configuration de sampling, passée **PAR POINTEUR** aux 3 sites d'appel de `generateOnce`
+/// (`gencfg.GenCfg` a le même traitement) : la fonction a déjà 20 paramètres positionnels, et un
+/// oubli sur l'un des trois sites rendrait la fonctionnalité silencieusement inopérante en
+/// `--repl` — c'est ce que GC10 avait vérifié pour la politique de décodage.
+pub const SamplingCfg = struct {
+    temperature: f32 = 1.0,
+    top_k: u32 = 0,
+    top_p: f32 = 1.0,
+    min_keep: u32 = 1,
+    seed: ?u64 = null,
+
+    scratch: Scratch = undefined,
+    work: []f32 = &.{},
+    prng: std.Random.DefaultPrng = undefined,
+
+    // Compteurs S2-PONT, publiés en fin de run.
+    n_steps_compared: usize = 0,
+    n_disagree: usize = 0,
+    n_exact_top_ties: usize = 0,
+
+    /// Le CHEMIN B est armé dès qu'un warper est demandé **ou** qu'un tirage l'est. Sans quoi
+    /// `--top-k 1` seul — le régime neutre du gate-pont — n'activerait pas le chemin et le gate
+    /// n'aurait rien à comparer.
+    pub fn pathArmed(self: *const SamplingCfg) bool {
+        return self.top_k != 0 or self.top_p < 1.0 or self.temperature != 1.0 or self.seed != null;
+    }
+
+    /// Le TIRAGE, lui, est armé **ssi `--seed` est fourni**. Choix explicite : une dérivation du
+    /// type « armé ⇔ top_p<1 » armerait le hasard **par effet de bord** d'un réglage de filtrage,
+    /// et rendrait `SeedRequired` intestable. Sans seed, la sélection reste un `argmax`.
+    pub fn drawArmed(self: *const SamplingCfg) bool {
+        return self.seed != null;
+    }
+
+    /// Réinitialise l'état PAR PROMPT (spec §5) — c'est la condition de S2-R en `--repl`.
+    pub fn resetPerPrompt(self: *SamplingCfg) void {
+        if (self.seed) |s| self.prng = std.Random.DefaultPrng.init(s);
+    }
+};
+
 /// Température — **DIVISION**, jamais `× (1/T)` : l'équivalence est mathématique, pas binaire,
 /// et casserait la bit-exactitude attendue des gates.
 /// ⚠ HF n'instancie **PAS** ce warper quand `T == 1.0` (F8c) — l'appelant doit faire de même,

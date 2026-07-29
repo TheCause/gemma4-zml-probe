@@ -148,6 +148,13 @@ const Args = struct {
     selftest_gather: ?[]const u8 = null,
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
+    // Sampling phase 2 — défauts NEUTRES : sans eux, le chemin B n'est pas armé et le code
+    // d'avant le chantier est strictement inchangé.
+    temperature: f32 = 1.0,
+    top_k: u32 = 0, // 0 = désactivé (convention HF)
+    top_p: f32 = 1.0,
+    min_tokens_to_keep: u32 = 1,
+    seed: ?u64 = null, // null, PAS 0 : 0 est une graine légitime, pas un sentinel
     // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
     // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
     // (sans snapshot ni symlink) : sans ce flag, la découverte échouerait et un gate historique
@@ -173,6 +180,8 @@ const usage =
     "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
+    "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
+    "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
     "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
@@ -271,6 +280,51 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.selftest_sampling = process_args[i];
+        } else if (std.mem.eql(u8, a, "--temperature")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            const v = std.fmt.parseFloat(f32, process_args[i]) catch return error.InvalidTemperature;
+            // ⚠ Garde en ACCEPTATION. `t <= 0 → rejet` laisserait passer NaN (toute comparaison
+            // avec NaN est fausse) : `--temperature nan` empoisonnerait tous les logits et
+            // l'argmax rendrait un token arbitraire SANS ERREUR.
+            // T_MIN : divergence DÉLIBÉRÉE avec HF, qui accepte 1e-45 et produit des NaN
+            // (inf - inf dans le softmax). Logits bornés par le softcap 30 ⇒ 1e-30 suffit.
+            if (!(v >= T_MIN and std.math.isFinite(v))) {
+                log.err("--temperature {s} refusée : attendu un réel fini >= {e}. Pour du greedy déterministe, utiliser --top-k 1.", .{ process_args[i], T_MIN });
+                return error.InvalidTemperature;
+            }
+            args.temperature = v;
+        } else if (std.mem.eql(u8, a, "--top-k")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            const v = std.fmt.parseInt(u32, process_args[i], 10) catch return error.InvalidTopK;
+            if (!(v <= VOCAB_CONTRACT)) {
+                log.err("--top-k {d} > vocab {d} : refus explicite, jamais un clamp silencieux", .{ v, VOCAB_CONTRACT });
+                return error.TopKOutOfRange;
+            }
+            args.top_k = v;
+        } else if (std.mem.eql(u8, a, "--top-p")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            const v = std.fmt.parseFloat(f32, process_args[i]) catch return error.InvalidTopP;
+            if (!(v > 0 and v <= 1)) {
+                log.err("--top-p {s} refusée : attendu 0 < p <= 1 (NaN et inf exclus par la forme). Pour ne garder qu'un token, utiliser --top-k 1.", .{process_args[i]});
+                return error.InvalidTopP;
+            }
+            args.top_p = v;
+        } else if (std.mem.eql(u8, a, "--min-tokens-to-keep")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            const v = std.fmt.parseInt(u32, process_args[i], 10) catch return error.InvalidMinTokens;
+            if (!(v >= 1 and v <= VOCAB_CONTRACT)) {
+                log.err("--min-tokens-to-keep {d} refusé : attendu 1..{d} (0 ferait paniquer argmax sur une slice vide)", .{ v, VOCAB_CONTRACT });
+                return error.InvalidMinTokens;
+            }
+            args.min_tokens_to_keep = v;
+        } else if (std.mem.eql(u8, a, "--seed")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            args.seed = std.fmt.parseInt(u64, process_args[i], 10) catch return error.InvalidSeed;
         } else if (std.mem.eql(u8, a, "--gen-config")) {
             i += 1;
             if (i >= process_args.len) {
@@ -1172,6 +1226,12 @@ const Top5 = struct { idx: [gencfg.TOP_K]usize, val: [gencfg.TOP_K]f32 };
 // échouer le run au lieu de valider silencieusement une politique bornée de travers.
 const VOCAB_CONTRACT: u32 = 262144;
 
+// Plancher de température — DIVERGENCE DÉLIBÉRÉE ET DÉCLARÉE avec HF (spec F15). HF n'exige que
+// `t > 0` et accepte donc `1e-45`, qui fait déborder la division en f32 et produit des `NaN`
+// (`inf - inf` dans le softmax). Les logits sont bornés par le softcap 30 : 1e-30 laisse une
+// marge de 8 ordres de grandeur avant le débordement de f32 (3,4e38).
+const T_MIN: f32 = 1e-30;
+
 // Ligne de log de la politique — UNE par run, c'est ce que les gates greppent.
 // ⚠ LE FORMAT EST IMPOSÉ, PAS LAISSÉ AU `{any}` DE ZIG : `{any}` sur une slice produit
 // `{ 258883, 258882 }` (accolades, espaces) là où les gates attendent `[258883,258882]`. GC2 est
@@ -1506,6 +1566,28 @@ pub fn run(init: std.process.Init) !void {
     defer policy.deinit(allocator);
     try logGencfg(allocator, &policy, args.oracle_path != null);
 
+    // === Sampling phase 2 : scratch et RNG alloués UNE FOIS (interdit « aucune allocation par
+    // step », spec §5). Dimensionnés au contrat U0 puis recoupés contre le vocab mesuré. ===
+    var scfg: sampling.SamplingCfg = .{
+        .temperature = args.temperature,
+        .top_k = args.top_k,
+        .top_p = args.top_p,
+        .min_keep = args.min_tokens_to_keep,
+        .seed = args.seed,
+    };
+    if (scfg.pathArmed()) {
+        scfg.scratch = try sampling.Scratch.init(allocator, VOCAB_CONTRACT);
+        scfg.work = try allocator.alloc(f32, VOCAB_CONTRACT);
+        scfg.resetPerPrompt();
+        log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet ARMÉ ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
+    } else {
+        log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
+    }
+    defer if (scfg.pathArmed()) {
+        scfg.scratch.deinit(allocator);
+        allocator.free(scfg.work);
+    };
+
     if (args.force_vram) {
         log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
     } else {
@@ -1803,7 +1885,7 @@ pub fn run(init: std.process.Init) !void {
     // entrelace ses octets avec le premier — une seule file d'écriture).
     var stdout_w = std.Io.File.stdout().writer(io, &.{});
     if (!args.repl) {
-        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -1813,7 +1895,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1842,7 +1924,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -1859,7 +1941,7 @@ pub fn run(init: std.process.Init) !void {
 // ci-dessous (one-shot, 1er prompt du REPL, prompts suivants du REPL) doivent partager LA même
 // politique. Un oubli sur l'un des trois la rendrait silencieusement inopérante dans ce mode —
 // c'est exactement ce que le gate GC10 vérifie.
-fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -1963,8 +2045,57 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
             log.err("step {d} : {s} — les {d} ids du top-5 sont tous supprimés (top5={any})", .{ step, @errorName(e), gencfg.TOP_K, top5.idx });
             return e;
         };
-        const tok: i64 = @intCast(sel.tok);
+        var tok: i64 = @intCast(sel.tok);
         if (in_gen_phase and sel.rank != 0) n_suppress_hits += 1;
+
+        // === CHEMIN B (spec phase 2 §4.2) — armé seulement si un warper ou un tirage l'exige.
+        // Si rien n'est armé, le chemin A ci-dessus reste STRICTEMENT le code d'avant : mêmes
+        // ~48 octets de D2H, aucune lecture du vecteur complet. ===
+        if (scfg.pathArmed()) {
+            var lg_s = try r_logits.toSliceAlloc(allocator, io);
+            defer lg_s.free(allocator);
+            const lg = lg_s.items(f32);
+            if (lg.len != scfg.work.len) {
+                log.err("chemin B : logits {d} f32 != vocab {d}", .{ lg.len, scfg.work.len });
+                return error.UnexpectedShape;
+            }
+            @memcpy(scfg.work, lg);
+
+            // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
+            // TopK(19) → TopP(20). La penalty appartient à la PHASE 1 : absente ici.
+            sampling.applySuppression(scfg.work, policy);
+            if (scfg.temperature != 1.0) sampling.applyTemperature(scfg.work, scfg.temperature);
+            sampling.applyTopK(scfg.work, scfg.top_k, scfg.min_keep, &scfg.scratch);
+            sampling.applyTopP(scfg.work, scfg.top_p, scfg.min_keep, &scfg.scratch);
+
+            const tok_b: u32 = if (scfg.drawArmed())
+                sampling.sample(scfg.work, scfg.prng.random())
+            else
+                sampling.argmax(scfg.work);
+
+            // Invariant le plus discriminant du sampler : on ne tire JAMAIS un token filtré.
+            if (scfg.work[tok_b] == sampling.FILTER) {
+                log.err("chemin B : token {d} retenu alors qu'il est FILTRÉ (step {d})", .{ tok_b, step });
+                return error.SampledFilteredToken;
+            }
+
+            // === S2-PONT — les DEUX sélecteurs sur le MÊME vecteur, au MÊME step, dans le MÊME
+            // processus. Insensible au non-déterminisme PAR CONSTRUCTION : il n'y a ni second
+            // forward, ni seconde compile, ni témoin stocké. ===
+            scfg.n_steps_compared += 1;
+            if (tok_b != sel.tok) {
+                // Une égalité exacte au sommet est un VERDICT DISTINCT, pas un FAIL : les deux
+                // tie-breaks (argmax host « premier indice » vs ordre du topK in-graph) ne sont
+                // pas prouvés équivalents (gencfg.zig:21-25, dette D8).
+                if (scfg.work[tok_b] == scfg.work[sel.tok]) {
+                    scfg.n_exact_top_ties += 1;
+                } else {
+                    scfg.n_disagree += 1;
+                    log.err("S2-PONT désaccord @step {d} : A={d} (val {d:.6}) B={d} (val {d:.6})", .{ step, sel.tok, scfg.work[sel.tok], tok_b, scfg.work[tok_b] });
+                }
+            }
+            tok = @intCast(tok_b);
+        }
         if (in_gen_phase) try gen_top5.append(allocator, top5);
         // W4g (protocole de flip) : marge top1−top2 par step de génération, mode oracle seulement.
         // ⚠ La marge BRUTE ne suffit plus dès que la suppression mord : elle parle de deux tokens
@@ -2062,6 +2193,9 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     // illisible. Un gate de mordant qui lit `0 fois` n'a rien prouvé — c'est le prompt qu'il faut
     // changer, pas le critère.
     log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
+    if (scfg.pathArmed()) {
+        log.info("S2-PONT: steps_comparés={d} désaccords={d} égalités_exactes={d} (chemin B armé)", .{ scfg.n_steps_compared, scfg.n_disagree, scfg.n_exact_top_ties });
+    }
 
     const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
