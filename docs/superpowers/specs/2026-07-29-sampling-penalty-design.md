@@ -112,9 +112,13 @@ Coûts rapportés au step **réel** (~106 000 µs) :
 | **tri complet** | 16 176 µs | **15,2 %** — cher, mais **pas rédhibitoire** |
 | **`M-COUT` MESURÉ en conditions réelles** | **3 730 µs** (max 5 556, n=88) | **3,5 %** |
 
-⇒ La mesure réelle vaut **~27× la borne basse C++**. ⚠ **Le binaire est compilé en `dbg`**
-(vérifié : `bazel-out/host_glibc-dbg`) — l'écart s'explique **là**, pas dans le design. Une mesure
-en `opt` reste à faire : **dette D9**.
+⇒ La mesure réelle vaut **~27× la borne basse C++**. ⚠ **L'hypothèse « c'est le build `dbg` » a été
+MESURÉE ET RÉFUTÉE** (D9) : en `opt`, le bloc coûte **3 828,8 µs**, soit *autant* qu'en `dbg`
+(3 730,1), alors que le binaire passe de 451 Mo à 40 Mo. La décomposition donne **D2H + copie
+1 514 µs** et **warpers 2 268 µs** : le coût est **structurel** — parcourir 262 144 logits trois
+fois — et non un artefact de compilation. Deux leviers restent ouverts, non faits :
+`toSliceAlloc` **alloue 1 Mo par step** (l'interdit §5 que ce code viole), et le D2H plafonne à
+**0,65 Go/s** faute de mémoire *pinned*.
 
 ⚠ **Custody** : les coûts C++ ont été pris GPU **non vierge** (22 210 MiB résidents) ; les absolus
 sont à requalifier, les écarts entre bras portent le verdict.
@@ -264,7 +268,7 @@ est **sous le plancher de résolution** du protocole de débit du projet (bruit 
 | **D6** | **E2B non couvert** | Ses runners ne sortent pas les logits du graphe (`gen_auto.zig:753`) |
 | **D7** | **Custody de F16** | Mesures prises GPU non vierge : absolus à requalifier |
 | **D8** | **Tie-break `argmax` host vs `topK` in-graph** non vérifié (`gencfg.zig:21-25`) | S2-PONT le **publie** (`n_exact_top_ties`, observé à **0**) au lieu de le supposer résolu |
-| **D9** | **`M-COUT` mesuré en build `dbg`** (3 730 µs/step, 3,5 %) | Une mesure en `opt` reste à faire. L'écart de ~27× avec la borne C++ s'explique par le mode de compilation, pas par le design — mais ce n'est **pas prouvé** tant que la mesure `opt` n'est pas faite |
+| **D9** | ~~`M-COUT` mesuré en build `dbg`~~ — **RÉSOLUE le 29 juil, et mon hypothèse était FAUSSE** | Mesuré en `opt` : **3 828,8 µs** contre 3 730,1 en `dbg` — **pas plus rapide**, alors que le binaire passe de 451 Mo à **40 Mo**. Le mode de compilation n'explique **rien**. Décomposition : **D2H + copie 1 514 µs** (0,65 Go/s pour 1 Mo, soit ~48× sous le PCIe 4.0 théorique — `toSliceAlloc` **alloue à chaque step**) et **warpers 2 268 µs** (~0,96 ns par élément-opération sur 3 passes de 262 144 + heap : **ordre de grandeur normal**). Total **3,6 % d'un step**. ⇒ Le coût est **structurel** (parcourir 262 144 logits), pas dû au build |
 
 ---
 
