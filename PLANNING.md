@@ -46,8 +46,26 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       mode `--oracle` = suppression **ON**, arrêt EOS **OFF**.
 - [x] **Task 0 (29 juil)** — témoins vérifiés **réutilisables** (source `zml_runner/` inchangée
       depuis le 26 juil, md5 local ≡ VM 4/4) ; **GC9 répondu** ; **GC12 mesuré** (N=20).
-- [ ] **`suppress_tokens`** (logits → -inf avant l'argmax) + **3 EOS** dans le runner
-- [ ] **Aligner `69_u8_gen_oracle.py` en même temps** — sinon l'angle mort persiste
+- [x] **`suppress_tokens` + 3 EOS dans le runner (29 juil)** — politique **host-side** dans
+      `zml_runner/gencfg.zig` (le graphe ne bouge pas : **GC0** md5 HLO identique au témoin,
+      `engine.zig` 0 octet). **GC1** selftest 8/8 · 12/12 · 4/4 · 6/6 non-vacuité ·
+      **GC2** témoins 48 et 124 bit-identiques · **GC3** `258882` **11/20 → 0/20**, p = 1,16e-07.
+- [x] **Aligner `69_u8_gen_oracle.py` (29 juil)** — politique prise au **vrai**
+      `SuppressTokensLogitsProcessor`, aux deux sites. **GC5** `n_match` **199 → exactement 198**
+      (branche nue reproduisant les chiffres du 27 juil **au chiffre près**) · **GC7** variante A
+      199/200 unique mismatch @47, variante B **200/200 zéro mismatch**.
+- [x] **Passe de nuance sur la claim (29 juil)** — **GC11** : 8/8 documents vivants portent la
+      portée « argmax sur les logits bruts ». Gate **scripté** (`scripts/gc11_claim_scope.sh`),
+      contre-preuve exercée dans les deux sens.
+- [ ] **Reste du chantier** : GC4 / GC6 / GC10 (en cours), **GC8** (test décisif de C1, coût
+      **mesuré** 69,75 s/token en fp32 → n=60 ≈ 1 h 15), puis doc de clôture et PR.
+- [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
+      leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
+      coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour
+      eux, et doit rester écrite comme telle.
+- [ ] **⚠ D11 impacté** : `70_u8_corrupt.py` écrit son checkpoint à plat (sans snapshot ni
+      symlink) → la découverte automatique y échoue. Il doit passer
+      `--gen-config <dq>/generation_config.json` — un chemin de **fichier**, pas un répertoire.
 - [ ] **Puis** le chantier repetition penalty (spec + plan déjà écrits et revus, ci-dessous)
 
 ## 🔴 29 juillet 2026 — FINDING : la trajectoire libre du 12B est BISTABLE
