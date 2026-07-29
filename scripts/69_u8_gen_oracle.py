@@ -214,6 +214,13 @@ def step_top5(logits_1d: torch.Tensor, proc=None):
 def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     proc, gen_policy = build_gen_policy(model, args.no_gen_policy)
     print(f"GENPOLICY: {gen_policy}", flush=True)
+    # Prérequis GC8 : l'instrument fp32 doit être disponible ICI aussi, sinon le seuil de kill
+    # dérivé en fp32 ne s'appliquerait pas au gate qui l'utilise (plan 6.1).
+    compute_dtype = "bfloat16"
+    if args.compute_fp32:
+        n_hooked = install_fp32_hooks(model.model, extra=(model.lm_head,))
+        compute_dtype = "float32"
+        print(f"calcul fp32 armé (mode décode) : {n_hooked} sous-modules hookés", flush=True)
     enc, prompt_ids, S = encode_prompt(tok, args.prompt)
     n = int(args.n_tokens)
     eot_id = 106  # <turn|> (mesuré, cf gemma4_g12auto.zig) — informatif seulement : en mode
@@ -224,7 +231,13 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     with torch.no_grad():
         out = model(**enc, use_cache=True)
     t_prefill = time.monotonic() - t0
-    assert out.logits.dtype == torch.bfloat16, f"logits {out.logits.dtype} != bf16 (modèle réel)"
+    # Le dtype ATTENDU dépend de l'instrument : bf16 par défaut (modèle réel), fp32 sous
+    # --compute-fp32 (hooks par-module). L'assert restait câblé sur bf16 — il a mordu au premier
+    # run fp32 en mode décode, ce qui est exactement son rôle : il refusait un dtype qu'il ne
+    # connaissait pas plutôt que de laisser passer un instrument non déclaré.
+    want_logits_dtype = torch.float32 if args.compute_fp32 else torch.bfloat16
+    assert out.logits.dtype == want_logits_dtype, \
+        f"logits {out.logits.dtype} != {want_logits_dtype} (compute_fp32={args.compute_fp32})"
     pkv = out.past_key_values
     idxs, vals, margin, max_abs, pol = step_top5(out.logits[0, -1, :], proc)
     # Le token retenu est celui d'APRÈS politique quand elle s'applique — c'est ce que fait le
@@ -241,6 +254,7 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     top5_pol_ids = torch.zeros(n, TOPK, dtype=torch.int32)
     top5_pol_vals = torch.zeros(n, TOPK, dtype=torch.float32)
     n_policy_bites = 0
+    stopped_at, stop_eos = None, None
     margins, times, max_abs_all = [margin], [t_prefill], [max_abs]
     top5_ids[0], top5_vals[0] = idxs, vals
     if pol is not None:
@@ -272,9 +286,23 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
                   f"  [{dt:.2f} s]", flush=True)
         else:
             print(f"  step expected-only (produit expected[{n - 1}]={seq[-1]}) [{dt:.2f} s]", flush=True)
+        # Arrêt EOS (prérequis GC8). Sémantique HF (stopping_criteria.py:534, 579-581) : « any of »
+        # sans priorité, le token est concaténé PUIS testé — il FAIT DONC PARTIE de la sortie.
+        if args.gen_policy_stop and chosen_k in gen_policy["eos_token_id"]:
+            stopped_at, stop_eos = k, chosen_k
+            print(f"  arrêt EOS à gen={k} (id={chosen_k}, eos={gen_policy['eos_token_id']})", flush=True)
+            break
 
-    fed = seq[:n]
-    expected = seq[1:n + 1]
+    # Troncature quand l'arrêt a mordu. ⚠ Ce mode ne produit PAS une fixture d'oracle standard :
+    # `fed`/`expected` y sont bornés par l'arrêt et non par `--n-tokens`. C'est voulu — GC8 compare
+    # des trajectoires ARRÊT COMPRIS — et c'est la raison pour laquelle le drapeau est off par
+    # défaut : `u8_gen48` a été produite sans arrêt et doit le rester.
+    n_eff = (stopped_at + 1) if stopped_at is not None else n
+    if stopped_at is not None:
+        top5_ids, top5_vals = top5_ids[:n_eff], top5_vals[:n_eff]
+        top5_pol_ids, top5_pol_vals = top5_pol_ids[:n_eff], top5_pol_vals[:n_eff]
+    fed = seq[:n_eff]
+    expected = seq[1:n_eff + 1]
     # Chrono D6 : médiane des tokens 2-4 (le token 0 = prefill mmap/warm-up, le 1 = encore chaud).
     med_2_4 = statistics.median(times[2:5])
     min_margin = min(margins)
@@ -325,7 +353,10 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
         "chat_template_sha256": tpl_sha,
         "weights": anon_path(args.weights),
         "fixture_keys_lues_par_le_runner": ["positions", "fed"],
-        "gen_policy": {**gen_policy, "n_bites": n_policy_bites},
+        "gen_policy": {**gen_policy, "n_bites": n_policy_bites,
+                       "stop_applied": bool(args.gen_policy_stop),
+                       "stopped_at_gen": stopped_at, "stop_eos_id": stop_eos},
+        "compute_dtype": compute_dtype,
         "script_md5": script_md5(),
         "versions": versions,
     }
@@ -503,11 +534,26 @@ def main() -> None:
     ap.add_argument("--no-gen-policy", action="store_true",
                     help="désactive la politique de décodage (suppress_tokens) — contre-test "
                          "GC5 : restaure l'argmax nu d'avant le chantier")
+    # Prérequis GC8 (plan 6.2) : `mode_decode` n'a AUCUN arrêt EOS — l'eot_id y est « informatif
+    # seulement » (le mode --oracle du runner ne s'arrête pas non plus). GC8 compare des
+    # trajectoires ARRÊT COMPRIS, il lui faut donc un arrêt. Défaut OFF pour ne pas casser la
+    # reproduction de `u8_gen48`, qui a été produite sans arrêt.
+    ap.add_argument("--gen-policy-stop", action="store_true",
+                    help="mode décode : s'arrêter sur les eos_token_id de la politique "
+                         "(défaut off — u8_gen48 a été produite sans arrêt)")
     ap.add_argument("--host-label", default="M4",
                     help="étiquette chrono D6 (M4|VM) — JAMAIS le hostname réel (anonymisation)")
     args = ap.parse_args()
+    # ⚠ La garde « --compute-fp32 n'existe qu'en --teacher-force » est LEVÉE (prérequis GC8,
+    # plan 6.1). Raison : GC8 compare la trajectoire libre du runner corrigé à un décodage HF
+    # greedy appliquant la même politique, ARRÊT COMPRIS, et son seuil de kill (1,873e-3) a été
+    # dérivé en fp32. Le laisser tourner en bf16 aurait été un CHANGEMENT D'INSTRUMENT
+    # SILENCIEUX — précisément la faute qui a produit les requalifications en cascade de J2.
+    # Le mode décode par DÉFAUT reste bf16 : la reproduction de `u8_gen48` n'est pas touchée.
     if args.compute_fp32 and not args.teacher_force:
-        ap.error("--compute-fp32 n'existe qu'en --teacher-force (le mode décode U8 reste bf16 tel que consigné)")
+        print("⚠ --compute-fp32 en mode DÉCODE : instrument fp32 (hooks par-module) sur un "
+              "décodage autonome. Consigné au manifest ; NE reproduit PAS `u8_gen48` (bf16).",
+              flush=True)
 
     model, tok, tpl_sha, t_load, versions = load_model_and_tok(args.weights)
     if args.teacher_force:
