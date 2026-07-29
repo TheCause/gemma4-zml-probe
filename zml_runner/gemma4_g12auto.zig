@@ -16,6 +16,7 @@
 //       [--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram]
 //       [--dump-top5] [--out-ids f] [--window-vacuity f] [--no-prealloc]
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
+//       [--selftest-gencfg f (GC1 : politique generation_config, host-only, sans GPU ni tokenizer)]
 // Mode --oracle : loggue en plus la marge top1−top2 par step de génération (protocole de flip W4g).
 // --dump-top5 : top-5 par step aussi en mode LIBRE (requis U9). --out-ids : ids générés →
 // safetensors (requis U9-ii/iv). --window-vacuity : replay teacher-forcé in-process, fenêtre
@@ -28,6 +29,10 @@ const zml = @import("zml");
 const engine = @import("engine.zig");
 const mem_probe = @import("mem_probe.zig");
 const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit derrière g12.zig)
+// Politique de décodage `generation_config.json` (suppress_tokens + EOS multiples), HOST-SIDE :
+// spec 2026-07-28-generation-config-design §4.2 — `engine.zig` reste à 0 octet, le graphe ne
+// bouge pas (GC0 le prouve). Le module porte AUSSI `TOP_K`, déclaration unique de la constante 5.
+const gencfg = @import("gencfg.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 // ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
@@ -132,6 +137,7 @@ const Args = struct {
     allow_cpu: bool = false,
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
+    selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     force_vram: bool = false,
     // Nouveaux flags 12B (plan Task 8 point 8 — AUCUN n'existait dans la base clonée w4auto) :
     dump_top5: bool = false, // top-5 par step en mode LIBRE (requis U9)
@@ -146,6 +152,7 @@ const usage =
     "[--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu (débogage uniquement)] " ++
     "[--force-vram] [--dump-top5] [--out-ids f] [--window-vacuity ids.safetensors] [--no-prealloc] " ++
     "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
+    "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
     "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)]";
 
@@ -228,6 +235,13 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.selftest_gather = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-gencfg")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-gencfg attend une valeur (fixture .safetensors ; le sidecar <fixture>.manifest.json est requis à côté)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_gencfg = process_args[i];
         } else {
             log.err("argument inconnu: {s}\n{s}", .{ a, usage });
             return error.InvalidArgument;
@@ -555,6 +569,244 @@ fn selftestInputs(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
 }
 
 // ============================================================================================
+// GC1 — selftest de la politique de décodage `generation_config.json`, SANS GPU ni tokenizer
+// (spec docs/superpowers/specs/2026-07-28-generation-config-design.md §4.5bis).
+//
+// TROIS familles de choses sont exercées, donc TROIS véhicules :
+//   1. SÉLECTION   — fixture safetensors (`top5_idx` {N,5} i32, `top5_val` {N,5} f32,
+//      `expect_tok` {N} i32, `expect_rank` {N} i32), produite par `scripts/71_gc1_fixture.py`
+//      depuis le VRAI `SuppressTokensLogitsProcessor` de transformers : `expect_tok` est
+//      l'argmax du vecteur COMPLET post-suppression (262 144 logits). Le cas confronte donc
+//      notre sélection sur top-5 pré-trié à la sémantique HF — c'est précisément ce qui rend
+//      la claim C2 testable au lieu d'être postulée (§4.2).
+//   2. VALIDATIONS — sidecar `<fixture>.manifest.json`, liste `validation_cases` :
+//      {nom, `eot_id`, `content` = le JSON LITTÉRAL du generation_config à parser,
+//      `expect_error` = @errorName attendu (ou "" si le cas doit être ACCEPTÉ)}.
+//      ⚠ `content` est une CHAÎNE, pas un objet : le selftest doit exercer le parser sur du
+//      texte réel (y compris malformé), pas sur un objet déjà re-sérialisé par nos soins.
+//      ⚠ L'`eot_id` est porté par la donnée : le tokenizer n'est PAS chargé sur ce chemin
+//      (early-return avant `:899`), donc le contrôle croisé `EotNotInEosList` ne peut pas le
+//      mesurer (plan Task 2 point 2.4).
+//   3. DÉCOUVERTE  — liste `discovery_cases` du même sidecar : {nom, `ckpt`, et soit
+//      `expect_path`, soit `expect_error`}. Les topologies (symlink ABSOLU et RELATIF, cas
+//      introuvable) sont fabriquées par l'étape shell du plan — aucun selftest du repo ne crée
+//      de symlink, on ne commence pas ici.
+//
+// PASS = 100 % des cas de sélection ET des cas de validation ET des cas de découverte, ET les
+// SIX compteurs de non-vacuité tous non nuls. Un chemin qu'un selftest n'exerce pas, il ne l'a
+// pas validé : chaque compteur à zéro est un FAIL, pas un warning (leçon « test à l'antécédent
+// vide », feedback_test_vacuite_antecedent).
+// ============================================================================================
+fn selftestGencfg(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    // ---- Véhicule 2/3 : le sidecar (lu d'abord — il porte aussi la politique de sélection) ----
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}.manifest.json", .{fixture_path});
+    defer allocator.free(manifest_path);
+    var mf = std.Io.Dir.cwd().openFile(io, manifest_path, .{ .mode = .read_only }) catch |err| {
+        log.err("--selftest-gencfg : sidecar illisible ({s}) : {s} — requis (porte les cas de validation et de découverte)", .{ manifest_path, @errorName(err) });
+        return error.MissingManifest;
+    };
+    defer mf.close(io);
+    const mlen: usize = @intCast(try mf.length(io));
+    const mtext = try allocator.alloc(u8, mlen);
+    defer allocator.free(mtext);
+    if (try mf.readPositionalAll(io, mtext, 0) != mlen) return error.ShortRead;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, mtext, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const sel_obj = (root.get("selection") orelse {
+        log.err("--selftest-gencfg : clé 'selection' absente de {s}", .{manifest_path});
+        return error.MissingManifest;
+    }).object;
+    const vocab_size: u32 = @intCast((sel_obj.get("vocab_size") orelse return error.MissingManifest).integer);
+    const sel_eot_id: u32 = @intCast((sel_obj.get("eot_id") orelse return error.MissingManifest).integer);
+    const sup_arr = (sel_obj.get("suppress_tokens") orelse return error.MissingManifest).array;
+    const eos_arr = (sel_obj.get("eos_token_id") orelse return error.MissingManifest).array;
+
+    const sup_raw = try allocator.alloc(u32, sup_arr.items.len);
+    defer allocator.free(sup_raw);
+    for (sup_arr.items, 0..) |v, i| sup_raw[i] = @intCast(v.integer);
+    const eos_raw = try allocator.alloc(u32, eos_arr.items.len);
+    defer allocator.free(eos_raw);
+    for (eos_arr.items, 0..) |v, i| eos_raw[i] = @intCast(v.integer);
+
+    // La politique de sélection passe par le MÊME constructeur validant que le runner : un
+    // selftest qui fabriquerait sa GenCfg à la main testerait une copie, pas le code livré.
+    var policy = try gencfg.fromLists(allocator, manifest_path, sup_raw, eos_raw, &.{}, .{
+        .vocab_size = vocab_size,
+        .eot_id = sel_eot_id,
+    });
+    defer policy.deinit(allocator);
+
+    // ---- Véhicule 1 : les cas de SÉLECTION ----
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const top5_idx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "top5_idx");
+    defer allocator.free(top5_idx);
+    const top5_val = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "top5_val");
+    defer allocator.free(top5_val);
+    const expect_tok = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "expect_tok");
+    defer allocator.free(expect_tok);
+    const expect_rank = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "expect_rank");
+    defer allocator.free(expect_rank);
+
+    const k: usize = gencfg.TOP_K;
+    const n_cases: usize = expect_tok.len;
+    if (n_cases == 0) {
+        log.err("--selftest-gencfg : 0 cas de sélection — un PASS vacueux ({s})", .{fixture_path});
+        return error.EmptyFixture;
+    }
+    if (top5_idx.len != n_cases * k or top5_val.len != n_cases * k or expect_rank.len != n_cases) {
+        log.err("--selftest-gencfg : formes incohérentes — top5_idx={d} top5_val={d} expect_tok={d} expect_rank={d} (N={d}, TOP_K={d})", .{ top5_idx.len, top5_val.len, n_cases, expect_rank.len, n_cases, k });
+        return error.ShapeMismatch;
+    }
+
+    var n_sel_ok: usize = 0;
+    var n_bit_top1: usize = 0; // compteur 1/6 : cas où la suppression a réellement mordu
+    var n_ties: usize = 0; // C2 : compter les égalités exactes, la réserve du §4.2
+    for (0..n_cases) |c| {
+        var idx: [gencfg.TOP_K]usize = undefined;
+        for (0..k) |j| idx[j] = @intCast(top5_idx[c * k + j]);
+
+        const sel = policy.select(&idx) catch |err| {
+            log.err("cas de sélection {d} : {s} (top5_idx={any})", .{ c, @errorName(err), idx });
+            return err;
+        };
+        const want_tok: usize = @intCast(expect_tok[c]);
+        const want_rank: usize = @intCast(expect_rank[c]);
+        if (sel.tok == want_tok and sel.rank == want_rank) {
+            n_sel_ok += 1;
+        } else {
+            log.err("cas de sélection {d} FAIL — got tok={d} rank={d}, want tok={d} rank={d} (top5_idx={any})", .{ c, sel.tok, sel.rank, want_tok, want_rank, idx });
+        }
+        if (want_rank != 0) n_bit_top1 += 1;
+        for (1..k) |j| {
+            if (top5_val[c * k + j] == top5_val[c * k + j - 1]) n_ties += 1;
+        }
+    }
+
+    // ---- Véhicule 2 : les cas de VALIDATION (§4.1) ----
+    var n_val_ok: usize = 0;
+    var n_val_total: usize = 0;
+    var n_eot_not_in_eos: usize = 0; // compteur 2/6
+    var n_out_of_range: usize = 0; // compteur 3/6
+    var n_begin_suppress: usize = 0; // compteur 4/6
+    var n_eos_empty: usize = 0; // compteur 5/6
+    var n_dedup: usize = 0; // compteur 6/6
+
+    if (root.get("validation_cases")) |vc| {
+        for (vc.array.items) |case_v| {
+            const case = case_v.object;
+            const name = (case.get("name") orelse return error.MissingManifest).string;
+            const content = (case.get("content") orelse return error.MissingManifest).string;
+            const eot_id: u32 = @intCast((case.get("eot_id") orelse return error.MissingManifest).integer);
+            const want_err = if (case.get("expect_error")) |e| e.string else "";
+            n_val_total += 1;
+
+            var cfg = gencfg.parseFromSlice(allocator, content, name, .{
+                .vocab_size = vocab_size,
+                .eot_id = eot_id,
+            }) catch |err| {
+                const got = @errorName(err);
+                if (std.mem.eql(u8, got, want_err)) {
+                    n_val_ok += 1;
+                    if (std.mem.eql(u8, got, "EotNotInEosList")) n_eot_not_in_eos += 1;
+                    if (std.mem.eql(u8, got, "SuppressIdOutOfRange")) n_out_of_range += 1;
+                    if (std.mem.eql(u8, got, "BeginSuppressUnsupported")) n_begin_suppress += 1;
+                    if (std.mem.eql(u8, got, "EosListEmpty")) n_eos_empty += 1;
+                } else {
+                    log.err("cas de validation '{s}' FAIL — erreur {s}, attendu {s}", .{ name, got, if (want_err.len == 0) "ACCEPTÉ" else want_err });
+                }
+                continue;
+            };
+            defer cfg.deinit(allocator);
+
+            if (want_err.len != 0) {
+                log.err("cas de validation '{s}' FAIL — ACCEPTÉ, alors que {s} était attendu", .{ name, want_err });
+                continue;
+            }
+            // Cas accepté : si le manifest annonce une déduplication, elle doit avoir eu lieu.
+            if (case.get("expect_suppress_len")) |want_len| {
+                const want: usize = @intCast(want_len.integer);
+                if (cfg.suppress.len != want) {
+                    log.err("cas de validation '{s}' FAIL — suppress.len={d}, attendu {d} (déduplication)", .{ name, cfg.suppress.len, want });
+                    continue;
+                }
+                if (case.get("is_dedup_case")) |b| {
+                    if (b.bool) n_dedup += 1;
+                }
+            }
+            n_val_ok += 1;
+        }
+    }
+
+    // ---- Véhicule 3 : la DÉCOUVERTE 1-hop (§4.1) ----
+    var n_disc_ok: usize = 0;
+    var n_disc_total: usize = 0;
+    if (root.get("discovery_cases")) |dc| {
+        for (dc.array.items) |case_v| {
+            const case = case_v.object;
+            const name = (case.get("name") orelse return error.MissingManifest).string;
+            const ckpt = (case.get("ckpt") orelse return error.MissingManifest).string;
+            const want_err = if (case.get("expect_error")) |e| e.string else "";
+            n_disc_total += 1;
+
+            const got_path = gencfg.discoverAlloc(allocator, io, null, ckpt) catch |err| {
+                const got = @errorName(err);
+                if (std.mem.eql(u8, got, want_err)) {
+                    n_disc_ok += 1;
+                } else {
+                    log.err("cas de découverte '{s}' FAIL — erreur {s}, attendu {s}", .{ name, got, if (want_err.len == 0) "un chemin" else want_err });
+                }
+                continue;
+            };
+            defer allocator.free(got_path);
+
+            if (want_err.len != 0) {
+                log.err("cas de découverte '{s}' FAIL — a résolu {s}, alors que {s} était attendu", .{ name, got_path, want_err });
+                continue;
+            }
+            const want_path = (case.get("expect_path") orelse return error.MissingManifest).string;
+            if (std.mem.eql(u8, got_path, want_path)) {
+                n_disc_ok += 1;
+            } else {
+                log.err("cas de découverte '{s}' FAIL — got={s} want={s}", .{ name, got_path, want_path });
+            }
+        }
+    }
+
+    // ---- Verdict : exactitude ET non-vacuité ----
+    const exact_ok = (n_sel_ok == n_cases) and (n_val_ok == n_val_total) and (n_disc_ok == n_disc_total);
+    const vac = [_]struct { name: []const u8, n: usize }{
+        .{ .name = "id supprimé top-1", .n = n_bit_top1 },
+        .{ .name = "EotNotInEosList", .n = n_eot_not_in_eos },
+        .{ .name = "SuppressIdOutOfRange", .n = n_out_of_range },
+        .{ .name = "BeginSuppressUnsupported", .n = n_begin_suppress },
+        .{ .name = "EosListEmpty", .n = n_eos_empty },
+        .{ .name = "doublons dédupliqués", .n = n_dedup },
+    };
+    var vac_ok = true;
+    for (vac) |v| {
+        if (v.n == 0) {
+            log.err("NON-VACUITÉ FAIL — le cas « {s} » n'a été exercé 0 fois : ce chemin n'est PAS validé", .{v.name});
+            vac_ok = false;
+        }
+    }
+    log.info("GC1 non-vacuité : top1_supprimé={d} eot_not_in_eos={d} out_of_range={d} begin_suppress={d} eos_empty={d} dedup={d} | égalités exactes rencontrées={d} (C2)", .{ n_bit_top1, n_eot_not_in_eos, n_out_of_range, n_begin_suppress, n_eos_empty, n_dedup, n_ties });
+
+    if (exact_ok and vac_ok) {
+        log.info("SELFTEST GENCFG PASS — sélection {d}/{d}, validations {d}/{d}, découverte {d}/{d}, 6/6 compteurs non nuls", .{ n_sel_ok, n_cases, n_val_ok, n_val_total, n_disc_ok, n_disc_total });
+    } else {
+        log.err("SELFTEST GENCFG FAIL — sélection {d}/{d}, validations {d}/{d}, découverte {d}/{d}, non-vacuité={}", .{ n_sel_ok, n_cases, n_val_ok, n_val_total, n_disc_ok, n_disc_total, vac_ok });
+        return error.SelftestGencfgFailed;
+    }
+}
+
+// ============================================================================================
 // 12B (plan Task 8 point 2) : `Tabs` (embed_tokens_per_layer, L3 E2B) est SUPPRIMÉ — la clé
 // `embed_tokens_per_layer.weight` N'EXISTE PAS au checkpoint 12B (ple_dim=0), createTensor
 // crasherait (précédent w4.zig:56-58). Le selftest-gather est adapté EMB-ONLY pour la même
@@ -707,7 +959,11 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 // (`top5Of` SUPPRIMÉ, Task 4 historique). top1 = next token ; top5 entier = diagnostic --oracle
 // (spec docs/L3_INGRAPH_DESIGN.md §4, vigilance ties d'argmax). Struct inchangée : même usage par
 // le reste de la boucle (`gen_top5`, diagnostic FAIL Step 5.3).
-const Top5 = struct { idx: [5]usize, val: [5]f32 };
+// ⚠ La taille vient de `gencfg.TOP_K` — DÉCLARATION UNIQUE (spec §4.2) : ce type, le `topK`
+// in-graph et la boucle de lecture en étaient trois copies du littéral `5`, et la garde
+// `suppress.len + 1 > TOP_K` de la politique de décodage raisonne sur cette valeur. Trois copies,
+// c'est trois occasions qu'elles divergent en silence.
+const Top5 = struct { idx: [gencfg.TOP_K]usize, val: [gencfg.TOP_K]f32 };
 
 // ============================================================================================
 // Garde VRAM au lancement (docs/VRAM_CHECK_DESIGN.md) — incident du 11 juil 2026 : Ollama à
@@ -822,7 +1078,9 @@ const G12Step = struct {
         const logits, const slk, const slv, const flk, const flv = m.forwardStageGen(0, N12, false, true, p, cache, h0, ctrl);
         // Forme struct à un champ EXIGÉE par `Tensor.topK` (cf zml/nn.zig:1558, seul site d'appel
         // réel dans les sources ZML : `logits.topK(.{ .voc = .voc }, k, .{})`).
-        const t5 = logits.topK(.{ .voc = .voc }, 5, .{});
+        // `gencfg.TOP_K` est un comptime de MÊME VALEUR que le littéral `5` d'avant : le
+        // StableHLO émis est identique, et GC0 le prouve (md5 du dump before_optimizations).
+        const t5 = logits.topK(.{ .voc = .voc }, gencfg.TOP_K, .{});
         // DONATION des caches (spec 2026-07-26 cache-donation) : les 4 caches de sortie aliasent
         // les buffers d'ENTRÉE (reuseBuffer → input_output_alias à la compile) — supprime le
         // double-buffering (2×5,6 GiB à 8k, le mur M3). Contrat : le host ne relit JAMAIS un
@@ -867,7 +1125,7 @@ pub fn run(init: std.process.Init) !void {
     // au lancement (garde AVANT tout early-return de mode). ===
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
-        args.selftest_gather != null))
+        args.selftest_gather != null or args.selftest_gencfg != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -876,6 +1134,14 @@ pub fn run(init: std.process.Init) !void {
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
+        return;
+    }
+
+    // === GC1 : --selftest-gencfg — même patron d'early-return, AVANT tokenizer/VRAM/Platform.
+    // Le chemin est host-only par construction : c'est ce qui rend le gate exécutable sans GPU
+    // (spec §4.5bis) et ce qui interdit d'y mesurer l'eot_id (il vient de la fixture). ===
+    if (args.selftest_gencfg) |fixture_path| {
+        try selftestGencfg(allocator, io, fixture_path);
         return;
     }
 
@@ -1377,7 +1643,7 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         const t5i = t5i_s.items(i32);
         const t5v = t5v_s.items(f32);
         var top5: Top5 = undefined;
-        for (0..5) |j| {
+        for (0..gencfg.TOP_K) |j| {
             top5.idx[j] = @intCast(t5i[j]);
             top5.val[j] = t5v[j];
         }
