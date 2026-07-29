@@ -56,7 +56,19 @@ type `Top5`, le `topK` in-graph, la boucle de lecture).
 | **GC2** — non-régression | **PASS** | témoin **48** et témoin **124** : ids **bit-identiques**, `n_suppress_hits = 0`, ligne littérale `suppress=[258883,258882]` présente (1 occurrence par run) |
 | **GC3** — mordant, critère **statistique** | **PASS** | AVANT (GC12) : `258882` dans **11/20** runs · APRÈS : **0/20** · **p = 1,159e-07** sous H0 · `n_suppress_hits ≥ 1` dans **12/20** · concordance mordant ↔ remplaçant `11814` : **12/12, zéro discordance** |
 | **GC5** — l'oracle ne partage plus l'angle mort | **PASS** | deux runs du **même** script (`script_md5 = 8605874b39b5449bb98af064fbcb5567`, identique des deux côtés), **un seul** flag de différence, tous deux `--compute-fp32`. Branche **nue** : `top5_per_pos[57].ids[0] = 258882`, top-5 `[258882, 11814, 3495, 1548, 13186]` et valeurs `[19.1645, 18.9147, 18.6035, 18.0667, 17.9584]` — **reproduction exacte** des chiffres publiés le 27 juil. Branche **politique** : `top5_policy_per_pos[57].ids[0] = 11814`, `top5_per_pos[57]` **inchangé** à `258882`. `n_match` : **199 → exactement 198**, mismatches `@47 (27069 vs 5743)` et `@57 (11814 vs 258882)` |
-| GC4, GC6, GC7, GC8, GC10, GC11 | **en cours / non mesurés** | — |
+| **GC7** — équivalence runner ↔ oracle, politique des **deux** côtés | **PASS** (au-delà du critère) | témoin produit APRÈS, teacher-forcé fp32. **Variante A** (@47=5743, suppression mordue) : `n_match` **199/200**, **unique mismatch @47** (27069 vs 5743, marge 0,004536), `n_bites=1` — exactement le critère pré-enregistré. **Variante B** (@47=27069) : `n_match` **200/200, ZÉRO mismatch**, `n_bites=0`. `script_md5` identique, transformers 5.14.1 |
+| GC4, GC6, GC8, GC10, GC11 | **en cours / non mesurés** | — |
+
+**Lecture de GC7 — pourquoi deux variantes.** Le critère pré-enregistré (« `n_match == n_total − 1`,
+unique mismatch `@47` ») suppose **implicitement** que le témoin est de la variante A. Le témoin est
+bistable : la variante B porte `27069` @47, qui est **précisément** ce que l'oracle HF calcule. Sur
+cette variante, il n'y a **aucun** écart — 200/200. Un gate écrit à la lettre aurait donc échoué sur
+le meilleur des deux cas. Les deux sont mesurés et publiés.
+
+Conséquence de fond : **sur ce prompt, la seule divergence runner ↔ oracle est le point de
+bifurcation bistable lui-même.** Quand le runner tombe du côté que HF calcule, l'équivalence est
+parfaite sur 200 positions. C'est un renfort direct au verdict GC9 du 29 juil (« @47 est un point
+d'instabilité numérique, le forward est hors de cause »).
 
 **Lecture de GC5.** La branche nue reproduisant `tf200.json` au chiffre près, la garde du gate est
 franchie : l'instrument n'est pas en cause, et l'écart mesuré sur la branche politique est bien
