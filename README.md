@@ -158,6 +158,28 @@ Google does not recommend. There is **no silent fallback**: a runner that cannot
 refuses to start. Details, figures and known debt:
 [`docs/GENERATION_CONFIG_RESULTS.md`](docs/GENERATION_CONFIG_RESULTS.md).
 
+**Sampling (phase 2, 29 Jul 2026)** — the 12B now runs the sampling configuration Google ships:
+
+```bash
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tokenizer.json> --prompt "..." \
+  --top-k 64 --top-p 0.95 --temperature 1.0 --seed 42     # reproducible: same seed, same output
+
+--top-k N / --top-p F / --temperature F / --min-tokens-to-keep N / --seed N
+--selftest-sampling <fixture>   # gate S2-U: warpers vs the REAL HF warpers, host-only, no GPU
+--selftest-draw <fixture> --draws N --seed S   # gate S2-D: 10k draws on frozen logits
+```
+
+Two arming conditions, deliberately distinct: the **full host path** arms as soon as any warper is
+requested; the **draw** arms *only* if `--seed` is given. Without a seed, selection stays an
+`argmax` — so filtering settings never silently turn on randomness.
+
+Guards are written **as acceptance**, never as rejection: `p <= 0 → reject` would let `NaN`
+through (every comparison with `NaN` is false). `--temperature 0` is **rejected like HF**;
+`T_MIN = 1e-30` is a **declared, deliberate divergence** (HF accepts `1e-45` and produces `NaN`).
+
+Figures, the 9 known debts, and what is *not* covered:
+[`docs/SAMPLING_RESULTS.md`](docs/SAMPLING_RESULTS.md).
+
 **4-bit weights (W4)** — quantize E2B to w4a16, then decode it on GPU:
 
 ```bash

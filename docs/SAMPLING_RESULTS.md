@@ -1,8 +1,8 @@
 # Sampling (phase 2) — résultats
 
-> **Statut : 4 gates sur 5 verts.** `S2-U`, `S2-PONT`, `S2-D`, `S2-R` sont franchis et taggés.
-> `S2-G` et la mesure `M-COUT` restent à exécuter. Ce document n'est **pas** un rapport de
-> clôture : ce qui n'y porte pas de chiffre n'a pas été mesuré.
+> **Statut : LES 5 GATES SONT VERTS** — `S2-U`, `S2-PONT`, `S2-D`, `S2-R`, `S2-G`, tous taggés,
+> plus la mesure publiée `M-COUT`. Ce qui n'est pas couvert est écrit au §5 (9 dettes), et ce qui
+> n'y porte pas de chiffre n'a pas été mesuré.
 >
 > Spec : `docs/superpowers/specs/2026-07-29-sampling-penalty-design.md` (rév. 3) ·
 > Plan : `docs/superpowers/plans/2026-07-29-sampling-phase2.md` (rév. 2) ·
@@ -37,8 +37,29 @@ et le gate n'aurait eu **rien à comparer**.
 | **S2-PONT** — les 2 sélecteurs, même vecteur, même step, même processus | **PASS** | **454 steps comparés** sur 3 runs, **0 désaccord**, **0 égalité exacte**. Antécédent non vide (`n_suppress_hits = 1`). Non-régression : témoin 48 **bit-identique**, témoin 124 identique sur ses **110 premiers ids** |
 | **S2-D** — distributionnel | **PASS** | **χ² = 7,9333** contre **21,665994** critique (df=9, α=0,01, n=10 000), k = **10 ids distincts**, théorique **torch indépendante**. Non-vacuité : biais half-split 10 % ⇒ **χ² = 109,63, FAIL** |
 | **S2-R** — reproductibilité et non-vacuité du RNG | **PASS** | même seed ⇒ histogramme **md5-identique** (host) et ids **identiques** (génération) · 5 seeds ⇒ **5 histogrammes distincts** · 3 seeds ⇒ **3 sorties distinctes** |
-| **S2-G** — le graphe n'a pas bougé | *à exécuter* | témoin figé en Task 0 : md5 `297679847aa04b719942d75d093adf2b`, 1 905 860 o |
-| **M-COUT** — surcoût du chemin complet | *à exécuter* | mesure publiée, **sans PASS/FAIL** |
+| **S2-G** — le graphe n'a pas bougé | **PASS** | md5 `297679847aa04b719942d75d093adf2b` **identique** au témoin figé AVANT la première ligne de code, tout le chemin B ayant été ajouté entre-temps. **Fraîcheur prouvée** : dump neuf, 510 fichiers, 18 956 Ko, mtime du jour |
+| **M-COUT** — surcoût du chemin complet | *mesure publiée, sans PASS/FAIL* | bloc `{D2H + warpers + sélection}` chronométré **in-process** : **moyenne 3 730 µs/step**, max 5 556 µs, n = 88 ⇒ **3,5 % d'un step** (~106 000 µs) |
+
+### Lecture de M-COUT — et une erreur qu'il a révélée dans la spec
+
+La mesure vaut **~27× la borne basse C++** (0,13 %). L'écart s'explique par le **mode de
+compilation** : le binaire est en **`dbg`** (`bazel-out/host_glibc-dbg`, vérifié), pas en `opt`.
+Ce n'est pas un défaut du design — mais ce n'est **pas prouvé** tant que la mesure `opt` n'est pas
+faite (**dette D9**).
+
+⚠ **Surtout, cette mesure a révélé que la base de calcul de la spec était fausse d'un facteur 12.**
+La table F16 rapportait les coûts à « un step de 9 091 µs » — ce qui correspond à **110 tok/s**,
+alors que ce modèle fait **9,x tok/s** (~106 000 µs/step). L'erreur a traversé **deux révisions et
+trois relecteurs** : une sonde annonçait « 110-113 tok/s », je l'ai reprise en corrigeant son
+arithmétique interne (183 % → 177,95 %) **sans vérifier la plausibilité de la base**, alors que
+« 9 tok/s » est écrit partout ailleurs dans ce dépôt. **Raffiner un chiffre faux ne le rend pas
+juste.** Conséquence utile : un tri complet coûterait **15,2 %** d'un step et non 178 % — cher,
+mais pas rédhibitoire.
+
+⚠ **Ne pas mal lire les compteurs S2-PONT d'un run ARMÉ.** Le run de `M-COUT` affiche
+**21 désaccords** : c'est **attendu**, le sampling y diverge légitimement de l'argmax
+(`top_k=64, top_p=0,95, seed=42`). Le gate `S2-PONT` n'est valide qu'en **régime neutre** — c'est
+là qu'il a rendu 454 steps et 0 désaccord.
 
 ## 3. Ce que les gates ont attrapé — et ce qu'ils ont corrigé chez moi
 
@@ -89,6 +110,7 @@ chantier). Ne restent hors périmètre que `bos_token_id` et `pad_token_id`, san
 | **D6** | **E2B non couvert** | Ses runners ne sortent pas les logits du graphe |
 | **D7** | **Custody des coûts F16** | Mesures prises GPU non vierge : absolus à requalifier |
 | **D8** | **Tie-break `argmax` host vs `topK` in-graph** non prouvé équivalent | `S2-PONT` le **publie** (`n_exact_top_ties`, observé à **0**) au lieu de le supposer résolu |
+| **D9** | **`M-COUT` mesuré en build `dbg`** | La mesure en `opt` reste à faire. L'écart de ~27× avec la borne C++ s'explique **probablement** par le mode de compilation — « probablement » tant que ce n'est pas mesuré |
 
 ## 6. Divergences délibérées avec HF, déclarées
 

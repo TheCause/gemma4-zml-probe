@@ -73,11 +73,19 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
 - [x] **Plan** `docs/superpowers/plans/2026-07-29-sampling-phase2.md` **rév. 2** — 8 tâches,
       **zéro `…` de code** (la rév. 1 avait 11 bloquants d'exécutabilité).
 - [x] **Registre** `2026-07-29-sampling-penalty-arbitrage.md` — 42 findings arbitrés, 3 **nuancés**.
-- [ ] **Exécuter** : Task 0 → **S2-U** (host-only, **zéro GPU**) → S2-PONT (STOP) → S2-D/S2-R → S2-G.
+- [x] **EXÉCUTÉ (29 juil)** — **les 5 gates sont verts et taggés** :
+      **S2-U** 10/10 (contre-prouvé par 2 mutations) · **S2-PONT** 454 steps / **0 désaccord** ·
+      **S2-D** χ² 7,93 < 21,67 (non-vacuité à 109,63) · **S2-R** même seed ⇒ identique, 3 seeds ⇒
+      3 sorties · **S2-G** md5 HLO **identique** au témoin figé avant la 1ʳᵉ ligne de code.
+      Mesure publiée **M-COUT** : 3 730 µs/step = **3,5 %** d'un step.
+      Résultats : `docs/SAMPLING_RESULTS.md`.
+- [ ] ⚠ **Dette D9** : `M-COUT` mesuré en build **`dbg`**. La mesure en `opt` reste à faire —
+      l'écart de ~27× avec la borne C++ s'explique *probablement* par là, et « probablement » n'est
+      pas « mesuré ».
 - [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
       Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
-- [ ] ⚠ **Dette D1** : `applyTopP` n'aura **aucune couverture GPU** — sa seule couverture est la
-      fixture. Déclarée, pas tue.
+- [ ] ⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a **aucune couverture GPU** — sa
+      seule couverture est la fixture `S2-U`. Déclarée, pas tue.
 - [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
       leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
       coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour

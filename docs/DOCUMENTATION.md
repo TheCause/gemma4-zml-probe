@@ -691,11 +691,14 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
 
 **Limites assumées** (baseline de recherche, pas moteur de prod) :
 
-- **Le sampling n'est pas implémenté** — et c'est une limite plus forte qu'il n'y paraît :
-  `do_sample: true, top_k: 64, top_p: 0.95, temperature: 1.0` est la configuration **NOMINALE**
-  publiée par Google pour ce modèle. Le greedy n'est donc pas « le cas simple » du modèle, c'est
-  un **régime que Google ne recommande pas**. Depuis le 29 juil, le portage applique 2 des 8 clés
-  de `generation_config.json` (suppression + EOS) et **nomme les 6 autres** dans son log.
+- ~~Le sampling n'est pas implémenté~~ — **fait le 29 juil 2026** (5 gates, cf.
+  [`SAMPLING_RESULTS.md`](SAMPLING_RESULTS.md)). Le 12B applique désormais **6 clés sur 8** de
+  `generation_config.json` : `suppress_tokens` + `eos_token_id`, puis `do_sample`, `top_k`,
+  `top_p`, `temperature`, avec un tirage **reproductible à seed fixée**. Ne restent hors périmètre
+  que `bos_token_id` et `pad_token_id`, sans objet au décodage.
+  ⚠ **Ce qui n'est PAS couvert** : `applyTopP` n'a **aucune couverture GPU** (sa seule couverture
+  est la fixture host) et `applyTemperature` n'est pas exercé de bout en bout — la config Google
+  ne l'instancie pas, puisque `T = 1.0`. Dettes D1 et D2 du doc de résultats.
 - **Périmètre E2B non couvert par la politique de décodage** : les runners E2B ne sortent pas les
   logits de leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a de toute façon **pas** de
   `suppress_tokens` — y coder `258882` en dur serait faux. Pour eux, « reproduit ce que
