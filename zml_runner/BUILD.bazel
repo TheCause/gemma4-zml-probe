@@ -524,7 +524,7 @@ zig_binary(
     main = "gemma4_g12auto.zig",
     # gencfg.zig : politique de décodage generation_config.json (host-side, spec 2026-07-28).
     # Tout fichier @import-é doit être exposé au sandbox Bazel (convention BUILD.bazel:373-374).
-    srcs = ["engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig"],
+    srcs = ["engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig", "sampling.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
@@ -534,7 +534,7 @@ zig_binary(
 zig_binary(
     name = "gemma4_g12a4k",
     main = "gemma4_g12a4k.zig",
-    srcs = ["gemma4_g12auto.zig", "engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig"],
+    srcs = ["gemma4_g12auto.zig", "engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig", "sampling.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )
@@ -544,7 +544,7 @@ zig_binary(
 zig_binary(
     name = "gemma4_g12a8k",
     main = "gemma4_g12a8k.zig",
-    srcs = ["gemma4_g12auto.zig", "engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig"],
+    srcs = ["gemma4_g12auto.zig", "engine.zig", "mem_probe.zig", "w4.zig", "g12.zig", "gencfg.zig", "sampling.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
 )

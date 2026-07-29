@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "produced_by": "scripts/72_sampling_fixture.py",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0"
+  },
+  "vocab_reel": 262144,
+  "seuil_sort_stable": 128,
+  "n_cases": 10,
+  "cases": [
+    {
+      "name": "topp_disjoint_8egaux",
+      "warper": "top_p",
+      "params": {
+        "top_p": 0.25,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "indices",
+      "n_survivants": 2,
+      "discrimine": "tri ascendant + `<=` : ensembles DISJOINTS du naïf descendant"
+    },
+    {
+      "name": "topp_minkeep_1",
+      "warper": "top_p",
+      "params": {
+        "top_p": 0.1,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "indices",
+      "n_survivants": 1,
+      "discrimine": "min_keep protège la queue du tri ASCENDANT, pas le début"
+    },
+    {
+      "name": "topp_minkeep_2",
+      "warper": "top_p",
+      "params": {
+        "top_p": 0.1,
+        "min_tokens_to_keep": 2
+      },
+      "compare_mode": "indices",
+      "n_survivants": 2,
+      "discrimine": "min_keep protège la queue du tri ASCENDANT, pas le début"
+    },
+    {
+      "name": "topp_minkeep_3",
+      "warper": "top_p",
+      "params": {
+        "top_p": 0.1,
+        "min_tokens_to_keep": 3
+      },
+      "compare_mode": "indices",
+      "n_survivants": 3,
+      "discrimine": "min_keep protège la queue du tri ASCENDANT, pas le début"
+    },
+    {
+      "name": "topk_exaequo_kieme",
+      "warper": "top_k",
+      "params": {
+        "top_k": 3,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "indices",
+      "n_survivants": 5,
+      "discrimine": "élimination STRICTE : top_k ne borne pas le nb de survivants"
+    },
+    {
+      "name": "topk_64egaux_k8",
+      "warper": "top_k",
+      "params": {
+        "top_k": 8,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "indices",
+      "n_survivants": 64,
+      "discrimine": "64 survivants pour k=8 — le cas extrême de (c)"
+    },
+    {
+      "name": "topk_vocab_reel",
+      "warper": "top_k",
+      "params": {
+        "top_k": 64,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "equivalence",
+      "n_survivants": 64,
+      "discrimine": "V = 262 144 : la taille de la PRODUCTION (torch.sort n'y est pas stable)"
+    },
+    {
+      "name": "topp_vocab_reel",
+      "warper": "top_p",
+      "params": {
+        "top_p": 0.95,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "equivalence",
+      "n_survivants": 464,
+      "discrimine": "idem, chemin top_p"
+    },
+    {
+      "name": "temp_puis_topk",
+      "warper": "temp_top_k",
+      "params": {
+        "temperature": 0.7,
+        "top_k": 2,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "indices",
+      "n_survivants": 3,
+      "discrimine": "÷T fusionne deux logits en f32 => 3 survivants au lieu de 2"
+    },
+    {
+      "name": "topk_puis_topp",
+      "warper": "top_k_top_p",
+      "params": {
+        "top_k": 64,
+        "top_p": 0.95,
+        "min_tokens_to_keep": 1
+      },
+      "compare_mode": "equivalence",
+      "n_survivants": 41,
+      "discrimine": "chaîne réelle de HF : top_k(19) AVANT top_p(20)"
+    }
+  ],
+  "antecedents": {
+    "n_indices": 7,
+    "n_equivalence": 3,
+    "n_topk_deborde": 3,
+    "n_vocab_reel": 3
+  }
+}

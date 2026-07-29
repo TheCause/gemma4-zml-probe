@@ -17,6 +17,7 @@
 //       [--dump-top5] [--out-ids f] [--window-vacuity f] [--no-prealloc]
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 //       [--selftest-gencfg f (GC1 : politique generation_config, host-only, sans GPU ni tokenizer)]
+//       [--selftest-sampling f (S2-U : warpers top_k/top_p/temperature, host-only)]
 //       [--gen-config FICHIER] [--no-gen-config]
 // Politique de décodage (spec 2026-07-28) : `suppress_tokens` + EOS multiples de
 // generation_config.json, appliqués HOST-SIDE sur le top-5 rapatrié. Découverte automatique à
@@ -39,6 +40,8 @@ const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit d
 // spec 2026-07-28-generation-config-design §4.2 — `engine.zig` reste à 0 octet, le graphe ne
 // bouge pas (GC0 le prouve). Le module porte AUSSI `TOP_K`, déclaration unique de la constante 5.
 const gencfg = @import("gencfg.zig");
+// Warpers de sampling (spec 2026-07-29 phase 2) — fonctions pures, host-side, hors du graphe.
+const sampling = @import("sampling.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 // ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
@@ -144,6 +147,7 @@ const Args = struct {
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
+    selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
     // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
     // (sans snapshot ni symlink) : sans ce flag, la découverte échouerait et un gate historique
@@ -168,6 +172,7 @@ const usage =
     "[--force-vram] [--dump-top5] [--out-ids f] [--window-vacuity ids.safetensors] [--no-prealloc] " ++
     "[--selftest-inputs f] [--selftest-gather f (requiert un --prompt factice)] " ++
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
+    "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
     "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
@@ -259,6 +264,13 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.selftest_gencfg = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-sampling")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-sampling attend une valeur (fixture .safetensors ; le sidecar <fixture>.manifest.json est requis à côté)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_sampling = process_args[i];
         } else if (std.mem.eql(u8, a, "--gen-config")) {
             i += 1;
             if (i >= process_args.len) {
@@ -833,6 +845,168 @@ fn selftestGencfg(allocator: std.mem.Allocator, io: std.Io, fixture_path: []cons
 }
 
 // ============================================================================================
+// S2-U — selftest des warpers de sampling, HOST-ONLY (spec phase 2 rév. 3, plan Task 3).
+//
+// La fixture est produite par `scripts/72_sampling_fixture.py` depuis les VRAIS warpers de
+// transformers : on ne compare jamais deux transcriptions du même auteur.
+//
+// FORMAT 1-D CONCATÉNÉ (`logits_in`, `mask_expected`, `offsets`) et non `{N,V}` : les cas ont des
+// vocabulaires de tailles DIFFÉRENTES (8, 5, 262 144), et un padding serait fatal ET silencieux.
+//
+// ⚠ `compare_mode` PAR CAS, écrit par le producteur — jamais deviné ici :
+//   `indices`     : le masque doit être identique À L'IDENTIQUE. Mode le plus fort, licite quand
+//                   les logits du cas sont distincts ou que V <= 128 (`torch.sort` y est stable).
+//   `equivalence` : multiset trié des logits survivants + masse de probabilité. Réservé aux cas
+//                   à ex æquo au-delà de 128, où l'identité des survivants n'est PAS contractuelle.
+// Comparer TOUJOURS par équivalence serait AVEUGLE au cas le plus discriminant : sur 8 logits
+// égaux avec top_p=0,25, HF garde {6,7} et le naïf {0,1} — disjoints, même multiset, même masse.
+// ============================================================================================
+fn selftestSampling(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    // ---- sidecar ----
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}.manifest.json", .{fixture_path});
+    defer allocator.free(manifest_path);
+    var mf = std.Io.Dir.cwd().openFile(io, manifest_path, .{ .mode = .read_only }) catch |err| {
+        log.err("--selftest-sampling : sidecar illisible ({s}) : {s} — requis (porte params et compare_mode)", .{ manifest_path, @errorName(err) });
+        return error.MissingManifest;
+    };
+    defer mf.close(io);
+    const mlen: usize = @intCast(try mf.length(io));
+    const mtext = try allocator.alloc(u8, mlen);
+    defer allocator.free(mtext);
+    if (try mf.readPositionalAll(io, mtext, 0) != mlen) return error.ShortRead;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, mtext, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const cases = (root.get("cases") orelse return error.MissingManifest).array;
+
+    // ---- fixture ----
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+    const logits_in = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "logits_in");
+    defer allocator.free(logits_in);
+    const mask_exp = try readFixtureAlloc(u8, .u8, allocator, io, &reg, &file, "mask_expected");
+    defer allocator.free(mask_exp);
+    const offsets = try readFixtureAlloc(i64, .i64, allocator, io, &reg, &file, "offsets");
+    defer allocator.free(offsets);
+
+    if (cases.items.len == 0 or offsets.len != cases.items.len + 1) {
+        log.err("--selftest-sampling : {d} cas mais {d} offsets (attendu {d})", .{ cases.items.len, offsets.len, cases.items.len + 1 });
+        return error.ShapeMismatch;
+    }
+
+    // scratch dimensionné au plus grand cas, alloué UNE FOIS (interdit d'allocation par step)
+    var vmax: usize = 0;
+    for (0..cases.items.len) |c| {
+        const n: usize = @intCast(offsets[c + 1] - offsets[c]);
+        if (n > vmax) vmax = n;
+    }
+    var scratch = try sampling.Scratch.init(allocator, vmax);
+    defer scratch.deinit(allocator);
+    const work = try allocator.alloc(f32, vmax);
+    defer allocator.free(work);
+
+    var n_ok: usize = 0;
+    var n_indices: usize = 0;
+    var n_equiv: usize = 0;
+    var n_topk_deborde: usize = 0; // antécédent : top_k laisse PLUS de k survivants (F9)
+    var n_vocab_reel: usize = 0; // antécédent : au moins un cas à l'échelle de production (F14)
+
+    for (cases.items, 0..) |case_v, c| {
+        const case = case_v.object;
+        const name = (case.get("name") orelse return error.MissingManifest).string;
+        const mode = (case.get("compare_mode") orelse return error.MissingManifest).string;
+        const warper = (case.get("warper") orelse return error.MissingManifest).string;
+        const params = (case.get("params") orelse return error.MissingManifest).object;
+
+        const lo: usize = @intCast(offsets[c]);
+        const hi: usize = @intCast(offsets[c + 1]);
+        const n = hi - lo;
+        const buf = work[0..n];
+        @memcpy(buf, logits_in[lo..hi]);
+
+        const min_keep: u32 = if (params.get("min_tokens_to_keep")) |v| @intCast(v.integer) else 1;
+
+        // Ordre de HF (F8) : Temperature(17) → TopK(19) → TopP(20)
+        if (params.get("temperature")) |v| {
+            const t: f32 = @floatCast(v.float);
+            if (t != 1.0) sampling.applyTemperature(buf, t);
+        }
+        if (params.get("top_k")) |v| {
+            sampling.applyTopK(buf, @intCast(v.integer), min_keep, &scratch);
+        }
+        if (params.get("top_p")) |v| {
+            const p: f32 = @floatCast(v.float);
+            sampling.applyTopP(buf, p, min_keep, &scratch);
+        }
+
+        var n_surv: usize = 0;
+        for (buf) |x| {
+            if (x != sampling.FILTER) n_surv += 1;
+        }
+        if (params.get("top_k")) |v| {
+            if (n_surv > @as(usize, @intCast(v.integer))) n_topk_deborde += 1;
+        }
+        if (n == VOCAB_CONTRACT) n_vocab_reel += 1;
+
+        var ok = true;
+        if (std.mem.eql(u8, mode, "indices")) {
+            n_indices += 1;
+            for (buf, 0..) |x, i| {
+                const got: u8 = if (x != sampling.FILTER) 1 else 0;
+                if (got != mask_exp[lo + i]) {
+                    if (ok) log.err("cas '{s}' ({s}) FAIL — indice {d} : nous={d} HF={d}", .{ name, warper, i, got, mask_exp[lo + i] });
+                    ok = false;
+                }
+            }
+        } else {
+            n_equiv += 1;
+            // classe d'équivalence : même NOMBRE de survivants et même MASSE (les logits
+            // survivants sont ex æquo par construction dans ce mode).
+            var n_exp: usize = 0;
+            var sum_got: f64 = 0;
+            var sum_exp: f64 = 0;
+            for (buf, 0..) |x, i| {
+                if (x != sampling.FILTER) sum_got += logits_in[lo + i];
+                if (mask_exp[lo + i] == 1) {
+                    n_exp += 1;
+                    sum_exp += logits_in[lo + i];
+                }
+            }
+            const tol = 1e-3 * @max(@abs(sum_exp), 1.0);
+            if (n_surv != n_exp or @abs(sum_got - sum_exp) > tol) {
+                log.err("cas '{s}' ({s}) FAIL — survivants nous={d} HF={d}, somme nous={d:.4} HF={d:.4}", .{ name, warper, n_surv, n_exp, sum_got, sum_exp });
+                ok = false;
+            }
+        }
+        if (ok) n_ok += 1;
+    }
+
+    // ---- non-vacuité : un antécédent vide rend le cas INEXÉCUTABLE, pas PASS (patron GC1) ----
+    var vac_ok = true;
+    if (n_indices == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun cas comparé par INDICES : on retombe sur la règle aveugle", .{});
+        vac_ok = false;
+    }
+    if (n_topk_deborde == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun cas où top_k laisse plus de k survivants : F9 n'est pas exercé", .{});
+        vac_ok = false;
+    }
+    if (n_vocab_reel == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun cas à V={d} : le gate passe à vide (F14)", .{VOCAB_CONTRACT});
+        vac_ok = false;
+    }
+
+    if (n_ok == cases.items.len and vac_ok) {
+        log.info("SELFTEST SAMPLING PASS — cas {d}/{d} (indices {d}, équivalence {d}), antécédents topk_déborde={d} vocab_réel={d}", .{ n_ok, cases.items.len, n_indices, n_equiv, n_topk_deborde, n_vocab_reel });
+    } else {
+        log.err("SELFTEST SAMPLING FAIL — cas {d}/{d} (indices {d}, équivalence {d}), non-vacuité={}", .{ n_ok, cases.items.len, n_indices, n_equiv, vac_ok });
+        return error.SelftestSamplingFailed;
+    }
+}
+
+// ============================================================================================
 // 12B (plan Task 8 point 2) : `Tabs` (embed_tokens_per_layer, L3 E2B) est SUPPRIMÉ — la clé
 // `embed_tokens_per_layer.weight` N'EXISTE PAS au checkpoint 12B (ple_dim=0), createTensor
 // crasherait (précédent w4.zig:56-58). Le selftest-gather est adapté EMB-ONLY pour la même
@@ -1208,7 +1382,8 @@ pub fn run(init: std.process.Init) !void {
     // au lancement (garde AVANT tout early-return de mode). ===
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
-        args.selftest_gather != null or args.selftest_gencfg != null))
+        args.selftest_gather != null or args.selftest_gencfg != null or
+        args.selftest_sampling != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -1225,6 +1400,13 @@ pub fn run(init: std.process.Init) !void {
     // (spec §4.5bis) et ce qui interdit d'y mesurer l'eot_id (il vient de la fixture). ===
     if (args.selftest_gencfg) |fixture_path| {
         try selftestGencfg(allocator, io, fixture_path);
+        return;
+    }
+
+    // === S2-U : --selftest-sampling — même patron host-only. C'est ce qui rend le gate
+    // exécutable sans GPU (spec phase 2, objectif O1 : itérer en secondes). ===
+    if (args.selftest_sampling) |fixture_path| {
+        try selftestSampling(allocator, io, fixture_path);
         return;
     }
 
