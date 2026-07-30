@@ -2134,6 +2134,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     defer generated.deinit(allocator);
     var gen_top5: std.ArrayList(Top5) = .empty; // parallèle à `generated` (diagnostic FAIL, Step 5.3)
     defer gen_top5.deinit(allocator);
+    // D10 (C5) : capacité réservée UNE FOIS — borne = limit, qui couvre --oracle (fx.len) ET le
+    // mode libre (max_tokens). Une borne ids.len+max_tokens aurait débordé sur les fixtures
+    // oracle historiques (1150 ids > max_tokens 200) — passe 1 de revue.
+    // ⚠ ÉCART ASSUMÉ à la spec §3 C5 (« ids.len + limit ») : les listes ne reçoivent QUE des
+    // tokens de la phase gen — borne resserrée à limit (+1 pour gen_top5, qui reçoit s0 avant
+    // generated), déclaré ici et dans le message de commit.
+    try generated.ensureTotalCapacity(allocator, limit);
+    try gen_top5.ensureTotalCapacity(allocator, limit + 1);
 
     log.info("Boucle autonome : {d} steps de prefill, puis génération (limite {d}{s})", .{ ids.len, limit, if (oracle_ids != null) " = fed.len, oracle" else " = max_tokens" });
 
@@ -2298,7 +2306,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             if (dt > scfg.cout_ns_max) scfg.cout_ns_max = dt;
             scfg.n_cout_samples += 1;
         }
-        if (in_gen_phase) try gen_top5.append(allocator, top5);
+        if (in_gen_phase) try gen_top5.appendBounded(top5); // D10 (C5) : garde ACTIVE tous modes (appendAssumeCapacity = UB en ReleaseFast)
         // W4g (protocole de flip) : marge top1−top2 par step de génération, mode oracle seulement.
         // ⚠ La marge BRUTE ne suffit plus dès que la suppression mord : elle parle de deux tokens
         // dont le premier n'est pas celui qu'on a retenu. Cette marge est l'instrument de
@@ -2348,7 +2356,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             continue;
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
-        try generated.append(allocator, tok);
+        try generated.appendBounded(tok); // D10 (C5) : idem — error.OutOfMemory si la borne était fausse, jamais une UB
         // D10 (C8) : sonde VmRSS — tokens générés 20 et 200, buffers de pile (zéro alloc Zig).
         if (generated.items.len == 20) rss_t20 = mem_probe.rssKb(io);
         if (generated.items.len == 200) rss_t200 = mem_probe.rssKb(io);
