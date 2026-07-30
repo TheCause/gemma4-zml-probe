@@ -7,6 +7,13 @@
 > lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
 > **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
 > Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+>
+> **⚠ Build mode of published benchmarks (30 Jul 2026).** `-c opt` only sets the C++ backend; the
+> Zig frontend mode is a separate Bazel flag. Throughput figures published before that date were
+> measured in an unproven mode: exposure is **+7.8 %** on GPU-bound tok/s (the 12B does 9.6-9.7,
+> not 9.0) and up to **×8.7** on a pure host timer. **Equivalence claims and paired differentials
+> are unaffected.** Audit of the repo's 174 performance claims and the prevention now in place:
+> `docs/MODE_BUILD_AUDIT.md`.
 
 A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 **[ZML](https://github.com/zml/zml)** — the Zig + MLIR + OpenXLA inference compiler — built and
@@ -43,7 +50,9 @@ prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
 | **L3 in-graph** | gather + `forwardStep` + top-k fused in one compiled graph, host threads a single scalar/step — **113 tok/s** | PR #7 |
 | **Static batching** | shape-polymorphic engine (one binary, byte-identical HLO for all B); **113 → 2106 tok/s** (B=64, ×18.5), mono-sequence non-regression 0.999 | PR #8, `docs/BATCHING_RESULTS.md` |
 | **4-bit weights (W4)** | `dequantW4` brick (int4 w4a16 compressed-tensors → bf16 in-graph); E2B-W4 decode GPU **48/48 == HF reading the same checkpoint**, **40.9 tok/s**, real VRAM peak **10 524 MiB (−37 % vs bf16)** | PR #9, `docs/W4_RESULTS.md` |
-| **Gemma 4 12B on one 3090 (W4-J2)** | official `gemma-4-12B-it-qat-w4a16-ct` (48 layers, heterogeneous GQA/MQA with K=V full layers) decodes in ZML: **1150 tokens @ 9.0 tok/s**, real VRAM peak **16 680 MiB** (bf16 weights alone: 24 GB — impossible); teacher-forced **== HF-fp32 STRICT, 48/48 + 1150/1150, zero requalification** (fp32-compute oracle on bf16 storage); E2B engine preserved by **byte-identical HLO** proof | `docs/U_12B_RESULTS.md` |
+| **Gemma 4 12B on one 3090 (W4-J2)** | official `gemma-4-12B-it-qat-w4a16-ct` (48 layers, heterogeneous GQA/MQA with K=V full layers) decodes in ZML: **1150 tokens @ 9.0 tok/s** (**9.6-9.7 tok/s** re-measured in a proven build mode, see below), real VRAM peak **16 680 MiB** (bf16 weights alone: 24 GB — impossible); teacher-forced **== HF-fp32 STRICT, 48/48 + 1150/1150, zero requalification** (fp32-compute oracle on bf16 storage); E2B engine preserved by **byte-identical HLO** proof | `docs/U_12B_RESULTS.md` |
+| **Decoding policy** (`generation_config`) | the port now applies what Google ships: `suppress_tokens` + the **3 EOS**, then host-side `top_k`/`top_p`/`temperature` and **seed-reproducible sampling** — **6 of the 8 keys**, instead of a greedy the model card does not recommend. Graph untouched (byte-identical HLO) | PR #17/#18, `docs/GENERATION_CONFIG_RESULTS.md`, `docs/SAMPLING_RESULTS.md` |
+| **Zero host allocation per step (D10)** | the decode loop performs **no Zig allocator call per step** (device→host straight into a persistent buffer, top-k to the stack, hoisted call args, pre-reserved lists) — and the ban is **enforced by a permanent counter gate**, not by code review. Sampling block **3 796 → 908.7 µs/step** (0.86 % of a step). *Pinned memory hypothesis refuted by A/B* | PR #19, `docs/D10_RESULTS.md` |
 
 ## Why
 
@@ -87,6 +96,18 @@ shared-assumption false passes; selected milestones were adversarially reviewed.
 is **token-exact == HF**; in bf16 / on recompiled GPU it becomes **≤ 2× the measured HF-bf16 envelope**
 (no bit-for-bit between two XLA-GPU compiles — autotuning). Counter-tests are checked on **logits**,
 not argmax (greedy is too robust to reveal a masked path).
+
+Two rules were added the hard way, each after a control failed to do its job:
+
+- **A ban with no gate will be broken** — including by the very chantier that writes it. Bans are
+  now bound to an instrument (an always-on allocation counter, a measured RSS ceiling) or written
+  down as *not enforced*, never left to code review.
+- **Benchmarks state their build mode, proven by the binary itself.** `-c opt` only sets the C++
+  backend; the Zig frontend mode is a separate Bazel flag. Two concordant measurements once
+  "refuted" a build hypothesis while both arms were running debug code (×8.7 artifact). Builds go
+  through `zml_runner/build_3090.sh`, every run prints `BUILD: mode=…`, and a gate log without it
+  is *unrunnable*, not passing. Full audit of the repo's 174 performance claims:
+  `docs/MODE_BUILD_AUDIT.md`.
 
 ## Repo layout
 
@@ -197,16 +218,20 @@ envelope. HF stays the reference oracle; ZML is the validated engine that reprod
 
 ## Limitations / not done (optional extensions)
 
-Text path only — **multimodal (vision/audio) out of scope**. No sampling (greedy only), no
-continuous batching / serving, no fast-prefill, 256K context not exercised. The static-batch path
-assumes equal tokenized prompt lengths. On E2B the 4-bit VRAM gain is bounded by the bf16 embeddings
-(expected — the brick targets the 12B, where the linears dominate). No independent perf benchmarks
-beyond the reported token-for-token gates.
+Text path only — **multimodal (vision/audio) out of scope**. No continuous batching / serving, no
+fast-prefill, 256K context not exercised. The static-batch path assumes equal tokenized prompt
+lengths. On E2B the 4-bit VRAM gain is bounded by the bf16 embeddings (expected — the brick targets
+the 12B, where the linears dominate). No independent perf benchmarks beyond the reported
+token-for-token gates.
 
-**Next (at the design stage):** porting **Gemma 4 12B** (`Gemma4Unified`) on the 3090 via the 4-bit
-brick — spec drafted, execution gated on a go/no-go decision (see
-[`docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`](docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md)).
-An upstream-ZML flash-attention path (batch > 1) would require paged KV.
+**Sampling is no longer a limitation** (12B only): `top_k`/`top_p`/`temperature` + seed-reproducible
+draw are implemented host-side and gated. Still open, written down rather than hidden:
+**repetition penalty** (specified, not executed), **`applyTopP` has no GPU coverage** (fixture only),
+the **E2B** runners don't expose logits so the decoding policy can't apply there, and C/PJRT-side
+allocations are *bounded* (< ~450 mallocs/step, measured) rather than counted.
+
+**Next (at the design stage):** an upstream-ZML flash-attention path (batch > 1) would require
+paged KV; a Triton kernel is the credible route.
 
 ## License & attribution
 

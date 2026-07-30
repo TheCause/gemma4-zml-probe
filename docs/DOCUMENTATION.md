@@ -29,7 +29,8 @@ Le but n'est **pas** « faire tourner Gemma 4 » (Ollama, llama.cpp, vLLM le fon
 - il ajoute **Gemma au catalogue ZML** (l'upstream ne livre que Llama / Qwen / LFM).
 
 C'est une **baseline de recherche**, pas un moteur de production : fp32 (avec un régime bf16 validé),
-mono-séquence, sans sampling ni fast-prefill.
+mono-séquence, sans fast-prefill. Le **sampling** (`top_k`/`top_p`/`temperature` + tirage
+reproductible) est en revanche implémenté et gaté depuis le 29-30 juil 2026 sur le 12B.
 
 ### Fiche d'identité
 
@@ -337,6 +338,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 |---|---|
 | `engine.zig` | Moteur de decode **chunké** partagé (stages compilés, cache threadé step-à-step) |
 | `gencfg.zig` | **Politique de décodage** `generation_config.json` (host-side) : découverte 1-hop, parsing, 6 validations, `isSuppressed`/`isEos`/`select`. Porte aussi `TOP_K` — déclaration **unique** de la constante 5, qui existait en trois copies. N'entre **pas** dans le graphe (GC0 : HLO byte-identique) |
+| `sampling.zig` | **Warpers de sampling** host-side, fonctions **pures** sur `f32` nus (aucune dépendance ZML ⇒ exerçables sans GPU par `--selftest-sampling`) : `applyTemperature`/`applyTopK`/`applyTopP`/`applySuppression`/`argmax`/`sample`, dans l'ordre **mesuré** de HF. Scratch alloué **une fois** |
+| `alloc_count.zig` | **Compteur d'allocations** (D10) : wrapper std-only de `std.mem.Allocator` posé au point de substitution unique `init.gpa`. **Toujours actif** — chaque run publie `ALLOC-LOOP`/`ALLOC-VAC`/`ALLOC-TOTAL`, ce qui rend l'interdit « aucune allocation par step » vérifié **gratuitement à chaque exécution**, pas seulement le jour du gate |
 | `gemma4_prefill.zig` | Prefill 35 couches |
 | `gemma4_logits.zig` | Head + logits |
 | `gemma4_decode1..4.zig`, `gemma4_decprim.zig` | Decode incrémental (pilote sliding → full → e2e → boucle) |
@@ -355,7 +358,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `g12.zig` | **Géométrie 12B** (`Geom.g12` : 48 couches, GQA/MQA hétérogène, p-RoPE, layer_scalar) — le moteur E2B reste le défaut, preuve HLO U1 |
 | `gemma4_g12gate.zig` | Gates unitaires 12B (U2→U7 : embed, sliding, full K=V, chaîne, prefill+softcap) |
 | `gemma4_g12auto.zig` | **Décode 12B autonome** deux-slices (48+40 v_proj), cache linéaire L_MAX=1280, fenêtre par masque ; flags `--dump-top5 --out-ids --window-vacuity --no-prealloc --oracle` |
-| `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire |
+| `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire (`VmRSS`/`VmSwap` — véhicule du gate `AL-RSS`) |
+| `build_3090.sh`, `deploy_to_3090.sh` | **Build canonique** (les DEUX flags de mode — cf. `MODE_BUILD_AUDIT.md`) ; déploiement rsync |
 
 **Gates unitaires** (une op chacun, conservés comme suite de preuve) : `gemma4_ple_fixture`,
 `gemma4_embed`, `gemma4_q/k/v_proj`, `gemma4_q/k/v_norm`, `gemma4_q/k_rope`, `gemma4_full_qrope/krope`,
@@ -563,6 +567,27 @@ Détails et finding : [`W4_RESULTS.md`](W4_RESULTS.md).
 
 Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULTS.md).
 
+### 7.5 Politique de décodage et sampling (12B — `generation_config.json`)
+
+| Gate | Résultat |
+|---|---|
+| Politique (`GC1`-`GC11`, 29 juil) | `suppress_tokens` + **3 EOS** appliqués ; `258882` passe de **11/20 à 0/20** runs (p = 1,16e-07) ; oracle réaligné (`n_match` 199 → 198) ; graphe **byte-identique** |
+| Sampling (`S2-U`/`S2-PONT`/`S2-D`/`S2-R`/`S2-G`, 29-30 juil) | warpers 10/10 vs HF (contre-prouvés par 2 mutations) ; **454 steps / 0 désaccord** entre les 2 sélecteurs ; χ² **7,93** < 21,67 ; même seed ⇒ sortie identique, 3 seeds ⇒ 3 sorties ; md5 HLO identique |
+| **6 clés sur 8** de `generation_config.json` | `suppress_tokens`, `eos_token_id`, `do_sample`, `top_k`, `top_p`, `temperature` — restent `bos`/`pad`, sans objet au décodage |
+
+### 7.6 Coût du chemin host et allocations (D10, 30 juil — **mode de build prouvé**)
+
+| Mesure | Avant | Après | Note |
+|---|---|---|---|
+| Allocations Zig par step (boucle de gen) | **12 appels, ≈ 2,29 MiB** | **0 appel, 0 octet** | gate `AL-0`, compteur toujours actif |
+| Bloc chemin B (D2H + warpers + sélection) | 3 796 µs = 3,6 % d'un step | **908,7 µs = 0,86 %** | `M-D10`, n=128, nominal |
+| dont D2H seul | 1 514 µs (0,65 Go/s) | **447 µs (2,37 Go/s)** | l'hypothèse *pinned* est **RÉFUTÉE** par A/B (ON 441,7 / OFF 447,1) |
+| Dérive VmRSS (token 20 → 200) | — | **148 KiB** < 5 120 | gate `AL-RSS` (critère B10) |
+| Mallocs C/PJRT par step | inconnus | **< ~450** (borne différentielle) | dette DA-1, `LD_PRELOAD` |
+| Débit 12B au mode **prouvé** | 9,0 tok/s (mode ambigu) | **9,6-9,7 tok/s** | +7,8 % — cf. [`MODE_BUILD_AUDIT.md`](MODE_BUILD_AUDIT.md) |
+
+Détails et contre-preuves (3 FAIL de mutant, archivés) : [`D10_RESULTS.md`](D10_RESULTS.md).
+
 ---
 
 ## 8. Pièges et garde-fous (capitalisés — à lire avant de toucher au code)
@@ -684,6 +709,21 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
     pointé, et un `realpath` complet atterrit dans `blobs/<sha256>`, qui ne le contient pas. **Un
     seul hop**, et la cible peut être **relative** (cache HF) donc à résoudre contre
     `dirname(ckpt)`.
+27. **`-c opt` ne règle PAS le mode du frontend Zig** (30 juil, dette D9 → chantier D10) : le mode
+    de rules_zig est un flag Bazel **indépendant** (`--@rules_zig//zig/settings:mode`, défaut
+    `debug`). Un A/B `dbg` vs « opt » a rendu **deux mesures concordantes** (3 730 vs 3 828 µs) et
+    conclu « le build n'explique rien, le coût est structurel » — **les deux bras exécutaient du
+    code debug**. Au mode réellement prouvé, le même bloc coûte **×4 moins** (warpers ×8,7). La
+    taille du binaire (451 → 40 Mo) prouvait le rebuild du **backend**, pas le mode du code
+    chronométré. **Remèdes** : builder via `zml_runner/build_3090.sh` (les deux flags, source
+    unique) et faire **publier son mode par le binaire** (`BUILD: mode=…`, greppé par chaque
+    gate). Audit des 174 claims du repo : [`MODE_BUILD_AUDIT.md`](MODE_BUILD_AUDIT.md).
+28. **« Aucune allocation par step » ne se tient pas par la revue de code** (30 juil, D10) :
+    l'interdit a été violé par le chantier qui l'écrivait, à 480 lignes du commentaire qui le
+    posait. Un interdit se lie à un **instrument** (ici un `CountingAllocator` toujours actif,
+    dont chaque run publie les compteurs) ou s'écrit « **NON GARDÉ** ». Corollaire mesuré :
+    `toSliceAlloc` fait **deux** allocations par appel (résultat + staging par shard) plus un
+    memcpy interne — une dette qui dit « alloue 1 Mo » peut sous-compter d'un facteur 2.
 
 ---
 
@@ -709,6 +749,21 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
 - **La trajectoire libre du 12B est BISTABLE** sur au moins un prompt (bifurcation unique @47,
   11/20 vs 9/20) : un gate de fidélité position-par-position **doit être teacher-forcé**, jamais
   posé sur une génération libre. Cf [`FINDING_NONDETERMINISME_TRAJECTOIRE.md`](FINDING_NONDETERMINISME_TRAJECTOIRE.md).
+  ⚠ Vérifié à nouveau le 30 juil **en conditions réelles** : un run oracle 200 steps a bifurqué
+  exactement @47, à la position cartographiée — le finding n'est pas un artefact d'époque.
+- ~~L'interdit « aucune allocation par step » n'a pas de gate porteur~~ — **soldé le 30 juil**
+  ([`D10_RESULTS.md`](D10_RESULTS.md)) : la boucle de décodage ne fait **aucun appel à
+  l'allocateur Zig par step**, gardé par un compteur **toujours actif** (`AL-0`/`AL-VAC`) et un
+  plafond VmRSS (`AL-RSS`). Ce qui reste **hors** de cet instrument, écrit : les allocations
+  **C/PJRT** (bornées par mesure différentielle à **< ~450 mallocs/step**, dette DA-1) et celles
+  de `std.Io.Threaded` (DA-6).
+- ⚠ **Les chiffres de PERFORMANCE antérieurs au 30 juil ont été mesurés en mode de build non
+  prouvé** (`-c opt` ne règle que le backend C++ ; le mode du frontend Zig est un flag Bazel
+  indépendant). Exposition mesurée : **×8,7** sur un chrono host pur, **+7,8 %** sur les tok/s
+  GPU-bound (le 12B fait **9,6-9,7 tok/s**, pas 9,0). Les claims d'**équivalence** et les
+  **différentiels appariés** sont insensibles. Audit des 174 claims du repo et prévention
+  (`zml_runner/build_3090.sh` + bannière `BUILD: mode=`) :
+  [`MODE_BUILD_AUDIT.md`](MODE_BUILD_AUDIT.md).
 - Mono-séquence : pas de batching sur le 12B, pas de fast-prefill.
 - Multimodal (vision/audio) hors scope — chemin texte uniquement.
 - `L_MAX` plafonné à 1024 sur CPU (le compile XLA-CPU à k=2048 dépasse l'hôte ~23 Go) ; la fenêtre 512
