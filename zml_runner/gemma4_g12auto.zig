@@ -42,6 +42,10 @@ const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit d
 const gencfg = @import("gencfg.zig");
 // Warpers de sampling (spec 2026-07-29 phase 2) — fonctions pures, host-side, hors du graphe.
 const sampling = @import("sampling.zig");
+// D10 : compteur d'allocations (spec 2026-07-30 zero-alloc, C1) — wrapper std-only de init.gpa,
+// toujours actif ; porteur des gates AL-0/AL-VAC/AL-BASE. `builtin.mode` : bannière BUILD (§8).
+const alloc_count = @import("alloc_count.zig");
+const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 // ── Corps générique du runner, paramétré par la borne de contexte (COMPTIME : elle fixe les
@@ -149,6 +153,7 @@ const Args = struct {
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
+    selftest_alloc_count: bool = false, // S-AC (D10) : le compteur compte, host-only
     draws: usize = 10000,
     // Sampling phase 2 — défauts NEUTRES : sans eux, le chemin B n'est pas armé et le code
     // d'avant le chantier est strictement inchangé.
@@ -183,6 +188,7 @@ const usage =
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
+    "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -287,6 +293,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.selftest_draw = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
+            args.selftest_alloc_count = true;
         } else if (std.mem.eql(u8, a, "--draws")) {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
@@ -1072,6 +1080,49 @@ fn selftestSampling(allocator: std.mem.Allocator, io: std.Io, fixture_path: []co
 }
 
 // ============================================================================================
+// S-AC (D10) — exerce les 4 fonctions vtable du CountingAllocator INSTALLÉ (celui de run()) et
+// vérifie les deltas. On passe par le wrapper déjà en place : c'est l'instrument de production
+// qu'on teste, pas une copie.
+// ============================================================================================
+fn selftestAllocCount(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator) !void {
+    const a0 = counter.n_alloc;
+    const r0 = counter.n_resize;
+    const m0 = counter.n_remap;
+    const f0 = counter.n_free;
+    const by0 = counter.bytes_alloc; // bytes_min en DELTA, comme les autres compteurs
+    const b1 = try allocator.alloc(u8, 64);
+    const b2 = try allocator.alloc(u8, 128);
+    var b3 = try allocator.alloc(u8, 256);
+    if (allocator.resize(b3, 128)) b3 = b3[0..128]; // compte l'APPEL ; longueur mise à jour si accepté (contrat Allocator)
+    if (allocator.remap(b3, 512)) |nb| b3 = nb; // idem
+    allocator.free(b1);
+    allocator.free(b2);
+    // b3 volontairement non libéré ici — libéré après le verdict pour ne pas fausser f_delta.
+    const checks = [_]struct { name: []const u8, got: u64, want: u64 }{
+        .{ .name = "alloc", .got = counter.n_alloc - a0, .want = 3 },
+        .{ .name = "resize", .got = counter.n_resize - r0, .want = 1 },
+        .{ .name = "remap", .got = counter.n_remap - m0, .want = 1 },
+        .{ .name = "free", .got = counter.n_free - f0, .want = 2 },
+        .{ .name = "calls", .got = counter.calls() - (a0 + r0 + m0), .want = 5 },
+        .{ .name = "bytes_min", .got = @intFromBool(counter.bytes_alloc - by0 >= 448), .want = 1 },
+    };
+    var pass: usize = 0;
+    for (checks) |c| {
+        if (c.got == c.want) {
+            pass += 1;
+        } else {
+            log.err("S-AC: {s} = {d}, attendu {d}", .{ c.name, c.got, c.want });
+        }
+    }
+    allocator.free(b3);
+    if (pass != checks.len) {
+        log.err("SELFTEST-AC: FAIL {d}/{d}", .{ pass, checks.len });
+        return error.SelftestFailed;
+    }
+    log.info("SELFTEST-AC: PASS {d}/{d}", .{ pass, checks.len });
+}
+
+// ============================================================================================
 // S2-D — tirage multinomial sur des logits FIGÉS en fixture (spec phase 2, plan Task 5).
 // Écrit un histogramme `counts` que `scripts/72_sampling_fixture.py --chi2` confronte à une
 // théorique **torch** : deux implémentations INDÉPENDANTES. Si les deux partageaient le code,
@@ -1506,8 +1557,13 @@ fn writeIdsSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u
 pub fn run(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
-    const allocator = init.gpa;
+    // D10 (C1) : point de substitution UNIQUE — tout ce qui alloue via `allocator` est compté.
+    var counter = alloc_count.CountingAllocator.init(init.gpa);
+    const allocator = counter.allocator();
     const io = init.io;
+    // Bannière §8 : le mode est PROUVÉ dans chaque log (y compris selftests host, avant tout
+    // early-return) — un log de gate sans `mode=ReleaseFast` est INEXÉCUTABLE, pas PASS.
+    log.info("BUILD: mode={s}", .{@tagName(builtin.mode)});
 
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     const args = try parseArgs(process_args);
@@ -1518,7 +1574,8 @@ pub fn run(init: std.process.Init) !void {
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
         args.selftest_gather != null or args.selftest_gencfg != null or
-        args.selftest_sampling != null or args.selftest_draw != null))
+        args.selftest_sampling != null or args.selftest_draw != null or
+        args.selftest_alloc_count))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -1549,6 +1606,13 @@ pub fn run(init: std.process.Init) !void {
     // distribution du sampler qu'on teste, pas celle du modèle. ===
     if (args.selftest_draw) |fixture_path| {
         try selftestDraw(allocator, io, fixture_path, args.draws, args.seed);
+        return;
+    }
+
+    // === S-AC (D10) : le compteur compte — host-only, aucun GPU. 3 alloc + 1 resize +
+    // 1 remap + 2 free via le wrapper, compteurs comparés aux attendus (spec D10 §5). ===
+    if (args.selftest_alloc_count) {
+        try selftestAllocCount(allocator, &counter);
         return;
     }
 
@@ -1878,6 +1942,14 @@ pub fn run(init: std.process.Init) !void {
         var first_div: ?usize = null;
         var div_max_abs: f64 = 0;
         var n_ident: usize = 0;
+        // === D10 : fenêtre ALLOC-VAC — les boucles de steps SEULES (le buffer logits_p1 et les
+        // futurs init hissés C4/C6 sont HORS fenêtre, spec §3/C6). ===
+        const av0_alloc = counter.n_alloc;
+        const av0_resize = counter.n_resize;
+        const av0_remap = counter.n_remap;
+        const av0_free = counter.n_free;
+        const av0_bytes = counter.bytes_alloc;
+        var av_steps: usize = 0;
         for (0..2) |pass| {
             log.info("WV passe {d}/2 : {d} steps teacher-forcés, masque sliding {s}", .{ pass + 1, s_total, if (pass == 0) "NORMAL (fenêtre 1024)" else "ÉLARGI (causal plein, rebind données)" });
             var cache_wv = zml.Bufferized(engine.Cache){
@@ -1939,12 +2011,19 @@ pub fn run(init: std.process.Init) !void {
                 call_args.deinit(allocator);
                 call_results.deinit(allocator);
                 if ((step + 1) % 256 == 0) log.info("  WV passe {d} ... step {d}/{d}", .{ pass + 1, step + 1, s_total });
+                av_steps += 1;
             }
             cache_wv.sl_k.deinit();
             cache_wv.sl_v.deinit();
             cache_wv.fl_k.deinit();
             cache_wv.fl_v.deinit();
         }
+        // D10 : deltas de la fenêtre ALLOC-VAC (gate AL-VAC).
+        log.info("ALLOC-VAC: alloc={d} resize={d} remap={d} free={d} bytes={d} steps={d}", .{
+            counter.n_alloc - av0_alloc, counter.n_resize - av0_resize,
+            counter.n_remap - av0_remap, counter.n_free - av0_free,
+            counter.bytes_alloc - av0_bytes, av_steps,
+        });
         if (first_div) |q| {
             log.info("WINDOW-VACUITY : logits bit-identiques sur {d} positions, PREMIÈRE DIVERGENCE à q={d} (max_abs à q : {e:.3}) — attendu D10 : q == 1024 exactement (verdict = Task 10/U9-ii)", .{ n_ident, q, div_max_abs });
         } else {
@@ -1967,7 +2046,7 @@ pub fn run(init: std.process.Init) !void {
     // entrelace ses octets avec le premier — une seule file d'écriture).
     var stdout_w = std.Io.File.stdout().writer(io, &.{});
     if (!args.repl) {
-        return generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -1977,7 +2056,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2006,7 +2085,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2023,7 +2102,7 @@ pub fn run(init: std.process.Init) !void {
 // ci-dessous (one-shot, 1er prompt du REPL, prompts suivants du REPL) doivent partager LA même
 // politique. Un oubli sur l'un des trois la rendrait silencieusement inopérante dans ce mode —
 // c'est exactement ce que le gate GC10 vérifie.
-fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -2068,6 +2147,18 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     // gate de mordant qui rapporte 0 n'a rien prouvé.
     var n_suppress_hits: usize = 0;
 
+    // D10 (C8/AL-RSS) : VmRSS échantillonné aux tokens GÉNÉRÉS 20 et 200 (prefill exclu).
+    var rss_t20: ?u64 = null;
+    var rss_t200: ?u64 = null;
+
+    // === D10 : fenêtre ALLOC-LOOP — deltas du compteur autour de la boucle de steps SEULE
+    // (les init hissés et les buffers pré-alloués sont hors fenêtre, spec §3 Publication). ===
+    const al0_alloc = counter.n_alloc;
+    const al0_resize = counter.n_resize;
+    const al0_remap = counter.n_remap;
+    const al0_free = counter.n_free;
+    const al0_bytes = counter.bytes_alloc;
+
     var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
     const t0: std.Io.Timestamp = .now(io, .awake);
@@ -2095,6 +2186,12 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
             zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
         });
+
+        // D10 (DA-3) : shards de r_logits captés au 1er step (le Buffer est deinit par step).
+        if (step == 0) {
+            var sh_it = r_logits.shards();
+            scfg.n_shards = @intCast(sh_it.remaining());
+        }
 
         // top5 : TOUJOURS calculé in-graph (cheap, cf PLAN), ignoré tant qu'on est en prefill (sauf
         // le dernier prefill step, qui produit s0 — cf `in_gen_phase` ci-dessous).
@@ -2242,6 +2339,9 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.append(allocator, tok);
+        // D10 (C8) : sonde VmRSS — tokens générés 20 et 200, buffers de pile (zéro alloc Zig).
+        if (generated.items.len == 20) rss_t20 = mem_probe.rssKb(io);
+        if (generated.items.len == 200) rss_t200 = mem_probe.rssKb(io);
         if (oracle_ids) |fx| {
             if (generated.items.len >= fx.len) break; // stop_reason reste .oracle
         } else {
@@ -2287,6 +2387,15 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     // illisible. Un gate de mordant qui lit `0 fois` n'a rien prouvé — c'est le prompt qu'il faut
     // changer, pas le critère.
     log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
+    // D10 : deltas de la fenêtre ALLOC-LOOP (gate AL-0/AL-BASE) + totaux process (non-vacuité).
+    log.info("ALLOC-LOOP: alloc={d} resize={d} remap={d} free={d} bytes={d} steps={d}", .{
+        counter.n_alloc - al0_alloc, counter.n_resize - al0_resize,
+        counter.n_remap - al0_remap, counter.n_free - al0_free,
+        counter.bytes_alloc - al0_bytes, step + 1,
+    });
+    log.info("ALLOC-TOTAL: alloc={d} free={d} bytes={d} shards={d}", .{
+        counter.n_alloc, counter.n_free, counter.bytes_alloc, scfg.n_shards,
+    });
     if (scfg.pathArmed()) {
         log.info("S2-PONT: steps_comparés={d} désaccords={d} égalités_exactes={d} (chemin B armé)", .{ scfg.n_steps_compared, scfg.n_disagree, scfg.n_exact_top_ties });
         if (scfg.n_cout_samples > 0) {
@@ -2318,6 +2427,13 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.len)) / pf_s else 0;
     const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
     log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+
+    // D10 (C8/AL-RSS) : émis AVANT le verdict oracle A1 — un A1Mismatch n'avale pas la mesure.
+    if (rss_t20 != null and rss_t200 != null) {
+        log.info("RSS-DELTA: {d} KiB (t20={d} t200={d})", .{ rss_t200.? -| rss_t20.?, rss_t20.?, rss_t200.? });
+    } else {
+        log.info("RSS-DELTA: INEXECUTABLE (run trop court : t20={?d} t200={?d})", .{ rss_t20, rss_t200 });
+    }
 
     // === --out-ids (U9) : ids générés -> safetensors (clé "ids", i32) — AVANT le verdict oracle
     // (un A1Mismatch ne doit pas perdre la trace des ids produits, utile au diagnostic). ===
