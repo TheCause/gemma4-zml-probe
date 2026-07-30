@@ -1,4 +1,4 @@
-# Spec — D10 : zéro allocation par step dans le décodage 12B (rév. 2)
+# Spec — D10 : zéro allocation par step dans le décodage 12B (rév. 3)
 
 > **Statut : SPEC — committée AVANT toute mesure** (exigence de falsifiabilité, le git log fait foi).
 > Branche : `s2-d10-alloc-par-step`. Chantier ouvert sur décision Régis du 30 juil 2026 (niveau de
@@ -10,15 +10,23 @@
 > conformément à l'arbitrage **B9** (« compteur d'allocations à 0, pas le débit ») et **B10**
 > (critère RSS chiffré) acceptés le 29 juil et jamais câblés.
 >
-> **Historique** — rév. 1 : `7a1437b`. **Rév. 2 après revue adversariale (4 relecteurs, 31
-> findings, 3 BLOQUANTS)**. Ce que la revue a attrapé : EQ-PONT greppait une ligne que personne
-> n'émet (contrôle qui ne peut pas réussir) · la commande de build §8 produisait un frontend Zig
-> en Debug, rendant TOUS les gates inexécutables par la règle du §8 lui-même · AL-RSS n'avait
-> aucun véhicule (le QUOI sans le COMMENT) · le « repli automatique » de C7 n'existait pas dans
-> l'API et son porteur §6 était un `catch unreachable` = UB en ReleaseFast, pas un panic · la
-> borne C5 était fausse en `--oracle` et `appendAssumeCapacity` y est une UB silencieuse · le
-> témoin 124 de P4 n'avait pas de gate porteur · V-EQ pouvait FAIL à tort sur le jitter de
-> compile (`max_abs` flottant dans la ligne diffée).
+> **Historique** — rév. 1 : `7a1437b`. **Rév. 2** (`5d8e1e7`) après revue adversariale (4
+> relecteurs, 31 findings, 3 BLOQUANTS). Ce que la revue a attrapé : EQ-PONT greppait une ligne
+> que personne n'émet (contrôle qui ne peut pas réussir) · la commande de build §8 produisait un
+> frontend Zig en Debug, rendant TOUS les gates inexécutables par la règle du §8 lui-même ·
+> AL-RSS n'avait aucun véhicule (le QUOI sans le COMMENT) · le « repli automatique » de C7
+> n'existait pas dans l'API et son porteur §6 était un `catch unreachable` = UB en ReleaseFast,
+> pas un panic · la borne C5 était fausse en `--oracle` et `appendAssumeCapacity` y est une UB
+> silencieuse · le témoin 124 de P4 n'avait pas de gate porteur · V-EQ pouvait FAIL à tort sur
+> le jitter de compile (`max_abs` flottant dans la ligne diffée).
+>
+> **Rév. 3 après passe 2 (2 vérificateurs, 12 findings, 3 BLOQUANTS)** : la fixture oracle 200
+> pour AL-RSS **n'existait pas** sur la VM (rp0_witness n'a que des ids, pas `positions`+`fed`) —
+> et `--oracle` n'est PAS teacher-forcé dans ce runner (free-run borné par `fx.len`) · `cmp -n
+> 440` d'EQ-124 comparait le **header safetensors**, pas les ids, et aurait FAIL à tort sur la
+> bistabilité que la borne 110 devait tolérer · le mutant M1 tel qu'écrit n'aurait **pas** fait
+> dériver VmRSS (1 MiB malloc non écrit = mmap non résident) : `@memset` obligatoire · C7
+> allouait `work` (ligne 1662) avant que la Platform existe (ligne 1732).
 
 ## 0. Décisions de cadrage (Régis, 30 juil 2026)
 
@@ -82,9 +90,12 @@ Réconciliation d'unités (leçon « raffiner un chiffre faux ») : **1 step ≈
 8. **F8 — L'identité de l'allocateur `init.gpa` dépend du mode de build** (std `start.zig:668-692`) :
    Debug ⇒ `DebugAllocator` ; ReleaseFast ⇒ `c_allocator` si libc, sinon `smp_allocator`. La
    commande exacte du build « opt » de D9 est **perdue**, et le mode Zig de rules_zig est un
-   flag Bazel **indépendant** de `-c` dont le défaut est `debug` (`.bazelrc:53` et `:106-108` :
-   `--config=debug` met le backend en opt et le frontend Zig en debug). D'où le §8 : la commande
-   de build porte les DEUX flags, et le binaire publie `builtin.mode`.
+   flag Bazel **indépendant** de `-c` dont le défaut `debug` vient de rules_zig lui-même
+   (`rules_zig+/zig/settings/BUILD.bazel` : `string_flag(name = "mode",
+   build_setting_default = "debug")`, valeurs admises `debug`/`release_safe`/`release_small`/
+   `release_fast` — `settings.bzl:51` ; `.bazelrc:106-108` pour l'exemple `--config=debug` qui
+   met le backend en opt et le frontend Zig en debug). D'où le §8 : la commande de build porte
+   les DEUX flags, et le binaire publie `builtin.mode`.
 
 ## 2. Périmètre
 
@@ -260,22 +271,44 @@ scfg.work = dma.allocator().alloc(f32, VOCAB_CONTRACT) catch blk: {
 if (pin_on) dma.allocator().free(scfg.work) else allocator.free(scfg.work);
 ```
 
-Bannière `PIN: ON` / `PIN: OFF (DmaMap indisponible)` dérivée de `pin_on`. Les trois issues
-(indisponible / sans gain / gain) sont publiables, aucune n'est un échec du chantier. Le flag
-`--no-pin` force `pin_on = false` (véhicule de l'A/B de M-PIN). Détail d'API à fixer au plan :
-`DmaAllocator.init(parent, device)` (`mem.zig:22-27`) — le runner nomme le device via la
-Platform qu'il possède déjà.
+Bannière `PIN: ON` / `PIN: OFF (alloc DMA échouée : dmaMap indisponible ou OOM transitoire)`
+dérivée de `pin_on` — le libellé est prudent parce que `DmaMapAllocator.alloc` rend un `null`
+UNIQUE pour deux causes (parent OOM, ou `dmaMap` échoué dont l'erreur PJRT est avalée sans log,
+`mem.zig:148-152`) : le code ne PEUT pas les distinguer ; l'inférence honnête est « le parent
+avait la mémoire ⇒ cause dominante = dmaMap ». Les trois issues (indisponible / sans gain /
+gain) sont publiables, aucune n'est un échec du chantier. Le flag `--no-pin` force
+`pin_on = false` (véhicule de l'A/B de M-PIN).
+
+API et ORDRE vérifiés : `DmaAllocator.init(parent, *const Device)` (`mem.zig:22-28`) et
+`platform.devices: []const Device` (`platform.zig:200`) — `&platform.devices[0]` type-checke.
+⚠ MAIS `scfg.work` est aujourd'hui alloué à la ligne **1662**, AVANT que la Platform existe
+(ligne **1732**) : **l'allocation de `work` déménage APRÈS la création de la Platform** ; le
+reste du bloc SAMPLING (scratch, `resetPerPrompt`, log) reste en place, et le `defer` (:1668-1670)
+adapté suit `pin_on`. Sans ce déménagement, le bloc C7 ne compile pas à l'endroit qu'il
+substitue.
 
 ### C8 — Sonde RSS (véhicule d'AL-RSS, arbitrage B10)
 
 `mem_probe.rssKb()` (lit **VmRSS** — c'est VmRSS que B10 vise, pas un high-water mark ; le pic
 process est posé au load/compile ~19 GiB et ne peut structurellement pas bouger dans la boucle)
 échantillonné dans `generateOnce` aux **tokens GÉNÉRÉS 20 et 200** (prefill exclu), zéro
-allocation (buffers de pile de `mem_probe`, vérifié). En fin de run :
-`RSS-DELTA: <n> KiB (t20=<a> t200=<b>)` ; si le run n'atteint pas le token généré 200 :
-`RSS-DELTA: INEXECUTABLE (run trop court)` — jamais l'absence silencieuse de ligne. Le run
-porteur est **teacher-forcé** (`--oracle` sur la fixture témoin 200 de `rp0_witness/`, déjà sur
-la VM) : 200 steps **garantis**, insensible à l'arrêt EOS et à la bistabilité.
+allocation Zig via le paramètre `allocator` (buffers de pile de `mem_probe`, vérifié). La ligne
+`RSS-DELTA: <n> KiB (t20=<a> t200=<b>)` est émise **AVANT le verdict oracle A1** (même motif que
+`--out-ids`, écrit « avant le verdict » — un `error.A1Mismatch` de fin de run n'avale pas la
+mesure) ; si le run n'atteint pas le token généré 200 : `RSS-DELTA: INEXECUTABLE (run trop
+court)` — jamais l'absence silencieuse de ligne.
+
+**Le run porteur** — ⚠ la passe 2 a établi que `--oracle` dans ce runner est un **free-run borné
+par `fx.len`** (`fed = tok` inconditionnel, `:2270` ; le teacher-forcé du repo est
+`--window-vacuity`), et que `rp0_witness/` ne contient AUCUNE fixture au format oracle
+(`positions`+`fed` requis par `readFixtureAlloc`, sinon `error.MissingTensor` au lancement ;
+le seul « 200 » est `witness_long_before.safetensors`, une clé `ids` seule). Véhicule réel :
+**construire la fixture oracle 200** — script Python d'une page (nommé au plan) qui produit
+`positions` i32[200] (positions[0] = longueur du prompt du run témoin, lu dans
+`witness_long_before.log`) et `fed` = les 200 ids de `witness_long_before.safetensors` —
+transport `scp` vers la VM. Le run `--oracle` sur cette fixture fait **200 steps garantis par la
+borne `fx.len`** (pas par un forcing — un EOS libre précoce reste possible : la ligne
+INEXECUTABLE couvre ce cas, bistabilité comprise).
 
 ### Publication (véhicule des gates)
 
@@ -287,7 +320,10 @@ la VM) : 200 steps **garantis**, insensible à l'arrêt EOS et à la bistabilit�
   (fenêtre : boucles de steps seulement, cf. C6) ;
 - Fin de run : `ALLOC-TOTAL: alloc=<n> free=<n> bytes=<n> shards=<n>` — les compteurs PROCESS
   (non-vacuité d'AL-0 : le compteur a compté hors boucle, sinon il est mort) et le nombre de
-  shards de `r_logits` (solde DA-3) ;
+  shards de `r_logits` (solde DA-3). Lecture des shards : au premier step,
+  `var it = r_logits.shards(); scfg.n_shards = it.remaining();` (`buffer.zig:49-51` ; champ
+  `n_shards: u32 = 0` ajouté à `SamplingCfg` — même véhicule de remontée que les compteurs
+  M-COUT, et `r_logits` est deinit par step : la valeur doit être captée dans la boucle) ;
 - `RSS-DELTA:` (cf. C8) ;
 - M-COUT existant : mêmes lignes, libellé « D2H+copie » → « D2H seul » (C2).
 
@@ -301,7 +337,7 @@ la VM) : 200 steps **garantis**, insensible à l'arrêt EOS et à la bistabilit�
 | **P4** | La sémantique est inchangée | S2-PONT re-run : **0 désaccord** ; témoin 48 **bit-identique** (EQ-48) ; témoin 124 identique sur ses **110 premiers ids** (EQ-124, variante 4k) ; vacuity == témoin frais (V-EQ, champs structurels) | Un seul désaccord/écart ⇒ STOP, le remplacement `toSlice`/`getValue` a changé une valeur — enquête avant tout autre pas (pour EQ-124 : regarder la POSITION de divergence avant d'accuser le code — au-delà de 110, c'est la bistabilité connue, pas le chantier) |
 | **P5** | Rien ne touche le graphe | md5 HLO du dump `before_optimizations` **identique** au témoin figé avant la 1ʳᵉ ligne de code | Un md5 différent ⇒ une modification host a fui dans le graphe ⇒ STOP |
 | **P6** | (M-PIN) Si `PIN: ON`, l'épinglage lève le goulot D2H | `d2h_us` < **500 µs** (1 MiB à ≥ 2 Go/s effectif, latence PJRT comprise) | `PIN: ON` et `d2h_us` ≥ **1 000 µs** ⇒ l'hypothèse « pinned » de D10 est RÉFUTÉE (goulot ailleurs — staging interne du plugin). **Zone [500 ; 1 000) : verdict pré-enregistré MIXTE** — gain partiel, ni confirmé ni réfuté, publié avec le chiffre |
-| **P7** | (B10) Le VmRSS ne dérive plus par step | `VmRSS(token généré 200) − VmRSS(token généré 20)` < **5 MiB**, run teacher-forcé 200 steps (C8) | Une dérive ≥ 5 MiB ⇒ une source d'allocation par step échappe au compteur Zig (C/PJRT) ⇒ dette DA-1 requalifiée d'urgente |
+| **P7** | (B10) Le VmRSS ne dérive plus par step | `VmRSS(token généré 200) − VmRSS(token généré 20)` < **5 MiB**, run `--oracle` 200 steps **borné par la fixture** (C8 — pas un teacher-forcing : free-run borné) | Une dérive ≥ 5 MiB ⇒ une source d'allocation par step échappe au compteur Zig (C/PJRT) ⇒ dette DA-1 requalifiée d'urgente |
 
 ⚠ P3 et P6 sont des MESURES à fourchette, pas des gates : leur réfutation est un résultat
 publiable, pas un échec. P1, P2, P4, P5, P7 sont portés par des gates à règle d'arrêt.
@@ -314,10 +350,24 @@ tag annoté `gate/d10-<slug>-pass` portant les chiffres (préfixe `d10-` : aucun
 77 tags existants). Non-vacuité patron GC1 : tout compteur d'antécédent à 0 ⇒ INEXÉCUTABLE, pas
 PASS.
 
-**Le build mutant M1** (contre-preuve commune, local, jamais committé) : une allocation d'1 MiB
-**non libérée** par step, dans la boucle de génération ET dans la boucle vacuity. Il doit faire
-échouer AL-0 (`alloc=steps` > 0), AL-VAC (idem) et AL-RSS (dérive ~180 MiB ≥ 5 MiB) — trois FAIL
-**vus**, pas déclarés.
+**Le build mutant M1** (contre-preuve commune ; le binaire n'est jamais committé mais son diff
+EST la spec ci-dessous, et ses logs sont archivés) — deux sites, via le paramètre `allocator`
+**wrappé** (une alloc par un autre canal ne serait pas comptée et le mutant « prouverait »
+l'inverse) :
+
+```zig
+// Site 1 — boucle de génération, dans la fenêtre ALLOC-LOOP, après le bloc chemin B (~:2145) :
+const leak1 = try allocator.alloc(u8, 1 << 20);
+@memset(leak1, 0xAA); // ⚠ OBLIGATOIRE : un mmap non écrit n'est PAS résident — sans le
+// memset, VmRSS ne dérive pas et AL-RSS PASSerait sous mutant (passe 2, BLOQUANT n°3).
+// leak1 n'est JAMAIS libéré : c'est le point.
+// Site 2 — même paire de lignes dans la boucle de steps vacuity.
+```
+
+Il doit faire échouer AL-0 (`alloc=steps` > 0), AL-VAC (idem) et AL-RSS (dérive ~180 MiB ≥
+5 MiB, rendue réelle par le `@memset`) — trois FAIL **vus**, archivés dans
+`logs/d10_mutant_{al0,alvac,alrss}.{out,err}.log` (committés : un relecteur futur peut re-voir
+les FAIL sans reconstruire le mutant).
 
 | Gate | Prouve | Véhicule | Critère PASS (ligne greppée) | Contre-preuve |
 |---|---|---|---|---|
@@ -326,18 +376,32 @@ PASS.
 | **AL-0** | P2 — l'interdit est GARDÉ | Même run, binaire corrigé | `ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0` avec `steps` > 0, ET `ALLOC-TOTAL: alloc=<n>` > 0 (le compteur vit) | Mutant M1 ⇒ `alloc=steps` (> 0) ⇒ FAIL vu |
 | **AL-VAC** | P2 sur l'instrument | Run `--window-vacuity` court, binaire corrigé | `ALLOC-VAC: alloc=0 resize=0 remap=0 free=0` avec `steps` > 0 | Mutant M1 (branche vacuity) ⇒ `ALLOC-VAC: alloc=<steps>` ⇒ FAIL vu |
 | **EQ-48** | P4 | Re-run 48 ids free-run + `cmp` binaire vs témoin (véhicule du chantier donation) ; émetteur : `cmp out_ids.bin temoin.bin && echo "EQ-48: identique"` | `EQ-48: identique` | Le témoin existe AVANT le chantier ; tout écart = FAIL par construction |
-| **EQ-124** | P4 (et exerce la variante 4k) | Run `gemma4_g12a4k`, cmp des **110 premiers ids** vs témoin `mi_witness` ; émetteur : `cmp -n 440 … && echo "EQ-124: identique (110 ids)"` | `EQ-124: identique (110 ids)` | Borné à 110 par la bistabilité aval documentée (FINDING §7bis) — au-delà, un écart n'accuserait pas le chantier |
+| **EQ-124** | P4 (et exerce la variante 4k) | Run `gemma4_g12a4k` avec `--out-ids`, comparaison des **110 premiers ids** vs témoin `mi_witness_4k_ids.safetensors` (564 o, header 60 o, données à l'octet 68). ⚠ Un `cmp -n` naïf comparerait le HEADER (longueur variable avec le nombre d'ids) et FAILerait à tort sur la bistabilité que la borne 110 tolère. Émetteur exact (les headers des DEUX fichiers sont sautés) : `h1=$(od -An -tu8 -j0 -N8 run4k_ids.safetensors \| tr -d ' '); h2=$(od -An -tu8 -j0 -N8 mi_witness_4k_ids.safetensors \| tr -d ' '); cmp -i $((8+h1)):$((8+h2)) -n 440 run4k_ids.safetensors mi_witness_4k_ids.safetensors && echo "EQ-124: identique (110 ids)"` (110 ids × 4 o = 440 ; un run < 110 ids FAIL par EOF : correct) | `EQ-124: identique (110 ids)` | Borné à 110 par la bistabilité aval documentée — au-delà, un écart n'accuserait pas le chantier |
 | **EQ-PONT** | P4 | Protocole S2-PONT repris (3 runs `--top-k 1`) | **Lignes réellement émises par le runner** (`:2289-2291`) : `S2-PONT: steps_comparés=<n> désaccords=0` avec n cumulé ≥ 100, ET antécédent `GENCFG: suppress a mordu <k> fois` avec k ≥ 1 (au 2ᵉ essai si variante bistable, écrit — précédent S2-PONT) | Héritée de S2-PONT (mutations du chantier sampling) |
 | **V-EQ** | P4 sur vacuity | Témoin : run `--window-vacuity` AVANT modification (binaire baseline), sortie archivée ; re-run après | `diff` vide sur les **champs STRUCTURELS** des lignes vacuity (`n_ident`, `q` — invariants sémantiques) ; `max_abs` EXCLU du critère (flottant soumis au jitter de compile — deux binaires = deux compiles ; FINDING §7bis), publié à titre informatif | Le témoin est produit d'abord — un instrument modifié sans témoin préalable serait invérifiable |
 | **G-0** | P5 | Dump HLO `before_optimizations`, md5, AVANT la 1ʳᵉ ligne de code puis après | md5 identique (méthode du gate S2-G, fraîcheur par mtime) | **Produite pour de vrai une fois** : build scratch avec un op ajouté au graphe ⇒ md5 différent constaté ⇒ jeté (aucun gate du projet n'a encore VU un md5 différer ; l'instrument doit avoir échoué une fois pour compter) |
-| **AL-RSS** | P7 | Run teacher-forcé 200 steps (C8), sonde VmRSS aux tokens générés 20/200 | `RSS-DELTA: <n> KiB` avec n < 5 120 (ligne `INEXECUTABLE` = gate non rendu, jamais PASS) | Mutant M1 ⇒ dérive ~180 MiB ⇒ FAIL vu |
+| **AL-RSS** | P7 | Run `--oracle` 200 steps borné par la fixture construite (C8), sonde VmRSS aux tokens générés 20/200. **Le même run sur le binaire BASELINE publie d'abord son RSS-DELTA** : ce chiffre mesure le bruit VmRSS réel de ce runner et fonde (ou corrige, avant jugement) le seuil 5 120 KiB | `RSS-DELTA: <n> KiB` avec n < 5 120 (ligne `INEXECUTABLE` = gate non rendu, jamais PASS) | Mutant M1 (`@memset` compris) ⇒ dérive ~180 MiB ⇒ FAIL vu |
 | **M-D10** | P3 (mesure) | Protocole M-COUT identique (n ≥ 60, in-process, build §8) | Publie `d2h_us`/`warp_us` avant/après — pas de PASS/FAIL | — |
 | **M-PIN** | P6 (mesure) | Même run, `PIN: ON` vs `--no-pin` (A/B) | Publie les deux `d2h_us` + la bannière PIN | — |
 
-Ordre d'exécution imposé : G-0 (témoin) et V-EQ (témoin) et AL-BASE **avant** toute correction ;
-puis corrections ; puis le reste. Chaque gate FAIL ⇒ STOP et le résultat est écrit, jamais
-requalifié à chaud (leçon instrument dégradé : 2ᵉ requalification du même type ⇒ STOP, diff
-l'instrument).
+**Ordre d'exécution imposé** (réalisable sans contorsion — chaque état intermédiaire est un
+commit constructible ; les émetteurs de « §3 Publication » et le selftest APPARTIENNENT à C1,
+sinon AL-BASE n'a rien à grepper) :
+
+1. **b0 (baseline)** : build §8 du code actuel → témoins : G-0 (dump HLO + md5), V-EQ (run
+   `--window-vacuity`, out/err archivés), RSS-DELTA baseline sur la fixture 200 — ⚠ nécessite
+   la sonde C8… qui est du code : le baseline RSS se prend donc sur **b1** (voir 4) ; b0 ne
+   porte que G-0 et V-EQ ; vérif DA-5 (logs S2 récupérables ?) au passage ;
+2. **b1 = commit C1 SEUL** (compteur + émetteurs ALLOC-LOOP/ALLOC-VAC/ALLOC-TOTAL + sonde C8 +
+   selftest — zéro correction) → build ;
+3. **S-AC** (host, sans GPU) — le compteur est auto-testé AVANT de servir ;
+4. **AL-BASE** sur b1 (`--top-k 1 --max-tokens 60`) + **RSS-DELTA baseline** sur b1 (fixture
+   200) — les deux chiffres qui fondent P1 et le seuil P7 ;
+5. **corrections C2-C8** (commits par composant — modularité) → build b2 ;
+6. tous les autres gates sur b2, puis mutant M1 (3 FAIL vus, logs archivés).
+
+Chaque gate FAIL ⇒ STOP et le résultat est écrit, jamais requalifié à chaud (leçon instrument
+dégradé : 2ᵉ requalification du même type ⇒ STOP, diff l'instrument).
 
 ## 6. Interdits et gardes (chacun avec son porteur, aucun « tenu par la revue »)
 
@@ -364,7 +428,8 @@ l'instrument).
 
 ## 8. Build et exécution — le mode est PROUVÉ, pas supposé
 
-- Build : `cd /data/rqz_workspace/zml && ./bazel.sh build -c opt --@rules_zig//zig/settings:mode=release_fast --@zml//platforms:cuda=true //examples/rqz:gemma4_g12auto`
+- Build : `cd /data/rqz_workspace/zml && ./bazel.sh build -c opt --@rules_zig//zig/settings:mode=release_fast --@zml//platforms:cuda=true //examples/rqz:gemma4_g12auto //examples/rqz:gemma4_g12a4k`
+  (la cible 4k est dans la commande : EQ-124 l'exerce — mêmes deux flags, même bannière exigée).
   ⚠ Les DEUX flags sont nécessaires : le mode Zig de rules_zig est **indépendant** de `-c` et son
   défaut est `debug` (F8) — la rév. 1 n'avait que `-c opt` et aurait produit un frontend Zig en
   Debug, rendant tous les gates inexécutables par la règle ci-dessous. La commande est écrite ICI
