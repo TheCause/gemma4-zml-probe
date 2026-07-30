@@ -1,0 +1,223 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=oracle)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: --oracle : 200 steps de génération attendus (fed.len), prompt vérifié (ids.len=29 == positions[0])
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2633396 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 28.269s
+info: [mem] post-compile (go/no-go): RSS=3311596 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 29 steps de prefill, puis génération (limite 200 = fed.len, oracle)
+info:   marge top1-top2 @ gen=0 : 9.960630 (top1=818 top2=669) rank_used=0 chosen=818 marge_decisionnelle=9.960630
+info:   marge top1-top2 @ gen=1 : 8.381212 (top1=3925 top2=4083) rank_used=0 chosen=3925 marge_decisionnelle=8.381212
+info:   marge top1-top2 @ gen=2 : 15.268331 (top1=529 top2=5042) rank_used=0 chosen=529 marge_decisionnelle=15.268331
+info:   marge top1-top2 @ gen=3 : 2.087351 (top1=5743 top2=506) rank_used=0 chosen=5743 marge_decisionnelle=2.087351
+info:   marge top1-top2 @ gen=4 : 9.803404 (top1=563 top2=568) rank_used=0 chosen=563 marge_decisionnelle=9.803404
+info:   marge top1-top2 @ gen=5 : 0.239370 (top1=886 top2=50180) rank_used=0 chosen=886 marge_decisionnelle=0.239370
+info:   marge top1-top2 @ gen=6 : 11.588817 (top1=529 top2=5042) rank_used=0 chosen=529 marge_decisionnelle=11.588817
+info:   marge top1-top2 @ gen=7 : 8.353231 (top1=506 top2=27069) rank_used=0 chosen=506 marge_decisionnelle=8.353231
+info:   marge top1-top2 @ gen=8 : 1.052769 (top1=11333 top2=1346) rank_used=0 chosen=11333 marge_decisionnelle=1.052769
+info:   marge top1-top2 @ gen=9 : 5.927982 (top1=21623 top2=29685) rank_used=0 chosen=21623 marge_decisionnelle=5.927982
+info:   marge top1-top2 @ gen=10 : 0.217161 (top1=29685 top2=130928) rank_used=0 chosen=29685 marge_decisionnelle=0.217161
+info:   marge top1-top2 @ gen=11 : 1.150551 (top1=528 top2=529) rank_used=0 chosen=528 marge_decisionnelle=1.150551
+info:   marge top1-top2 @ gen=12 : 8.567103 (top1=3246 top2=506) rank_used=0 chosen=3246 marge_decisionnelle=8.567103
+info:   marge top1-top2 @ gen=13 : 7.456599 (top1=4083 top2=532) rank_used=0 chosen=4083 marge_decisionnelle=7.456599
+info:   marge top1-top2 @ gen=14 : 12.452417 (top1=236761 top2=1547) rank_used=0 chosen=236761 marge_decisionnelle=12.452417
+info:   marge top1-top2 @ gen=15 : 7.329859 (top1=1030 top2=1701) rank_used=0 chosen=1030 marge_decisionnelle=7.329859
+info:   marge top1-top2 @ gen=16 : 6.793804 (top1=563 top2=9282) rank_used=0 chosen=563 marge_decisionnelle=6.793804
+info:   marge top1-top2 @ gen=17 : 0.879057 (top1=506 top2=711) rank_used=0 chosen=506 marge_decisionnelle=0.879057
+info:   marge top1-top2 @ gen=18 : 2.339415 (top1=3925 top2=1186) rank_used=0 chosen=3925 marge_decisionnelle=2.339415
+info:   marge top1-top2 @ gen=19 : 13.952333 (top1=529 top2=236770) rank_used=0 chosen=529 marge_decisionnelle=13.952333
+info:   marge top1-top2 @ gen=20 : 3.020050 (top1=1217 top2=496) rank_used=0 chosen=1217 marge_decisionnelle=3.020050
+info:   marge top1-top2 @ gen=21 : 4.994326 (top1=27069 top2=14464) rank_used=0 chosen=27069 marge_decisionnelle=4.994326
+info:   marge top1-top2 @ gen=22 : 1.371294 (top1=8683 top2=7808) rank_used=0 chosen=8683 marge_decisionnelle=1.371294
+info:   marge top1-top2 @ gen=23 : 8.845509 (top1=531 top2=711) rank_used=0 chosen=531 marge_decisionnelle=8.845509
+info:   marge top1-top2 @ gen=24 : 0.098850 (top1=11451 top2=2583) rank_used=0 chosen=11451 marge_decisionnelle=0.098850
+info:   marge top1-top2 @ gen=25 : 11.381707 (top1=606 top2=502) rank_used=0 chosen=606 marge_decisionnelle=11.381707
+info:   marge top1-top2 @ gen=26 : 4.906344 (top1=623 top2=5017) rank_used=0 chosen=623 marge_decisionnelle=4.906344
+info:   marge top1-top2 @ gen=27 : 6.744804 (top1=63823 top2=40607) rank_used=0 chosen=63823 marge_decisionnelle=6.744804
+info:   marge top1-top2 @ gen=28 : 0.108925 (top1=1788 top2=236775) rank_used=0 chosen=1788 marge_decisionnelle=0.108925
+info:   marge top1-top2 @ gen=29 : 0.194176 (top1=236775 top2=161414) rank_used=0 chosen=236775 marge_decisionnelle=0.194176
+info:   marge top1-top2 @ gen=30 : 7.984413 (top1=532 top2=1131) rank_used=0 chosen=532 marge_decisionnelle=7.984413
+info:   marge top1-top2 @ gen=31 : 8.115253 (top1=2490 top2=4959) rank_used=0 chosen=2490 marge_decisionnelle=8.115253
+info:   marge top1-top2 @ gen=32 : 6.027340 (top1=625 top2=496) rank_used=0 chosen=625 marge_decisionnelle=6.027340
+info:   marge top1-top2 @ gen=33 : 9.600344 (top1=1131 top2=699) rank_used=0 chosen=1131 marge_decisionnelle=9.600344
+info:   marge top1-top2 @ gen=34 : 5.858860 (top1=496 top2=2613) rank_used=0 chosen=496 marge_decisionnelle=5.858860
+info:   marge top1-top2 @ gen=35 : 1.260902 (top1=5904 top2=8632) rank_used=0 chosen=5904 marge_decisionnelle=1.260902
+info:   marge top1-top2 @ gen=36 : 0.687828 (top1=529 top2=573) rank_used=0 chosen=529 marge_decisionnelle=0.687828
+info:   marge top1-top2 @ gen=37 : 5.256237 (top1=18304 top2=17029) rank_used=0 chosen=18304 marge_decisionnelle=5.256237
+info:   marge top1-top2 @ gen=38 : 4.550707 (top1=2066 top2=11160) rank_used=0 chosen=2066 marge_decisionnelle=4.550707
+info:   marge top1-top2 @ gen=39 : 11.106579 (top1=236761 top2=237028) rank_used=0 chosen=236761 marge_decisionnelle=11.106579
+info:   marge top1-top2 @ gen=40 : 2.743132 (top1=108 top2=236743) rank_used=0 chosen=108 marge_decisionnelle=2.743132
+info:   marge top1-top2 @ gen=41 : 0.239084 (top1=1509 top2=2021) rank_used=0 chosen=1509 marge_decisionnelle=0.239084
+info:   marge top1-top2 @ gen=42 : 0.712519 (top1=3721 top2=3782) rank_used=0 chosen=3721 marge_decisionnelle=0.712519
+info:   marge top1-top2 @ gen=43 : 2.780497 (top1=11252 top2=27069) rank_used=0 chosen=11252 marge_decisionnelle=2.780497
+info:   marge top1-top2 @ gen=44 : 14.078265 (top1=529 top2=69586) rank_used=0 chosen=529 marge_decisionnelle=14.078265
+info:   marge top1-top2 @ gen=45 : 7.261881 (top1=1518 top2=7635) rank_used=0 chosen=1518 marge_decisionnelle=7.261881
+info:   marge top1-top2 @ gen=46 : 0.363440 (top1=573 top2=531) rank_used=0 chosen=573 marge_decisionnelle=0.363440
+info:   marge top1-top2 @ gen=47 : 0.006142 (top1=5743 top2=27069) rank_used=0 chosen=5743 marge_decisionnelle=0.006142
+info:   marge top1-top2 @ gen=48 : 11.855361 (top1=531 top2=568) rank_used=0 chosen=531 marge_decisionnelle=11.855361
+info:   marge top1-top2 @ gen=49 : 3.566248 (top1=36981 top2=7140) rank_used=0 chosen=36981 marge_decisionnelle=3.566248
+info:   marge top1-top2 @ gen=50 : 2.833159 (top1=699 top2=1343) rank_used=0 chosen=699 marge_decisionnelle=2.833159
+info:   marge top1-top2 @ gen=51 : 7.158381 (top1=496 top2=614) rank_used=0 chosen=496 marge_decisionnelle=7.158381
+info:   marge top1-top2 @ gen=52 : 0.185612 (top1=3606 top2=9919) rank_used=0 chosen=3606 marge_decisionnelle=0.185612
+info:   marge top1-top2 @ gen=53 : 2.809763 (top1=17709 top2=88078) rank_used=0 chosen=17709 marge_decisionnelle=2.809763
+info:   marge top1-top2 @ gen=54 : 0.155590 (top1=1131 top2=531) rank_used=0 chosen=1131 marge_decisionnelle=0.155590
+info:   marge top1-top2 @ gen=55 : 2.630243 (top1=496 top2=506) rank_used=0 chosen=496 marge_decisionnelle=2.630243
+info:   marge top1-top2 @ gen=56 : 0.906132 (top1=23093 top2=1548) rank_used=0 chosen=23093 marge_decisionnelle=0.906132
+info:   marge top1-top2 @ gen=57 : 0.257183 (top1=258882 top2=11814) rank_used=1 chosen=11814 marge_decisionnelle=0.316643
+info:   marge top1-top2 @ gen=58 : 5.481430 (top1=236761 top2=236764) rank_used=0 chosen=236761 marge_decisionnelle=5.481430
+info:   marge top1-top2 @ gen=59 : 0.385050 (top1=9567 top2=108) rank_used=0 chosen=9567 marge_decisionnelle=0.385050
+info:   marge top1-top2 @ gen=60 : 4.989508 (top1=9338 top2=11294) rank_used=0 chosen=9338 marge_decisionnelle=4.989508
+info:   marge top1-top2 @ gen=61 : 0.959139 (top1=740 top2=5238) rank_used=0 chosen=740 marge_decisionnelle=0.959139
+info:   marge top1-top2 @ gen=62 : 12.220897 (top1=577 top2=653) rank_used=0 chosen=577 marge_decisionnelle=12.220897
+info:   marge top1-top2 @ gen=63 : 0.507845 (top1=11207 top2=11310) rank_used=0 chosen=11207 marge_decisionnelle=0.507845
+info:   marge top1-top2 @ gen=64 : 1.801928 (top1=1679 top2=1131) rank_used=0 chosen=1679 marge_decisionnelle=1.801928
+info:   marge top1-top2 @ gen=65 : 14.456239 (top1=1131 top2=15040) rank_used=0 chosen=1131 marge_decisionnelle=14.456239
+info:   marge top1-top2 @ gen=66 : 0.339397 (top1=1806 top2=2390) rank_used=0 chosen=1806 marge_decisionnelle=0.339397
+info:   marge top1-top2 @ gen=67 : 0.913746 (top1=9245 top2=3262) rank_used=0 chosen=9245 marge_decisionnelle=0.913746
+info:   marge top1-top2 @ gen=68 : 2.619682 (top1=13479 top2=39928) rank_used=0 chosen=13479 marge_decisionnelle=2.619682
+info:   marge top1-top2 @ gen=69 : 0.438484 (top1=236761 top2=236787) rank_used=0 chosen=236761 marge_decisionnelle=0.438484
+info:   marge top1-top2 @ gen=70 : 10.178005 (top1=108 top2=107) rank_used=0 chosen=108 marge_decisionnelle=10.178005
+info:   marge top1-top2 @ gen=71 : 5.616837 (top1=7243 top2=10354) rank_used=0 chosen=7243 marge_decisionnelle=5.616837
+info:   marge top1-top2 @ gen=72 : 14.657314 (top1=108 top2=236764) rank_used=0 chosen=108 marge_decisionnelle=14.657314
+info:   marge top1-top2 @ gen=73 : 12.940182 (top1=10354 top2=2595) rank_used=0 chosen=10354 marge_decisionnelle=12.940182
+info:   marge top1-top2 @ gen=74 : 1.059418 (top1=25348 top2=236743) rank_used=0 chosen=25348 marge_decisionnelle=1.059418
+info:   marge top1-top2 @ gen=75 : 0.773163 (top1=236743 top2=564) rank_used=0 chosen=236743 marge_decisionnelle=0.773163
+info:   marge top1-top2 @ gen=76 : 14.000246 (top1=236770 top2=236777) rank_used=0 chosen=236770 marge_decisionnelle=14.000246
+info:   marge top1-top2 @ gen=77 : 9.826923 (top1=236787 top2=236761) rank_used=0 chosen=236787 marge_decisionnelle=9.826923
+info:   marge top1-top2 @ gen=78 : 3.172934 (top1=669 top2=31234) rank_used=0 chosen=669 marge_decisionnelle=3.172934
+info:   marge top1-top2 @ gen=79 : 7.193876 (top1=152369 top2=15444) rank_used=0 chosen=152369 marge_decisionnelle=7.193876
+info:   marge top1-top2 @ gen=80 : 11.828222 (top1=568 top2=14083) rank_used=0 chosen=568 marge_decisionnelle=11.828222
+info:   marge top1-top2 @ gen=81 : 3.579691 (top1=818 top2=40607) rank_used=0 chosen=818 marge_decisionnelle=3.579691
+info:   marge top1-top2 @ gen=82 : 1.462202 (top1=623 top2=61177) rank_used=0 chosen=623 marge_decisionnelle=1.462202
+info:   marge top1-top2 @ gen=83 : 1.661982 (top1=17642 top2=11447) rank_used=0 chosen=17642 marge_decisionnelle=1.661982
+info:   marge top1-top2 @ gen=84 : 3.925320 (top1=236775 top2=1373) rank_used=0 chosen=236775 marge_decisionnelle=3.925320
+info:   marge top1-top2 @ gen=85 : 0.169481 (top1=1534 top2=528) rank_used=0 chosen=1534 marge_decisionnelle=0.169481
+info:   marge top1-top2 @ gen=86 : 1.164343 (top1=4945 top2=2432) rank_used=0 chosen=4945 marge_decisionnelle=1.164343
+info:   marge top1-top2 @ gen=87 : 15.145894 (top1=236768 top2=236779) rank_used=0 chosen=236768 marge_decisionnelle=15.145894
+info:   marge top1-top2 @ gen=88 : 9.801844 (top1=107 top2=108) rank_used=0 chosen=107 marge_decisionnelle=9.801844
+info:   marge top1-top2 @ gen=89 : 0.250803 (top1=902 top2=2542) rank_used=0 chosen=902 marge_decisionnelle=0.250803
+info:   marge top1-top2 @ gen=90 : 2.395897 (top1=506 top2=12440) rank_used=0 chosen=506 marge_decisionnelle=2.395897
+info:   marge top1-top2 @ gen=91 : 1.109299 (top1=29435 top2=6534) rank_used=0 chosen=29435 marge_decisionnelle=1.109299
+info:   marge top1-top2 @ gen=92 : 2.472569 (top1=121304 top2=3797) rank_used=0 chosen=121304 marge_decisionnelle=2.472569
+info:   marge top1-top2 @ gen=93 : 2.505833 (top1=236764 top2=568) rank_used=0 chosen=236764 marge_decisionnelle=2.505833
+info:   marge top1-top2 @ gen=94 : 0.631050 (top1=1331 top2=14464) rank_used=0 chosen=1331 marge_decisionnelle=0.631050
+info:   marge top1-top2 @ gen=95 : 4.159760 (top1=4354 top2=1053) rank_used=0 chosen=4354 marge_decisionnelle=4.159760
+info:   marge top1-top2 @ gen=96 : 4.462702 (top1=496 top2=4861) rank_used=0 chosen=496 marge_decisionnelle=4.462702
+info:   marge top1-top2 @ gen=97 : 12.247452 (top1=1595 top2=3282) rank_used=0 chosen=1595 marge_decisionnelle=12.247452
+info:   marge top1-top2 @ gen=98 : 12.391595 (top1=531 top2=23227) rank_used=0 chosen=531 marge_decisionnelle=12.391595
+info:   marge top1-top2 @ gen=99 : 2.517595 (top1=23227 top2=3442) rank_used=0 chosen=23227 marge_decisionnelle=2.517595
+info:   marge top1-top2 @ gen=100 : 3.365671 (top1=1534 top2=4945) rank_used=0 chosen=1534 marge_decisionnelle=3.365671
+info:   marge top1-top2 @ gen=101 : 4.241180 (top1=4945 top2=236743) rank_used=0 chosen=4945 marge_decisionnelle=4.241180
+info:   marge top1-top2 @ gen=102 : 3.034849 (top1=1133 top2=529) rank_used=0 chosen=1133 marge_decisionnelle=3.034849
+info:   marge top1-top2 @ gen=103 : 0.468370 (top1=236743 top2=5213) rank_used=0 chosen=236743 marge_decisionnelle=0.468370
+info:   marge top1-top2 @ gen=104 : 2.574614 (top1=236770 top2=236800) rank_used=0 chosen=236770 marge_decisionnelle=2.574614
+info:   marge top1-top2 @ gen=105 : 2.598934 (top1=236764 top2=236771) rank_used=0 chosen=236764 marge_decisionnelle=2.598934
+info:   marge top1-top2 @ gen=106 : 10.986383 (top1=236743 top2=532) rank_used=0 chosen=236743 marge_decisionnelle=10.986383
+info:   marge top1-top2 @ gen=107 : 7.948412 (top1=236770 top2=236778) rank_used=0 chosen=236770 marge_decisionnelle=7.948412
+info:   marge top1-top2 @ gen=108 : 10.926163 (top1=236771 top2=236810) rank_used=0 chosen=236771 marge_decisionnelle=10.926163
+info:   marge top1-top2 @ gen=109 : 11.893872 (top1=236764 top2=568) rank_used=0 chosen=236764 marge_decisionnelle=11.893872
+info:   marge top1-top2 @ gen=110 : 10.070499 (top1=532 top2=236743) rank_used=0 chosen=532 marge_decisionnelle=10.070499
+info:   marge top1-top2 @ gen=111 : 14.394857 (top1=236743 top2=236770) rank_used=0 chosen=236743 marge_decisionnelle=14.394857
+info:   marge top1-top2 @ gen=112 : 12.319345 (top1=236770 top2=236778) rank_used=0 chosen=236770 marge_decisionnelle=12.319345
+info:   marge top1-top2 @ gen=113 : 8.095205 (top1=236771 top2=236770) rank_used=0 chosen=236771 marge_decisionnelle=8.095205
+info:   marge top1-top2 @ gen=114 : 11.022060 (top1=236771 top2=236770) rank_used=0 chosen=236771 marge_decisionnelle=11.022060
+info:   marge top1-top2 @ gen=115 : 1.495642 (top1=236761 top2=1056) rank_used=0 chosen=236761 marge_decisionnelle=1.495642
+info:   marge top1-top2 @ gen=116 : 0.309206 (top1=1637 top2=236743) rank_used=0 chosen=1637 marge_decisionnelle=0.309206
+info:   marge top1-top2 @ gen=117 : 4.803383 (top1=611 top2=901) rank_used=0 chosen=611 marge_decisionnelle=4.803383
+info:   marge top1-top2 @ gen=118 : 2.288475 (top1=964 top2=7971) rank_used=0 chosen=964 marge_decisionnelle=2.288475
+info:   marge top1-top2 @ gen=119 : 2.510658 (top1=5712 top2=1699) rank_used=0 chosen=5712 marge_decisionnelle=2.510658
+info:   marge top1-top2 @ gen=120 : 4.718844 (top1=528 top2=623) rank_used=0 chosen=528 marge_decisionnelle=4.718844
+info:   marge top1-top2 @ gen=121 : 4.977331 (top1=496 top2=614) rank_used=0 chosen=496 marge_decisionnelle=4.977331
+info:   marge top1-top2 @ gen=122 : 1.225187 (top1=94010 top2=1458) rank_used=0 chosen=94010 marge_decisionnelle=1.225187
+info:   marge top1-top2 @ gen=123 : 9.250547 (top1=1458 top2=3225) rank_used=0 chosen=1458 marge_decisionnelle=9.250547
+info:   marge top1-top2 @ gen=124 : 4.796742 (top1=568 top2=236764) rank_used=0 chosen=568 marge_decisionnelle=4.796742
+info:   marge top1-top2 @ gen=125 : 1.700926 (top1=3350 top2=5282) rank_used=0 chosen=3350 marge_decisionnelle=1.700926
+info:   marge top1-top2 @ gen=126 : 7.364964 (top1=506 top2=496) rank_used=0 chosen=506 marge_decisionnelle=7.364964
+info:   marge top1-top2 @ gen=127 : 0.665512 (top1=2939 top2=1550) rank_used=0 chosen=2939 marge_decisionnelle=0.665512
+info:   marge top1-top2 @ gen=128 : 9.168116 (top1=529 top2=23521) rank_used=0 chosen=529 marge_decisionnelle=9.168116
+info:   marge top1-top2 @ gen=129 : 5.533140 (top1=496 top2=506) rank_used=0 chosen=496 marge_decisionnelle=5.533140
+info:   marge top1-top2 @ gen=130 : 5.871914 (top1=15958 top2=5404) rank_used=0 chosen=15958 marge_decisionnelle=5.871914
+info:   marge top1-top2 @ gen=131 : 5.083262 (top1=23521 top2=3731) rank_used=0 chosen=23521 marge_decisionnelle=5.083262
+info:   marge top1-top2 @ gen=132 : 11.664079 (top1=1061 top2=34520) rank_used=0 chosen=1061 marge_decisionnelle=11.664079
+info:   marge top1-top2 @ gen=133 : 8.994849 (top1=1550 top2=2066) rank_used=0 chosen=1550 marge_decisionnelle=8.994849
+info:   marge top1-top2 @ gen=134 : 4.360323 (top1=779 top2=236768) rank_used=0 chosen=779 marge_decisionnelle=4.360323
+info:   marge top1-top2 @ gen=135 : 1.636591 (top1=611 top2=1217) rank_used=0 chosen=611 marge_decisionnelle=1.636591
+info:   marge top1-top2 @ gen=136 : 0.609167 (top1=4354 top2=17175) rank_used=0 chosen=4354 marge_decisionnelle=0.609167
+info:   marge top1-top2 @ gen=137 : 7.099352 (top1=496 top2=2613) rank_used=0 chosen=496 marge_decisionnelle=7.099352
+info:   marge top1-top2 @ gen=138 : 5.471209 (top1=1595 top2=5404) rank_used=0 chosen=1595 marge_decisionnelle=5.471209
+info:   marge top1-top2 @ gen=139 : 13.347231 (top1=531 top2=653) rank_used=0 chosen=531 marge_decisionnelle=13.347231
+info:   marge top1-top2 @ gen=140 : 0.284124 (top1=1879 top2=1407) rank_used=0 chosen=1879 marge_decisionnelle=0.284124
+info:   marge top1-top2 @ gen=141 : 1.431953 (top1=623 top2=236764) rank_used=0 chosen=623 marge_decisionnelle=1.431953
+info:   marge top1-top2 @ gen=142 : 1.208897 (top1=13534 top2=63823) rank_used=0 chosen=13534 marge_decisionnelle=1.208897
+info:   marge top1-top2 @ gen=143 : 6.944023 (top1=563 top2=659) rank_used=0 chosen=563 marge_decisionnelle=6.944023
+info:   marge top1-top2 @ gen=144 : 9.018789 (top1=5017 top2=63823) rank_used=0 chosen=5017 marge_decisionnelle=9.018789
+info:   marge top1-top2 @ gen=145 : 2.684399 (top1=528 top2=1590) rank_used=0 chosen=528 marge_decisionnelle=2.684399
+info:   marge top1-top2 @ gen=146 : 7.516771 (top1=672 top2=506) rank_used=0 chosen=672 marge_decisionnelle=7.516771
+info:   marge top1-top2 @ gen=147 : 3.018410 (top1=4321 top2=7075) rank_used=0 chosen=4321 marge_decisionnelle=3.018410
+info:   marge top1-top2 @ gen=148 : 9.072655 (top1=1781 top2=236764) rank_used=0 chosen=1781 marge_decisionnelle=9.072655
+info:   marge top1-top2 @ gen=149 : 7.631411 (top1=108 top2=236743) rank_used=0 chosen=108 marge_decisionnelle=7.631411
+info:   marge top1-top2 @ gen=150 : 3.855068 (top1=236829 top2=818) rank_used=0 chosen=236829 marge_decisionnelle=3.855068
+info:   marge top1-top2 @ gen=151 : 10.035486 (top1=139 top2=5213) rank_used=0 chosen=139 marge_decisionnelle=10.035486
+info:   marge top1-top2 @ gen=152 : 13.208679 (top1=1018 top2=818) rank_used=0 chosen=1018 marge_decisionnelle=13.208679
+info:   marge top1-top2 @ gen=153 : 3.516514 (top1=818 top2=236773) rank_used=0 chosen=818 marge_decisionnelle=3.516514
+info:   marge top1-top2 @ gen=154 : 3.377766 (top1=186245 top2=70012) rank_used=0 chosen=186245 marge_decisionnelle=3.377766
+info:   marge top1-top2 @ gen=155 : 7.313910 (top1=5990 top2=1037) rank_used=0 chosen=5990 marge_decisionnelle=7.313910
+info:   marge top1-top2 @ gen=156 : 3.982809 (top1=532 top2=833) rank_used=0 chosen=532 marge_decisionnelle=3.982809
+info:   marge top1-top2 @ gen=157 : 7.249594 (top1=70012 top2=21401) rank_used=0 chosen=70012 marge_decisionnelle=7.249594
+info:   marge top1-top2 @ gen=158 : 9.606821 (top1=5990 top2=4440) rank_used=0 chosen=5990 marge_decisionnelle=9.606821
+info:   marge top1-top2 @ gen=159 : 1.253771 (top1=53121 top2=568) rank_used=0 chosen=53121 marge_decisionnelle=1.253771
+info:   marge top1-top2 @ gen=160 : 1.066868 (top1=42465 top2=1773) rank_used=0 chosen=42465 marge_decisionnelle=1.066868
+info:   marge top1-top2 @ gen=161 : 10.062885 (top1=236743 top2=506) rank_used=0 chosen=236743 marge_decisionnelle=10.062885
+info:   marge top1-top2 @ gen=162 : 1.703133 (top1=236800 top2=236810) rank_used=0 chosen=236800 marge_decisionnelle=1.703133
+info:   marge top1-top2 @ gen=163 : 0.148571 (top1=236764 top2=236771) rank_used=0 chosen=236764 marge_decisionnelle=0.148571
+info:   marge top1-top2 @ gen=164 : 6.350821 (top1=236771 top2=236810) rank_used=0 chosen=236771 marge_decisionnelle=6.350821
+info:   marge top1-top2 @ gen=165 : 14.660888 (top1=236771 top2=610) rank_used=0 chosen=236771 marge_decisionnelle=14.660888
+info:   marge top1-top2 @ gen=166 : 11.242220 (top1=236771 top2=236764) rank_used=0 chosen=236771 marge_decisionnelle=11.242220
+info:   marge top1-top2 @ gen=167 : 2.515610 (top1=119431 top2=236964) rank_used=0 chosen=119431 marge_decisionnelle=2.515610
+info:   marge top1-top2 @ gen=168 : 7.343914 (top1=236764 top2=568) rank_used=0 chosen=236764 marge_decisionnelle=7.343914
+info:   marge top1-top2 @ gen=169 : 0.769060 (top1=506 top2=1239) rank_used=0 chosen=506 marge_decisionnelle=0.769060
+info:   marge top1-top2 @ gen=170 : 2.225050 (top1=70012 top2=186245) rank_used=0 chosen=70012 marge_decisionnelle=2.225050
+info:   marge top1-top2 @ gen=171 : 11.687940 (top1=5990 top2=258882) rank_used=0 chosen=5990 marge_decisionnelle=11.970597
+info:   marge top1-top2 @ gen=172 : 2.576222 (top1=1456 top2=5535) rank_used=0 chosen=1456 marge_decisionnelle=2.576222
+info:   marge top1-top2 @ gen=173 : 7.138117 (top1=496 top2=614) rank_used=0 chosen=496 marge_decisionnelle=7.138117
+info:   marge top1-top2 @ gen=174 : 0.446011 (top1=54616 top2=623) rank_used=0 chosen=54616 marge_decisionnelle=0.446011
+info:   marge top1-top2 @ gen=175 : 7.344139 (top1=236772 top2=1458) rank_used=0 chosen=236772 marge_decisionnelle=7.344139
+info:   marge top1-top2 @ gen=176 : 6.544304 (top1=24850 top2=5140) rank_used=0 chosen=24850 marge_decisionnelle=6.544304
+info:   marge top1-top2 @ gen=177 : 2.609549 (top1=8948 top2=5712) rank_used=0 chosen=8948 marge_decisionnelle=2.609549
+info:   marge top1-top2 @ gen=178 : 3.019171 (top1=236761 top2=531) rank_used=0 chosen=236761 marge_decisionnelle=3.019171
+info:   marge top1-top2 @ gen=179 : 2.405670 (top1=2195 top2=2282) rank_used=0 chosen=2195 marge_decisionnelle=2.405670
+info:   marge top1-top2 @ gen=180 : 1.239302 (top1=10734 top2=14995) rank_used=0 chosen=10734 marge_decisionnelle=1.239302
+info:   marge top1-top2 @ gen=181 : 0.976349 (top1=14995 top2=5535) rank_used=0 chosen=14995 marge_decisionnelle=0.976349
+info:   marge top1-top2 @ gen=182 : 3.166025 (top1=901 top2=600) rank_used=0 chosen=901 marge_decisionnelle=3.166025
+info:   marge top1-top2 @ gen=183 : 6.890783 (top1=4354 top2=1451) rank_used=0 chosen=4354 marge_decisionnelle=6.890783
+info:   marge top1-top2 @ gen=184 : 5.399733 (top1=496 top2=531) rank_used=0 chosen=496 marge_decisionnelle=5.399733
+info:   marge top1-top2 @ gen=185 : 1.194679 (top1=1595 top2=1686) rank_used=0 chosen=1595 marge_decisionnelle=1.194679
+info:   marge top1-top2 @ gen=186 : 14.879683 (top1=531 top2=23227) rank_used=0 chosen=531 marge_decisionnelle=14.879683
+info:   marge top1-top2 @ gen=187 : 0.119017 (top1=10128 top2=1407) rank_used=0 chosen=10128 marge_decisionnelle=0.119017
+info:   marge top1-top2 @ gen=188 : 5.138989 (top1=614 top2=496) rank_used=0 chosen=614 marge_decisionnelle=5.138989
+info:   marge top1-top2 @ gen=189 : 4.399443 (top1=7738 top2=623) rank_used=0 chosen=7738 marge_decisionnelle=4.399443
+info:   marge top1-top2 @ gen=190 : 0.289778 (top1=2557 top2=1977) rank_used=0 chosen=2557 marge_decisionnelle=0.289778
+info:   marge top1-top2 @ gen=191 : 1.210280 (top1=236761 top2=528) rank_used=0 chosen=236761 marge_decisionnelle=1.210280
+info:   marge top1-top2 @ gen=192 : 5.461174 (top1=2195 top2=3153) rank_used=0 chosen=2195 marge_decisionnelle=5.461174
+info:   marge top1-top2 @ gen=193 : 1.491257 (top1=1456 top2=6074) rank_used=0 chosen=1456 marge_decisionnelle=1.491257
+info:   marge top1-top2 @ gen=194 : 0.149044 (top1=496 top2=1156) rank_used=0 chosen=496 marge_decisionnelle=0.149044
+info:   marge top1-top2 @ gen=195 : 0.004465 (top1=169434 top2=1944) rank_used=0 chosen=169434 marge_decisionnelle=0.004465
+info:   marge top1-top2 @ gen=196 : 1.022076 (top1=54616 top2=3972) rank_used=0 chosen=54616 marge_decisionnelle=1.022076
+info:   marge top1-top2 @ gen=197 : 3.223280 (top1=531 top2=618) rank_used=0 chosen=531 marge_decisionnelle=3.223280
+info:   marge top1-top2 @ gen=198 : 0.757340 (top1=1407 top2=1686) rank_used=0 chosen=1407 marge_decisionnelle=0.757340
+info:   marge top1-top2 @ gen=199 : 2.648361 (top1=600 top2=623) rank_used=0 chosen=600 marge_decisionnelle=2.648361
+info: GENCFG: suppress a mordu 1 fois sur 200 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=228 resize=0 remap=0 free=0 bytes=239075328 steps=228
+info: ALLOC-TOTAL: alloc=990 free=725 bytes=1193766212 shards=1
+info: PERF : prefill 29 steps en 3.080s (9.4 tok/s) ; génération 200 tokens en 20.747s (9.6 tok/s)
+info: RSS-DELTA: 184364 KiB (t20=4041664 t200=4226028)
+error: A1 FAIL — 62/200 match, 1er mismatch au step gen=57
+error:   step gen=57 : généré=11814 attendu(fed)=258882
+error:   diagnostic LOGITS (méthodo : argmax trop grossier pour diagnostiquer) — top-5 @ step gen=57 : idx={ 258882, 11814, 3495, 1548, 13186 } val={ 19.173325, 18.916142, 18.599499, 18.069523, 17.953777 }
+error: A1Mismatch

@@ -111,14 +111,14 @@ chantier). Ne restent hors périmètre que `bos_token_id` et `pad_token_id`, san
 |---|---|---|
 | **D1** | **`applyTopP` n'a AUCUNE couverture GPU** — sa seule couverture est la fixture `S2-U` | Le régime neutre du pont est `--top-k 1`, qui **court-circuite** top-p. Un régime neutre par top-p exigerait un véhicule GPU dédié. ⚠ C'est la brique dont les mesures montrent qu'une formulation naïve rend un ensemble **disjoint** de HF : dette **sérieuse et déclarée** |
 | **D2** | **`applyTemperature` n'est pas exercé de bout en bout** | `temperature: 1.0` ⇒ HF n'instancie pas le warper : la config Google ne l'exerce jamais. Couverture = fixture seule |
-| **D3** | **L'interdit « aucune allocation par step » n'a pas de gate porteur** | Tenu par la revue de code. L'adosser au débit ne serait pas honnête : l'effet est sous le plancher de résolution |
+| **D3** | ~~L'interdit « aucune allocation par step » n'a pas de gate porteur~~ **SOLDÉE (30 juil)** | Gate **AL-0/AL-VAC** (compteur toujours actif, arbitrage B9) + **AL-RSS** (B10) — `docs/D10_RESULTS.md` |
 | **D4** | **Équivalence de l'arrêt runner ↔ HF** : prouvée par aucun gate | Héritée du chantier précédent, **aggravée** par la penalty (pénaliser un id EOS modifie l'arrêt) |
 | **D5** | **`RP7` (« la récitation est-elle levée »)** : suspendu | Le symptôme d'origine n'a jamais été reproduit. Appartient à la spec du 27 juil : à arbitrer là-bas |
 | **D6** | **E2B non couvert** | Ses runners ne sortent pas les logits du graphe |
 | **D7** | **Custody des coûts F16** | Mesures prises GPU non vierge : absolus à requalifier |
 | **D8** | **Tie-break `argmax` host vs `topK` in-graph** non prouvé équivalent | `S2-PONT` le **publie** (`n_exact_top_ties`, observé à **0**) au lieu de le supposer résolu |
-| **D9** | ~~mesuré en `dbg`~~ **RÉSOLUE — hypothèse RÉFUTÉE** | `opt` : **3 828,8 µs** vs `dbg` 3 730,1 — **pas plus rapide** (binaire 451 Mo → 40 Mo). Décomposé : **D2H+copie 1 514 µs**, **warpers 2 268 µs**. Coût **structurel**, pas un artefact de build |
-| **D10** | **`toSliceAlloc` alloue 1 Mo par step** — l'interdit §5 « aucune allocation par step », **violé par ce code** | Non corrigé. Le D2H plafonne à **0,65 Go/s** (48× sous le PCIe 4.0 théorique), faute de buffer réutilisé et de mémoire *pinned*. C'est le levier le plus évident si le surcoût devenait gênant |
+| **D9** | ~~mesuré en `dbg`~~ RÉSOLUE — ⚠ **conclusion « structurel » RECTIFIÉE le 30 juil** | La commande du build « opt » de D9 est perdue, et `-c opt` seul laisse le frontend Zig en **debug** (mode rules_zig indépendant, défaut debug). Au mode **prouvé** `ReleaseFast` : warpers **2 268 → 261 µs** sans changement de code. Le « coût structurel » était en partie un artefact de build — `docs/D10_RESULTS.md` §5 |
+| **D10** | ~~`toSliceAlloc` alloue 1 Mo par step~~ **RÉSOLUE (30 juil)** | `toSlice` direct dans `work` : **0 alloc, 0 copie**, gate AL-0 quatre zéros. Bloc chemin B **3 796 → 908,7 µs** (0,86 % d'un step). ⚠ L'hypothèse « faute de pinned » est **RÉFUTÉE par A/B** (ON 441,7 vs OFF 447,1 µs) : le « 0,65 Go/s » mesurait les allocs+copies, le transfert fait 2,37 Go/s — `docs/D10_RESULTS.md` |
 
 ## 6. Divergences délibérées avec HF, déclarées
 
