@@ -1,4 +1,4 @@
-# Spec — D10 : zéro allocation par step dans le décodage 12B (rév. 3)
+# Spec — D10 : zéro allocation par step dans le décodage 12B (rév. 4)
 
 > **Statut : SPEC — committée AVANT toute mesure** (exigence de falsifiabilité, le git log fait foi).
 > Branche : `s2-d10-alloc-par-step`. Chantier ouvert sur décision Régis du 30 juil 2026 (niveau de
@@ -27,6 +27,13 @@
 > bistabilité que la borne 110 devait tolérer · le mutant M1 tel qu'écrit n'aurait **pas** fait
 > dériver VmRSS (1 MiB malloc non écrit = mmap non résident) : `@memset` obligatoire · C7
 > allouait `work` (ligne 1662) avant que la Platform existe (ligne 1732).
+>
+> **Rév. 4 après passe 3 (vérification finale des fixes, 1 MAJEUR + 3 MINEURS)** : le prompt du
+> témoin n'est PAS dans `witness_long_before.log` (il vit dans le plan penalty du 27 juil :190)
+> et sa longueur en tokens se MESURE (ligne PERF prefill, ou le message d'erreur `:1700` qui
+> l'imprime) · le leak du mutant M1 devait être HORS du `if (pathArmed)` (le run AL-RSS neutre
+> ne l'aurait jamais traversé) · le defer C7 DÉMÉNAGE (portée lexicale + ordre LIFO vs
+> `platform.deinit`), split du defer scratch · pipes déséchappés dans l'émetteur EQ-124.
 
 ## 0. Décisions de cadrage (Régis, 30 juil 2026)
 
@@ -283,9 +290,13 @@ API et ORDRE vérifiés : `DmaAllocator.init(parent, *const Device)` (`mem.zig:2
 `platform.devices: []const Device` (`platform.zig:200`) — `&platform.devices[0]` type-checke.
 ⚠ MAIS `scfg.work` est aujourd'hui alloué à la ligne **1662**, AVANT que la Platform existe
 (ligne **1732**) : **l'allocation de `work` déménage APRÈS la création de la Platform** ; le
-reste du bloc SAMPLING (scratch, `resetPerPrompt`, log) reste en place, et le `defer` (:1668-1670)
-adapté suit `pin_on`. Sans ce déménagement, le bloc C7 ne compile pas à l'endroit qu'il
-substitue.
+reste du bloc SAMPLING (scratch, `resetPerPrompt`, log) reste en place. Le `defer` actuel
+(:1668-1670) est **splité** : le defer de `scratch` reste à :1668 ; celui de `work` **DÉMÉNAGE
+après la déclaration de `dma`/`pin_on`** (donc après :1738) — obligatoire deux fois : portée
+lexicale (un defer resté en amont ne voit pas `pin_on`, erreur de compilation) et ordre LIFO
+(la libération DMA — `dmaUnmap` — doit s'exécuter AVANT `platform.deinit`, donc être déclarée
+APRÈS lui). Vérifié : aucun usage de `scfg.work`/`scratch` entre :1671 et :1975. Sans ce
+déménagement, le bloc C7 ne compile pas à l'endroit qu'il substitue.
 
 ### C8 — Sonde RSS (véhicule d'AL-RSS, arbitrage B10)
 
@@ -304,11 +315,18 @@ par `fx.len`** (`fed = tok` inconditionnel, `:2270` ; le teacher-forcé du repo 
 (`positions`+`fed` requis par `readFixtureAlloc`, sinon `error.MissingTensor` au lancement ;
 le seul « 200 » est `witness_long_before.safetensors`, une clé `ids` seule). Véhicule réel :
 **construire la fixture oracle 200** — script Python d'une page (nommé au plan) qui produit
-`positions` i32[200] (positions[0] = longueur du prompt du run témoin, lu dans
-`witness_long_before.log`) et `fed` = les 200 ids de `witness_long_before.safetensors` —
-transport `scp` vers la VM. Le run `--oracle` sur cette fixture fait **200 steps garantis par la
-borne `fx.len`** (pas par un forcing — un EOS libre précoce reste possible : la ligne
-INEXECUTABLE couvre ce cas, bistabilité comprise).
+`positions` i32[200] et `fed` = les 200 ids de `witness_long_before.safetensors` — transport
+`scp` vers la VM. ⚠ Provenance vérifiée (passe 3) : le **prompt** du témoin n'est PAS dans
+`witness_long_before.log` — il vit dans
+`docs/superpowers/plans/2026-07-27-sampling-repetition-penalty.md:190` (« Tell me the story of
+the number zero, from its invention to modern mathematics. ») et doit être passé en `--prompt`
+au run AL-RSS ; la **longueur en tokens** (`positions[0]`, comparée à `ids.len` par `:1699`) se
+**MESURE**, jamais ne s'estime : lire « PERF : prefill {d} steps » (`:2320`) d'un run frais avec
+ce prompt, ou lancer une fois avec un placeholder et lire le message `:1700`
+(« positions[0]=X != ids.len=Y ») qui imprime la valeur exacte — puis écrire la fixture. Le run
+`--oracle` sur cette fixture fait **200 steps garantis par la borne `fx.len`** (pas par un
+forcing — un EOS libre précoce reste possible : la ligne INEXECUTABLE couvre ce cas,
+bistabilité comprise).
 
 ### Publication (véhicule des gates)
 
@@ -356,12 +374,15 @@ EST la spec ci-dessous, et ses logs sont archivés) — deux sites, via le param
 l'inverse) :
 
 ```zig
-// Site 1 — boucle de génération, dans la fenêtre ALLOC-LOOP, après le bloc chemin B (~:2145) :
+// Site 1 — boucle de génération, dans la fenêtre ALLOC-LOOP, APRÈS la fermeture du bloc
+// chemin B (:2136-2192) — insérer après :2192, HORS du if (scfg.pathArmed()) : le run AL-RSS
+// est un --oracle NEUTRE (pathArmed=false — un chemin B armé casserait A1) et ne traverserait
+// jamais un leak placé dans le bloc (passe 3).
 const leak1 = try allocator.alloc(u8, 1 << 20);
 @memset(leak1, 0xAA); // ⚠ OBLIGATOIRE : un mmap non écrit n'est PAS résident — sans le
 // memset, VmRSS ne dérive pas et AL-RSS PASSerait sous mutant (passe 2, BLOQUANT n°3).
 // leak1 n'est JAMAIS libéré : c'est le point.
-// Site 2 — même paire de lignes dans la boucle de steps vacuity.
+// Site 2 — même paire de lignes dans la boucle de steps vacuity (:1889-1939, fenêtre ALLOC-VAC).
 ```
 
 Il doit faire échouer AL-0 (`alloc=steps` > 0), AL-VAC (idem) et AL-RSS (dérive ~180 MiB ≥
@@ -376,13 +397,25 @@ les FAIL sans reconstruire le mutant).
 | **AL-0** | P2 — l'interdit est GARDÉ | Même run, binaire corrigé | `ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0` avec `steps` > 0, ET `ALLOC-TOTAL: alloc=<n>` > 0 (le compteur vit) | Mutant M1 ⇒ `alloc=steps` (> 0) ⇒ FAIL vu |
 | **AL-VAC** | P2 sur l'instrument | Run `--window-vacuity` court, binaire corrigé | `ALLOC-VAC: alloc=0 resize=0 remap=0 free=0` avec `steps` > 0 | Mutant M1 (branche vacuity) ⇒ `ALLOC-VAC: alloc=<steps>` ⇒ FAIL vu |
 | **EQ-48** | P4 | Re-run 48 ids free-run + `cmp` binaire vs témoin (véhicule du chantier donation) ; émetteur : `cmp out_ids.bin temoin.bin && echo "EQ-48: identique"` | `EQ-48: identique` | Le témoin existe AVANT le chantier ; tout écart = FAIL par construction |
-| **EQ-124** | P4 (et exerce la variante 4k) | Run `gemma4_g12a4k` avec `--out-ids`, comparaison des **110 premiers ids** vs témoin `mi_witness_4k_ids.safetensors` (564 o, header 60 o, données à l'octet 68). ⚠ Un `cmp -n` naïf comparerait le HEADER (longueur variable avec le nombre d'ids) et FAILerait à tort sur la bistabilité que la borne 110 tolère. Émetteur exact (les headers des DEUX fichiers sont sautés) : `h1=$(od -An -tu8 -j0 -N8 run4k_ids.safetensors \| tr -d ' '); h2=$(od -An -tu8 -j0 -N8 mi_witness_4k_ids.safetensors \| tr -d ' '); cmp -i $((8+h1)):$((8+h2)) -n 440 run4k_ids.safetensors mi_witness_4k_ids.safetensors && echo "EQ-124: identique (110 ids)"` (110 ids × 4 o = 440 ; un run < 110 ids FAIL par EOF : correct) | `EQ-124: identique (110 ids)` | Borné à 110 par la bistabilité aval documentée — au-delà, un écart n'accuserait pas le chantier |
+| **EQ-124** | P4 (et exerce la variante 4k) | Run `gemma4_g12a4k` avec `--out-ids`, comparaison des **110 premiers ids** vs témoin `mi_witness_4k_ids.safetensors` (564 o, header 60 o, données à l'octet 68). ⚠ Un `cmp -n` naïf comparerait le HEADER (longueur variable avec le nombre d'ids) et FAILerait à tort sur la bistabilité que la borne 110 tolère. Émetteur : bloc de code ci-dessous (vérifié sur la VM : GNU cmp 3.10, auto-comparaison PASS, fichier tronqué FAIL par EOF) | `EQ-124: identique (110 ids)` | Borné à 110 par la bistabilité aval documentée — au-delà, un écart n'accuserait pas le chantier |
 | **EQ-PONT** | P4 | Protocole S2-PONT repris (3 runs `--top-k 1`) | **Lignes réellement émises par le runner** (`:2289-2291`) : `S2-PONT: steps_comparés=<n> désaccords=0` avec n cumulé ≥ 100, ET antécédent `GENCFG: suppress a mordu <k> fois` avec k ≥ 1 (au 2ᵉ essai si variante bistable, écrit — précédent S2-PONT) | Héritée de S2-PONT (mutations du chantier sampling) |
 | **V-EQ** | P4 sur vacuity | Témoin : run `--window-vacuity` AVANT modification (binaire baseline), sortie archivée ; re-run après | `diff` vide sur les **champs STRUCTURELS** des lignes vacuity (`n_ident`, `q` — invariants sémantiques) ; `max_abs` EXCLU du critère (flottant soumis au jitter de compile — deux binaires = deux compiles ; FINDING §7bis), publié à titre informatif | Le témoin est produit d'abord — un instrument modifié sans témoin préalable serait invérifiable |
 | **G-0** | P5 | Dump HLO `before_optimizations`, md5, AVANT la 1ʳᵉ ligne de code puis après | md5 identique (méthode du gate S2-G, fraîcheur par mtime) | **Produite pour de vrai une fois** : build scratch avec un op ajouté au graphe ⇒ md5 différent constaté ⇒ jeté (aucun gate du projet n'a encore VU un md5 différer ; l'instrument doit avoir échoué une fois pour compter) |
 | **AL-RSS** | P7 | Run `--oracle` 200 steps borné par la fixture construite (C8), sonde VmRSS aux tokens générés 20/200. **Le même run sur le binaire BASELINE publie d'abord son RSS-DELTA** : ce chiffre mesure le bruit VmRSS réel de ce runner et fonde (ou corrige, avant jugement) le seuil 5 120 KiB | `RSS-DELTA: <n> KiB` avec n < 5 120 (ligne `INEXECUTABLE` = gate non rendu, jamais PASS) | Mutant M1 (`@memset` compris) ⇒ dérive ~180 MiB ⇒ FAIL vu |
 | **M-D10** | P3 (mesure) | Protocole M-COUT identique (n ≥ 60, in-process, build §8) | Publie `d2h_us`/`warp_us` avant/après — pas de PASS/FAIL | — |
 | **M-PIN** | P6 (mesure) | Même run, `PIN: ON` vs `--no-pin` (A/B) | Publie les deux `d2h_us` + la bannière PIN | — |
+
+**Émetteur EQ-124** (sorti du tableau — les pipes y étaient échappés pour Markdown, un
+copier-coller aurait cassé ; celui-ci s'exécute verbatim sur la VM) :
+
+```bash
+h1=$(od -An -tu8 -j0 -N8 run4k_ids.safetensors | tr -d ' ')
+h2=$(od -An -tu8 -j0 -N8 mi_witness_4k_ids.safetensors | tr -d ' ')
+cmp -i $((8+h1)):$((8+h2)) -n 440 run4k_ids.safetensors mi_witness_4k_ids.safetensors \
+  && echo "EQ-124: identique (110 ids)"
+# 110 ids × 4 o = 440, comptés APRÈS le saut des deux headers (8 o de longueur u64 LE + header
+# JSON de taille h). Un run < 110 ids FAIL par EOF : correct.
+```
 
 **Ordre d'exécution imposé** (réalisable sans contorsion — chaque état intermédiaire est un
 commit constructible ; les émetteurs de « §3 Publication » et le selftest APPARTIENNENT à C1,
