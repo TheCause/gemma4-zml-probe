@@ -19,3 +19,6 @@ fixtures/*.pt
 
 # Run logs
 logs/
+
+# Session handoffs (deposited by the session-end fallback, any directory — root included)
+**/.claude-handoff.md
