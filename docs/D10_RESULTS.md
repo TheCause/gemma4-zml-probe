@@ -87,7 +87,7 @@ publié, et le « 0,96 ns par élément-opération » était du code debug.
 
 | # | Dette | État |
 |---|---|---|
-| DA-1 | Allocations C/PJRT invisibles au compteur Zig | **Ouverte** (inchangée). AL-RSS borne la dérive nette ; voie future `LD_PRELOAD` non faite |
+| DA-1 | Allocations C/PJRT invisibles au compteur Zig | **BORNÉE (30 juil, `LD_PRELOAD` mallocount.so)** : deux runs différentiels (88 vs 828 steps) — le run 10× plus long fait *moins* de mallocs (215,28 M vs 215,62 M, jitter inter-compiles ±335 K) ⇒ **< ~450 mallocs C/step**, indiscernable de zéro par méthode différentielle. Les ~215 M d'appels (30,5 Go cumulés) sont le load+compile. Faire mieux = marqueurs in-process dans le .so, disproportionné au vu de la borne ; AL-RSS borne déjà la dérive nette |
 | DA-2 | AL-0 exercé sur ses runs seulement | **Amortie en continu** : le compteur toujours actif a déjà re-vérifié quatre zéros sur les runs 800 tokens, oracle 200 et vacuity 2 356 steps |
 | DA-3 | `n_shards` supposé | **SOLDÉE** : `shards=1` publié à chaque run |
 | DA-4 | Variantes 4k/8k non re-exécutées | **Réduite** : la 4k est exercée par EQ-124 ; la 8k reste (graphe intouché G-0, code host identique) |
