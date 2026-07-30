@@ -2232,15 +2232,16 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         // ~48 octets de D2H, aucune lecture du vecteur complet. ===
         if (scfg.pathArmed()) {
             const t_b0: std.Io.Timestamp = .now(io, .awake); // M-COUT : début du bloc mesuré
-            var lg_s = try r_logits.toSliceAlloc(allocator, io);
-            defer lg_s.free(allocator);
-            const lg = lg_s.items(f32);
-            if (lg.len != scfg.work.len) {
-                log.err("chemin B : logits {d} f32 != vocab {d}", .{ lg.len, scfg.work.len });
+            // D10 (C2) : D2H DIRECT dans work (persistant) — 0 allocation, 0 copie. toSliceAlloc
+            // faisait 2 allocs d'1 MiB + 1 memcpy interne + un @memcpy runner : tout disparaît.
+            // Garde en ACCEPTATION avant l'assert de Slice.init (erreur propre, pas un panic).
+            const need = r_logits.shape().byteSize();
+            if (need != scfg.work.len * @sizeOf(f32)) {
+                log.err("chemin B : logits {d} octets != work {d} octets", .{ need, scfg.work.len * @sizeOf(f32) });
                 return error.UnexpectedShape;
             }
-            @memcpy(scfg.work, lg);
-            const t_d2h: u64 = @intCast(t_b0.untilNow(io, .awake).toNanoseconds()); // D2H + alloc + copie
+            try r_logits.toSlice(io, zml.Slice.init(r_logits.shape(), std.mem.sliceAsBytes(scfg.work)));
+            const t_d2h: u64 = @intCast(t_b0.untilNow(io, .awake).toNanoseconds()); // D2H seul
             const t_w0: std.Io.Timestamp = .now(io, .awake);
 
             // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
@@ -2404,7 +2405,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             const n_f: f64 = @floatFromInt(scfg.n_cout_samples);
             const d2h_us = @as(f64, @floatFromInt(scfg.d2h_ns_total)) / n_f / 1000.0;
             const warp_us = @as(f64, @floatFromInt(scfg.warp_ns_total)) / n_f / 1000.0;
-            log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step (D2H+copie {d:.1} µs, warpers {d:.1} µs), max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, d2h_us, warp_us, max_us, scfg.n_cout_samples });
+            log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step (D2H seul {d:.1} µs, warpers {d:.1} µs), max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, d2h_us, warp_us, max_us, scfg.n_cout_samples });
         }
     }
 
