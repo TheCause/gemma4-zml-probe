@@ -74,6 +74,12 @@ pub const SamplingCfg = struct {
     cout_ns_total: u64 = 0,
     cout_ns_max: u64 = 0,
     n_cout_samples: usize = 0,
+    // Décomposition (dette D9) : le build `opt` n'ayant PAS réduit le coût — 3 829 µs contre
+    // 3 730 en `dbg`, alors que le binaire est 11× plus petit — le calcul host n'est pas le
+    // goulot. On sépare donc le rapatriement (D2H + allocation) du calcul des warpers, au lieu
+    // de continuer à spéculer sur la cause.
+    d2h_ns_total: u64 = 0,
+    warp_ns_total: u64 = 0,
 
     /// Le CHEMIN B est armé dès qu'un warper est demandé **ou** qu'un tirage l'est. Sans quoi
     /// `--top-k 1` seul — le régime neutre du gate-pont — n'activerait pas le chemin et le gate

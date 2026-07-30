@@ -2143,6 +2143,8 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
                 return error.UnexpectedShape;
             }
             @memcpy(scfg.work, lg);
+            const t_d2h: u64 = @intCast(t_b0.untilNow(io, .awake).toNanoseconds()); // D2H + alloc + copie
+            const t_w0: std.Io.Timestamp = .now(io, .awake);
 
             // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
             // TopK(19) → TopP(20). La penalty appartient à la PHASE 1 : absente ici.
@@ -2181,6 +2183,8 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
 
             // M-COUT — le bloc entier {D2H + warpers + sélection}, seul endroit où le surcoût
             // vit réellement. Mesurer le tok/s global le noierait dans le bruit inter-compiles.
+            scfg.d2h_ns_total += t_d2h;
+            scfg.warp_ns_total += @intCast(t_w0.untilNow(io, .awake).toNanoseconds());
             const dt: u64 = @intCast(t_b0.untilNow(io, .awake).toNanoseconds());
             scfg.cout_ns_total += dt;
             if (dt > scfg.cout_ns_max) scfg.cout_ns_max = dt;
@@ -2288,7 +2292,10 @@ fn generateOnce(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         if (scfg.n_cout_samples > 0) {
             const moy_us = @as(f64, @floatFromInt(scfg.cout_ns_total)) / @as(f64, @floatFromInt(scfg.n_cout_samples)) / 1000.0;
             const max_us = @as(f64, @floatFromInt(scfg.cout_ns_max)) / 1000.0;
-            log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step, max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, max_us, scfg.n_cout_samples });
+            const n_f: f64 = @floatFromInt(scfg.n_cout_samples);
+            const d2h_us = @as(f64, @floatFromInt(scfg.d2h_ns_total)) / n_f / 1000.0;
+            const warp_us = @as(f64, @floatFromInt(scfg.warp_ns_total)) / n_f / 1000.0;
+            log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step (D2H+copie {d:.1} µs, warpers {d:.1} µs), max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, d2h_us, warp_us, max_us, scfg.n_cout_samples });
         }
     }
 
