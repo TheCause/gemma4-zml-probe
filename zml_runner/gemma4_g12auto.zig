@@ -177,6 +177,7 @@ const Args = struct {
     out_ids: ?[]const u8 = null, // ids générés -> safetensors (requis U9-ii replay / U9-iv teacher-forcing)
     window_vacuity: ?[]const u8 = null, // U9-ii : replay teacher-forcé, masque sliding élargi rebindé en DONNÉES
     no_prealloc: bool = false, // U10 : preallocate=false, nvidia-smi mesure la VRAM réelle (mécanisme gen_long_gpu)
+    no_pin: bool = false, // D10 (C7) : désactive l'allocation DMA (pinned) de work — A/B de M-PIN
     repl: bool = false, // mode RÉSIDENT (spec 2026-07-26 repl-mode) : compile une fois, prompts en boucle sur stdin
 };
 
@@ -189,6 +190,7 @@ const usage =
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
     "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
+    "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -295,6 +297,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.selftest_draw = process_args[i];
         } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
             args.selftest_alloc_count = true;
+        } else if (std.mem.eql(u8, a, "--no-pin")) {
+            args.no_pin = true;
         } else if (std.mem.eql(u8, a, "--draws")) {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
@@ -1721,18 +1725,16 @@ pub fn run(init: std.process.Init) !void {
         .min_keep = args.min_tokens_to_keep,
         .seed = args.seed,
     };
+    // D10 (C7) : `work` n'est plus alloué ICI — il déménage APRÈS la création de la Platform
+    // (DmaAllocator exige un Device vivant), avec son defer. Le scratch et le reste restent.
     if (scfg.pathArmed()) {
         scfg.scratch = try sampling.Scratch.init(allocator, VOCAB_CONTRACT);
-        scfg.work = try allocator.alloc(f32, VOCAB_CONTRACT);
         scfg.resetPerPrompt();
         log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet ARMÉ ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
     } else {
         log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
     }
-    defer if (scfg.pathArmed()) {
-        scfg.scratch.deinit(allocator);
-        allocator.free(scfg.work);
-    };
+    defer if (scfg.pathArmed()) scfg.scratch.deinit(allocator);
 
     if (args.force_vram) {
         log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
@@ -1810,6 +1812,36 @@ pub fn run(init: std.process.Init) !void {
         log.err("backend = {s} ≠ cuda — repli CPU refusé (rebuilder/lancer avec --@zml//platforms:cuda=true, ou passer --allow-cpu pour du débogage)", .{@tagName(platform.target)});
         return error.CudaRequired;
     }
+
+    // === D10 (C7/M-PIN) : work alloué APRÈS la Platform (DmaAllocator exige un Device vivant)
+    // — le repli est ÉCRIT (ZML ne replie jamais : null → OutOfMemory, mem.zig:145-153), et
+    // pin_on UNIQUE pilote l'alloc, la bannière ET le free : « libéré par l'allocateur qui a
+    // alloué » est STRUCTUREL, pas puni par un panic (catch unreachable = UB en ReleaseFast). ===
+    var dma = zml.mem.DmaAllocator.init(allocator, &platform.devices[0]);
+    var pin_on = !args.no_pin;
+    if (scfg.pathArmed()) {
+        if (pin_on) {
+            scfg.work = dma.allocator().alloc(f32, VOCAB_CONTRACT) catch blk: {
+                pin_on = false;
+                break :blk try allocator.alloc(f32, VOCAB_CONTRACT);
+            };
+        } else {
+            scfg.work = try allocator.alloc(f32, VOCAB_CONTRACT);
+        }
+        if (pin_on) {
+            log.info("PIN: ON (work 1 MiB dma-mappé)", .{});
+        } else if (args.no_pin) {
+            log.info("PIN: OFF (--no-pin)", .{});
+        } else {
+            log.info("PIN: OFF (alloc DMA échouée : dmaMap indisponible ou OOM transitoire)", .{});
+        }
+    }
+    // Ordre LIFO : ce defer est déclaré APRÈS `defer platform.deinit` → il s'exécute AVANT lui
+    // (dmaUnmap exige la plateforme vivante).
+    defer if (scfg.pathArmed()) {
+        if (pin_on) dma.allocator().free(scfg.work) else allocator.free(scfg.work);
+    };
+
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     // === Task 4 (plan L3) : --selftest-gather — mode GPU désormais (gather in-graph, spec
