@@ -2197,20 +2197,21 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         // le dernier prefill step, qui produit s0 — cf `in_gen_phase` ci-dessous).
         const in_gen_phase = step + 1 >= ids.len;
 
-        // Top5 depuis le device (~48 octets D2H) — top1 = next token (spec §2, §4 ties d'argmax).
-        var t5v_s = try r_t5v.toSliceAlloc(allocator, io);
-        defer t5v_s.free(allocator);
-        var t5i_s = try r_t5i.toSliceAlloc(allocator, io);
-        defer t5i_s.free(allocator);
-        // dtype confirmé : `topK` délègue à `sort` (tensor.zig:3096), dont les indices sont
-        // produits par `Tensor.arange(…, .i32)` (tensor.zig:2977) — vérifié À CHAQUE step (coût
-        // nul : compare d'enum) plutôt que supposé silencieusement.
-        if (t5i_s.dtype() != .i32) {
-            log.err("t5.indices : dtype={s} ≠ i32 attendu (topK/sort, tensor.zig:2977)", .{@tagName(t5i_s.dtype())});
+        // Top5 depuis le device (~40 octets D2H, PILE — D10/C3 : getValue délègue à toSlice,
+        // zéro allocation). Gardes dtype AVANT le D2H, en acceptation ; f32 est désormais
+        // vérifié aussi (il était supposé). dtype i32 : `topK` délègue à `sort` (tensor.zig:3096),
+        // indices produits par `Tensor.arange(…, .i32)` (tensor.zig:2977) — vérifié À CHAQUE step
+        // (coût nul : compare d'enum) plutôt que supposé silencieusement.
+        if (r_t5v.shape().dtype() != .f32) {
+            log.err("t5.values : dtype={s} ≠ f32 attendu", .{@tagName(r_t5v.shape().dtype())});
             return error.UnexpectedDtype;
         }
-        const t5i = t5i_s.items(i32);
-        const t5v = t5v_s.items(f32);
+        if (r_t5i.shape().dtype() != .i32) {
+            log.err("t5.indices : dtype={s} ≠ i32 attendu (topK/sort, tensor.zig:2977)", .{@tagName(r_t5i.shape().dtype())});
+            return error.UnexpectedDtype;
+        }
+        const t5v = try r_t5v.getValue([gencfg.TOP_K]f32, io);
+        const t5i = try r_t5i.getValue([gencfg.TOP_K]i32, io);
         var top5: Top5 = undefined;
         for (0..gencfg.TOP_K) |j| {
             top5.idx[j] = @intCast(t5i[j]);
