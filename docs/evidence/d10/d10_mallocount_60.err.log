@@ -1,0 +1,25 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: T=1 top_k=1 top_p=1 min_keep=1 seed=null (chemin complet ARMÉ ; tirage OFF (argmax))
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: PIN: ON (work 1 MiB dma-mappé)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2637052 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 28.903s
+info: [mem] post-compile (go/no-go): RSS=3317144 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 29 steps de prefill, puis génération (limite 60 = max_tokens)
+info: GENCFG: suppress a mordu 0 fois sur 60 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=88
+info: ALLOC-TOTAL: alloc=757 free=716 bytes=959059080 shards=1
+info: S2-PONT: steps_comparés=88 désaccords=0 égalités_exactes=0 (chemin B armé)
+info: M-COUT: bloc chemin B — moyenne 693.5 µs/step (D2H seul 436.5 µs, warpers 242.9 µs), max 882.5 µs, sur 88 steps (MESURE PUBLIÉE, pas un gate)
+info: PERF : prefill 29 steps en 3.084s (9.4 tok/s) ; génération 60 tokens en 6.142s (9.8 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=3992620 t200=null)
+info: mode libre : 60 tokens générés (EOT_ID=106, max_tokens=60)
+info: generated = { 818, 3925, 529, 5743, 563, 886, 529, 506, 11333, 21623, 29685, 528, 3246, 4083, 236761, 1030, 563, 506, 3925, 529, 1217, 27069, 8683, 531, 11451, 606, 623, 63823, 1788, 236775, 532, 2490, 625, 1131, 496, 5904, 529, 18304, 2066, 236761, 108, 1509, 3721, 11252, 529, 1518, 573, 27069, 531, 2827, 699, 9333, 5743, 618, 496, 623, 4117, 236775, 568, 236746 }
+info: arrêt : max-tokens (60)
+MALLOCOUNT: malloc=215618308 calloc=669273 realloc=10701784 free=342475775 bytes=30409641218

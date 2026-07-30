@@ -66,6 +66,10 @@ pub const SamplingCfg = struct {
     n_disagree: usize = 0,
     n_exact_top_ties: usize = 0,
 
+    // D10 (DA-3) : nombre de shards de r_logits, capté au 1er step (r_logits est deinit
+    // par step — la valeur doit être lue DANS la boucle), publié dans ALLOC-TOTAL.
+    n_shards: u32 = 0,
+
     // M-COUT — chronomètre IN-PROCESS du bloc {D2H + warpers + sélection}, en nanosecondes.
     // ⚠ C'est une MESURE PUBLIÉE, pas un gate : le surcoût visé (~1,6 % d'un step) est SOUS le
     // plancher de résolution du protocole de débit du projet (bruit inter-compiles 2 à 16 %). Un

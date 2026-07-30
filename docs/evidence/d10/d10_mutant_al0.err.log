@@ -1,0 +1,24 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: T=1 top_k=1 top_p=1 min_keep=1 seed=null (chemin complet ARMÉ ; tirage OFF (argmax))
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: PIN: ON (work 1 MiB dma-mappé)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2637012 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.749s
+info: [mem] post-compile (go/no-go): RSS=3314252 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 28 steps de prefill, puis génération (limite 60 = max_tokens)
+info: GENCFG: suppress a mordu 0 fois sur 60 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=87 resize=0 remap=0 free=0 bytes=91226112 steps=87
+info: ALLOC-TOTAL: alloc=844 free=716 bytes=1050285172 shards=1
+info: S2-PONT: steps_comparés=87 désaccords=0 égalités_exactes=0 (chemin B armé)
+info: M-COUT: bloc chemin B — moyenne 705.0 µs/step (D2H seul 425.9 µs, warpers 265.2 µs), max 1418.3 µs, sur 87 steps (MESURE PUBLIÉE, pas un gate)
+info: PERF : prefill 28 steps en 3.003s (9.3 tok/s) ; génération 60 tokens en 6.163s (9.7 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=4043520 t200=null)
+info: mode libre : 60 tokens générés (EOT_ID=106, max_tokens=60)
+info: generated = { 129930, 3037, 2049, 4052, 569, 759, 107058, 2112, 118583, 513, 236789, 62462, 696, 22865, 37485, 1017, 108, 4967, 107058, 2112, 118583, 513, 236789, 62462, 1009, 3037, 9939, 2947, 55844, 674, 28421, 569, 10040, 513, 236789, 602, 56667, 568, 182283, 723, 92474, 236768, 1608, 723, 9062, 125091, 569, 60588, 3349, 569, 12727, 1190, 193336, 236761, 16107, 20995, 569, 150741, 1640, 3381 }
+info: arrêt : max-tokens (60)

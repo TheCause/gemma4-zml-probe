@@ -1,0 +1,16 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2633416 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 28.025s
+info: [mem] post-compile (go/no-go): RSS=3312332 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: WV passe 1/2 : 76 steps teacher-forcés, masque sliding NORMAL (fenêtre 1024)
+info: WV passe 2/2 : 76 steps teacher-forcés, masque sliding ÉLARGI (causal plein, rebind données)
+info: ALLOC-VAC: alloc=152 resize=0 remap=0 free=0 bytes=159383552 steps=152
+warning: WINDOW-VACUITY : AUCUNE divergence sur 76 positions — la fenêtre n'a pas mordu (S <= 1024 ?) : rapport VACUEUX pour U9-ii si S > 1024 attendu

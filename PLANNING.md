@@ -79,9 +79,25 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       3 sorties · **S2-G** md5 HLO **identique** au témoin figé avant la 1ʳᵉ ligne de code.
       Mesure publiée **M-COUT** : 3 730 µs/step = **3,5 %** d'un step.
       Résultats : `docs/SAMPLING_RESULTS.md`.
-- [ ] ⚠ **Dette D9** : `M-COUT` mesuré en build **`dbg`**. La mesure en `opt` reste à faire —
-      l'écart de ~27× avec la borne C++ s'explique *probablement* par là, et « probablement » n'est
-      pas « mesuré ».
+- [x] ~~⚠ Dette D9~~ mesurée le 30 juil puis **conclusion RECTIFIÉE par le chantier D10** : le
+      « coût structurel » était en partie un artefact de **mode de build** (frontend Zig debug non
+      détecté, commande « opt » perdue) — warpers 2 268 → 261 µs au mode PROUVÉ.
+      Cf `docs/D10_RESULTS.md` §5.
+- [x] ~~⚠ Dette D10~~ **CHANTIER CLOS (30 juil, branche `s2-d10-alloc-par-step`)** — l'interdit
+      « aucune allocation par step » est **VRAI et GARDÉ** : `toSlice` direct, top-5 en pile,
+      args/results hissés, ArrayLists pré-réservées, vacuity corrigée. **9 gates verts**
+      (`gate/d10-*`), 3 FAIL mutants **vus** (`docs/evidence/d10/`), bloc chemin B
+      **3 796 → 908,7 µs** (0,86 % d'un step). P6 (pinned) **RÉFUTÉE par A/B**. Compteur
+      `CountingAllocator` **toujours actif** : chaque run futur re-vérifie gratuitement.
+      Résultats : `docs/D10_RESULTS.md`. Dettes DA-3/DA-5 soldées, DA-1/DA-6 ouvertes.
+- [ ] 🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — mesures passées en mode ambigu** : inventorier
+      les claims de PERFORMANCE du repo (les claims d'équivalence sont insensibles), marquer
+      « mode non prouvé », re-mesurer celles qui portent une décision. Inventaire lancé
+      (workflow), triage A/B/C attendu.
+- [ ] 🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — dettes DA-1/DA-6** : un run unique sous
+      `LD_PRELOAD` d'un malloc compteur sur la VM pour chiffrer les allocations C/PJRT par step,
+      invisibles au compteur Zig. La 8k (DA-4 résiduelle) : re-run d'un gate sur `gemma4_g12a8k`
+      à l'occasion.
 - [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
       Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
 - [ ] ⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a **aucune couverture GPU** — sa
