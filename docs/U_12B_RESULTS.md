@@ -1,5 +1,12 @@
 # U_12B_RESULTS — W4-J2 : Gemma 4 12B Unified w4a16 sur la 3090
 
+> ⚠ **Mode de build (audit du 30 juil 2026 — `docs/MODE_BUILD_AUDIT.md`)** : les chiffres de
+> **DÉBIT et de latence host** de ce document ont été mesurés avec un mode de build **non prouvé**
+> (`-c opt` seul laisse le frontend Zig en `debug` — le mode rules_zig est un flag indépendant).
+> Exposition mesurée : **+7,8 %** sur les tok/s GPU-bound, **jusqu'à ×8,7** sur un chrono host pur.
+> Les claims d'**équivalence** (ids identiques, bit-exact, md5) et les **différentiels appariés**
+> (ratios A/B du même build) sont **insensibles au mode** et restent valides tels quels.
+
 > **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
 > Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
 > plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le

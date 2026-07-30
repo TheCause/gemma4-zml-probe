@@ -1,5 +1,12 @@
 # ENGINE_LOG — P5.7.5 → P5.7.8 (run autonome)
 
+> ⚠ **Mode de build (audit du 30 juil 2026 — `docs/MODE_BUILD_AUDIT.md`)** : les chiffres de
+> **DÉBIT et de latence host** de ce document ont été mesurés avec un mode de build **non prouvé**
+> (`-c opt` seul laisse le frontend Zig en `debug` — le mode rules_zig est un flag indépendant).
+> Exposition mesurée : **+7,8 %** sur les tok/s GPU-bound, **jusqu'à ×8,7** sur un chrono host pur.
+> Les claims d'**équivalence** (ids identiques, bit-exact, md5) et les **différentiels appariés**
+> (ratios A/B du même build) sont **insensibles au mode** et restent valides tels quels.
+
 > Journal du run autonome de portage du forward complet Gemma-4-E2B-it en ZML (démarré 2 juin 2026).
 > Contrat de précision : `docs/P5_7_5_precision_contract.md`. Discipline : oracle = source de vérité,
 > gate atomique, commit + tag, comparaison par couche pour localiser (contrat §6).

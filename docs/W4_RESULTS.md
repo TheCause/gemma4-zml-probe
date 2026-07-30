@@ -1,5 +1,12 @@
 # Poids 4-bit w4a16 (compressed-tensors) dans ZML — résultats du jalon J1 (E2B)
 
+> ⚠ **Mode de build (audit du 30 juil 2026 — `docs/MODE_BUILD_AUDIT.md`)** : les chiffres de
+> **DÉBIT et de latence host** de ce document ont été mesurés avec un mode de build **non prouvé**
+> (`-c opt` seul laisse le frontend Zig en `debug` — le mode rules_zig est un flag indépendant).
+> Exposition mesurée : **+7,8 %** sur les tok/s GPU-bound, **jusqu'à ×8,7** sur un chrono host pur.
+> Les claims d'**équivalence** (ids identiques, bit-exact, md5) et les **différentiels appariés**
+> (ratios A/B du même build) sont **insensibles au mode** et restent valides tels quels.
+
 > Spec : `docs/superpowers/specs/2026-07-18-w4-poids-4bit-12b-design.md`
 > Plan exécuté : `docs/superpowers/plans/2026-07-24-w4-j1-brique-e2b.md`
 > Machine : VM 3090 (24 GiB). Exécution : 24 juillet 2026, en une session, subagent-driven,
