@@ -539,6 +539,9 @@ un **verdict distinct**, pas un FAIL. **FAIL ⇒ STOP.**
       l'édition**, publier **nombre de fichiers ET volume** des deux côtés. Sans cela le gate
       compare le témoin à lui-même et ne peut plus échouer.
 
+> ⚠ ERRATA (30 juil) : les % ci-dessous reposent sur la base RÉFUTÉE (9 091 µs/step, erreur ×12).
+> Base corrigée et chiffres justes : spec 2026-07-29-sampling-penalty-design.md rév. 4, F16.
+
 - [ ] **Step 6.2 — `M-COUT` — c'est une MESURE, pas un gate.** Chronomètre **in-process** autour du
       bloc {D2H + sample}, bras **alternés A/B dans le même processus**, médiane par step sur 48
       steps. **Publier** en regard de la table F16 (D2H+partial_sort ≈ **1,57 %** d'un step ; softmax

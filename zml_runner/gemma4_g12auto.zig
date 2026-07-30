@@ -18,12 +18,14 @@
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 //       [--selftest-gencfg f (GC1 : politique generation_config, host-only, sans GPU ni tokenizer)]
 //       [--selftest-sampling f (S2-U : warpers top_k/top_p/temperature, host-only)]
+//       [--selftest-draw f] [--selftest-alloc-count (S-AC, host-only)] [--no-pin]
 //       [--gen-config FICHIER] [--no-gen-config]
+//       [--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N]
 // Politique de décodage (spec 2026-07-28) : `suppress_tokens` + EOS multiples de
 // generation_config.json, appliqués HOST-SIDE sur le top-5 rapatrié. Découverte automatique à
 // côté du checkpoint (1 hop de symlink) ; `--gen-config` force le fichier, `--no-gen-config` la
-// désactive. ⚠ Seules 2 des 8 clés sont appliquées — `do_sample/top_k/top_p/temperature` NE le
-// sont PAS (le log les nomme dans `ignored=[…]`).
+// désactive. Avec le sampling phase 2 (chemin B host-side : top_k/top_p/temperature + seed),
+// 6 des 8 clés sont appliquées — restent bos/pad, sans objet au décodage (SAMPLING_RESULTS §4).
 // Mode --oracle : loggue en plus la marge top1−top2 par step de génération (protocole de flip W4g).
 // --dump-top5 : top-5 par step aussi en mode LIBRE (requis U9). --out-ids : ids générés →
 // safetensors (requis U9-ii/iv). --window-vacuity : replay teacher-forcé in-process, fenêtre
@@ -2235,7 +2237,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
 
         call_args.set(.{ eng_buf.*, tok_buf, pk_buf.*, cache_buf, ctrl_buf });
         exe.call(call_args, &call_results);
-        // r_logits : sortie supplémentaire (--window-vacuity) — NON lue ici (pas de D2H), deinit direct.
+        // r_logits : lue par le chemin B (toSlice → work) quand armé ; deinit par step.
         var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
             zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
         });
