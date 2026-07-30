@@ -1939,6 +1939,9 @@ pub fn run(init: std.process.Init) !void {
         const voc_us: usize = @intCast(vocab_wv);
         const logits_p1 = try allocator.alloc(u32, s_total * voc_us); // bits f32 (compare BIT, pas de tolérance)
         defer allocator.free(logits_p1);
+        // D10 (C6) : buffer de logits alloué UNE FOIS pour les 2 passes — hors fenêtre ALLOC-VAC.
+        const wv_work = try allocator.alloc(f32, voc_us);
+        defer allocator.free(wv_work);
         var first_div: ?usize = null;
         var div_max_abs: f64 = 0;
         var n_ident: usize = 0;
@@ -1974,13 +1977,14 @@ pub fn run(init: std.process.Init) !void {
                 var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = wv_results.get(struct {
                     zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
                 });
-                var lg_s = try r_logits.toSliceAlloc(allocator, io);
-                defer lg_s.free(allocator);
-                const lg = lg_s.items(f32);
-                if (lg.len != voc_us) {
-                    log.err("WV : logits — {d} f32 != {d}", .{ lg.len, voc_us });
+                // D10 (C6) : toSlice direct dans wv_work — mêmes raisons que le chemin B (C2).
+                const need_wv = r_logits.shape().byteSize();
+                if (need_wv != wv_work.len * @sizeOf(f32)) {
+                    log.err("WV : logits {d} octets != {d}", .{ need_wv, wv_work.len * @sizeOf(f32) });
                     return error.UnexpectedShape;
                 }
+                try r_logits.toSlice(io, zml.Slice.init(r_logits.shape(), std.mem.sliceAsBytes(wv_work)));
+                const lg = wv_work;
                 if (pass == 0) {
                     for (lg, 0..) |v, i| logits_p1[step * voc_us + i] = @bitCast(v);
                 } else {
