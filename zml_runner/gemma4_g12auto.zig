@@ -1942,8 +1942,14 @@ pub fn run(init: std.process.Init) !void {
         var first_div: ?usize = null;
         var div_max_abs: f64 = 0;
         var n_ident: usize = 0;
+        // D10 (C4) : args/results du mode vacuity hissés — mêmes raisons que la boucle de gen,
+        // AVANT les snapshots ALLOC-VAC (hors fenêtre).
+        var wv_args = try exe.args(allocator);
+        defer wv_args.deinit(allocator);
+        var wv_results = try exe.results(allocator);
+        defer wv_results.deinit(allocator);
         // === D10 : fenêtre ALLOC-VAC — les boucles de steps SEULES (le buffer logits_p1 et les
-        // futurs init hissés C4/C6 sont HORS fenêtre, spec §3/C6). ===
+        // init hissés C4/C6 sont HORS fenêtre, spec §3/C6). ===
         const av0_alloc = counter.n_alloc;
         const av0_resize = counter.n_resize;
         const av0_remap = counter.n_remap;
@@ -1963,11 +1969,9 @@ pub fn run(init: std.process.Init) !void {
                 var tok_buf = try zml.Buffer.fromBytes(io, platform, tok_sym.shape(), sharding, std.mem.sliceAsBytes(&tok_host));
                 var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
                 const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
-                var call_args = try exe.args(allocator);
-                var call_results = try exe.results(allocator);
-                call_args.set(.{ eng_buf, tok_buf, if (pass == 0) pk_buf else pk_wide, cache_wv, ctrl_buf });
-                exe.call(call_args, &call_results);
-                var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = call_results.get(struct {
+                wv_args.set(.{ eng_buf, tok_buf, if (pass == 0) pk_buf else pk_wide, cache_wv, ctrl_buf });
+                exe.call(wv_args, &wv_results);
+                var r_t5v, var r_t5i, var r_logits, const r_slk, const r_slv, const r_flk, const r_flv = wv_results.get(struct {
                     zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer,
                 });
                 var lg_s = try r_logits.toSliceAlloc(allocator, io);
@@ -2008,8 +2012,7 @@ pub fn run(init: std.process.Init) !void {
                 r_logits.deinit();
                 tok_buf.deinit();
                 step_buf.deinit();
-                call_args.deinit(allocator);
-                call_results.deinit(allocator);
+                // D10 (C4) : wv_args/wv_results hissés — deinit une fois par les defer d'entête.
                 if ((step + 1) % 256 == 0) log.info("  WV passe {d} ... step {d}/{d}", .{ pass + 1, step + 1, s_total });
                 av_steps += 1;
             }
@@ -2151,6 +2154,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     var rss_t20: ?u64 = null;
     var rss_t200: ?u64 = null;
 
+    // D10 (C4) : args/results créés UNE FOIS — set()/call()/get() n'allouent rien (exe.zig:129-146,
+    // spec F5) ; les init faisaient 6 allocs/step dont le dupe de 1006 Shapes (~293 KiB).
+    // ⚠ AVANT les snapshots ALLOC-LOOP : les init sont HORS fenêtre (spec §3/C6).
+    var call_args = try exe.args(allocator);
+    defer call_args.deinit(allocator);
+    var call_results = try exe.results(allocator);
+    defer call_results.deinit(allocator);
+
     // === D10 : fenêtre ALLOC-LOOP — deltas du compteur autour de la boucle de steps SEULE
     // (les init hissés et les buffers pré-alloués sont hors fenêtre, spec §3 Publication). ===
     const al0_alloc = counter.n_alloc;
@@ -2178,8 +2189,6 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         var step_buf = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(step)), .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
 
-        var call_args = try exe.args(allocator);
-        var call_results = try exe.results(allocator);
         call_args.set(.{ eng_buf.*, tok_buf, pk_buf.*, cache_buf, ctrl_buf });
         exe.call(call_args, &call_results);
         // r_logits : sortie supplémentaire (--window-vacuity) — NON lue ici (pas de D2H), deinit direct.
@@ -2324,8 +2333,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         r_logits.deinit();
         tok_buf.deinit();
         step_buf.deinit();
-        call_args.deinit(allocator);
-        call_results.deinit(allocator);
+        // D10 (C4) : call_args/call_results hissés — deinit UNE FOIS par les defer d'entête.
 
         // Progression périodique (motif gemma4_gen_long_gpu.zig:158) — premier signe humain d'une
         // anomalie pendant un run long (A2) : silence prolongé = suspect.
