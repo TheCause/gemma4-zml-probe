@@ -1,0 +1,24 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=4568400 KiB (~4 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 28.856s
+info: [mem] post-compile (go/no-go): RSS=5237752 KiB (~4 GiB) swap=0 KiB (~0 GiB)
+info: KVLOAD: /data/gemma4-zml-probe/kvdump/dc7_4k.kvdump l_max=4096 step_next=3927 fed_next=569 ids=3927 (reprise sans prefill)
+info: KVLOAD: contexte de 3927 tokens (non réaffiché)
+info: Boucle autonome : 3927 steps de prefill, puis génération (limite 1 = max_tokens)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.898s
+info: GENCFG: suppress a mordu 0 fois sur 1 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=3928
+info: ALLOC-TOTAL: alloc=757 free=716 bytes=2925785312 shards=0
+info: PERF-RESUME : reprise @step=3927, 1 tokens générés en 0.196s (5.1 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 1 tokens générés (EOT_ID=106, max_tokens=1)
+info: generated = { 150741 }
+info: arrêt : max-tokens (1)

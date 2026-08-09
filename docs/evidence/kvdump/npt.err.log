@@ -1,0 +1,4 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: ids = { 2, 105, 2364, 107, 20647, 2026, 236772, 89688, 759, 107058, 2112, 118583, 513, 236789, 62462, 696, 22865, 37485, 236761, 106, 107, 105, 4368, 107, 100, 45518, 107, 101 }
+info: round-trip détok : PASS (decode -> re-encode == ids)
