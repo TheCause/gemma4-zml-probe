@@ -1913,6 +1913,17 @@ pub fn run(init: std.process.Init) !void {
         try checkVram(allocator, io);
     }
 
+    // === kvdump — PHASE 1 du restore (spec §4.3) : manifest + validations de forme + ids_fed,
+    // AVANT la compile ET AVANT les pré-checks de run(). `ids` reçoit ids_fed ICI : les gardes
+    // qui suivent (garde oracle `positions[0] == ids.len`, garde de place `ids.len + limit >
+    // L_MAX`) travaillent donc sur l'état RÉEL de la reprise, pas sur une liste vide. ===
+    var mcheck: ?ManifestCheck = null;
+    defer if (mcheck) |*mc| mc.deinit(allocator, io);
+    if (args.load_cache) |cache_path| {
+        mcheck = try loadCacheManifest(allocator, io, cache_path, args.ckpt, policy.path);
+        try ids.appendSlice(allocator, mcheck.?.ids_fed);
+    }
+
     // === --oracle : lit la fixture AVANT tout (positions[0] = seq_len attendu == ids.len ; fed =
     // la séquence de référence [s0,t1,…] à comparer à `generated`, cf note d'alignement en tête de
     // fichier). positions[0] == ids.len parce que le 1er step de génération de l'oracle FEED s0 à la
@@ -1958,7 +1969,12 @@ pub fn run(init: std.process.Init) !void {
         log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.items.len, limit, L_MAX });
         return error.SequenceTooLong;
     }
-    if (ids.items.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+    // ⚠ En mode --load-cache cette garde est DÉSACTIVÉE (spec §4.3) : elle protège le PREFILL,
+    // qui n'a pas lieu — un état repris dépasse légitimement la fenêtre glissante, le cache la
+    // porte déjà. La garde de place ci-dessus, elle, RESTE active (ids.len == step_next par
+    // l'invariant vérifié en phase 1) : c'est elle qui réalise le refus `SequenceTooLong` de la
+    // validation §4.3(7) — même condition, même erreur, même moment (avant compile).
+    if (args.load_cache == null and ids.items.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.items.len, SLIDING_WINDOW });
         return error.PromptTooLong;
     }
@@ -2258,8 +2274,12 @@ pub fn run(init: std.process.Init) !void {
     // kvdump : le dump n'existe qu'en one-shot (le refus DumpCacheReplUnsupported garantit qu'on
     // n'arrive jamais ici avec le flag en --repl ; le `null` des sites REPL est un invariant).
     const dump_spec: ?DumpSpec = if (args.dump_cache) |p| .{ .path = p, .ckpt_path = args.ckpt } else null;
+    // kvdump — PHASE 2 du restore : APRÈS la compile (elle est hors du chrono KVLOAD-PERF, comme
+    // elle est hors du temps de calcul publié côté (i) de DC7 : l'inclure d'un seul côté serait
+    // inéquitable). Les 4 caches atterrissent dans host.cache_*, que generateOnce monte en device.
+    const resume_state: ?Resume = if (mcheck) |*mc| try loadCacheTensors(io, mc, &host) else null;
     if (!args.repl) {
-        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items, dump_spec);
+        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items, dump_spec, resume_state);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -2269,7 +2289,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items, null) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items, null, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2298,7 +2318,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items, null) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items, null, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2324,6 +2344,146 @@ const DumpSpec = struct { path: []const u8, ckpt_path: []const u8 };
 // discriminé qu'entre deux erreurs de frappe.
 const SL_SHAPE = [_]i64{ @intCast(NUM_SLIDING_SLOTS), 1, KVH_SL, L_MAX, HD_S };
 const FL_SHAPE = [_]i64{ @intCast(NUM_FULL_SLOTS), 1, KVH_FL, L_MAX, HD_F };
+
+// === RESTORE (spec §4.3) — EN DEUX PHASES. La compile ne doit être NI dans le chrono de C-D,
+// NI avant les validations de forme :
+//   phase 1 `loadCacheManifest` : AVANT la compile, ne lit que le header (quelques Ko) + le
+//     petit tenseur `ids_fed` — c'est lui qui alimente les pré-checks de run() (garde oracle
+//     `positions[0] == ids.len`, garde de place) ;
+//   phase 2 `loadCacheTensors` : APRÈS la compile, démarre le chrono KVLOAD-PERF et lit les
+//     4 caches (les GiB) directement dans host.cache_* — le `@memset(0)` de HostInputs.init est
+//     ainsi remplacé de fait, et le graphe ne voit AUCUNE différence.
+const Resume = struct { step_next: usize, fed_next: i64, t_load0: std.Io.Timestamp };
+
+const ManifestCheck = struct {
+    file: std.Io.File,
+    header: kvdump.Header,
+    path: []const u8,
+    step_next: usize,
+    fed_next: i64,
+    ids_fed: []u32, // possédé par CE struct
+
+    fn deinit(self: *ManifestCheck, allocator: std.mem.Allocator, io: std.Io) void {
+        allocator.free(self.ids_fed);
+        self.header.deinit();
+        self.file.close(io);
+    }
+};
+
+/// Phase 1 : header + validations de forme + `ids_fed`. AUCUN cache n'est lu ici.
+/// Chaque écart est un refus BRUYANT et nommé (spec §4.5) — jamais un restore silencieusement faux.
+fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ckpt_path: []const u8, gencfg_path: []const u8) !ManifestCheck {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }) catch |e| {
+        log.err("--load-cache : {s} illisible ({s})", .{ path, @errorName(e) });
+        return e;
+    };
+    errdefer file.close(io);
+    var header = kvdump.readHeader(allocator, io, file) catch |e| {
+        log.err("--load-cache : header illisible ({s}) : {s}", .{ path, @errorName(e) });
+        return e;
+    };
+    errdefer header.deinit();
+
+    // (2) format
+    const fmt_got = header.metaGet("format") orelse {
+        log.err("--load-cache : clé `format` absente du manifest ({s})", .{path});
+        return error.KvDumpBadFormat;
+    };
+    if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
+        log.err("--load-cache : format `{s}` != `{s}` attendu", .{ fmt_got, kvdump.FORMAT });
+        return error.KvDumpBadFormat;
+    }
+    // (3) variante : le cache sliding est LINÉAIRE .k=L_MAX (R10) — un dump d'une autre borne
+    // se réimplanterait à des positions FAUSSES. Refus, jamais une transposition implicite.
+    const l_max_got = try kvdump.metaInt(&header, "l_max", 10);
+    if (l_max_got != @as(u64, @intCast(L_MAX))) {
+        log.err("--load-cache : l_max du dump = {d} != L_MAX du binaire = {d} (variante incompatible)", .{ l_max_got, L_MAX });
+        return error.KvDumpVariantMismatch;
+    }
+    // (4) shapes/dtype des 5 tenseurs == shapes compilées
+    const step_next: usize = @intCast(try kvdump.metaInt(&header, "step_next", 10));
+    const fed_next_u = try kvdump.metaInt(&header, "fed_next", 10);
+    const ids_shape = [_]i64{@intCast(step_next)};
+    kvdump.expectShape(&header, "sl_k", "F32", &SL_SHAPE) catch |e| {
+        log.err("--load-cache : shape/dtype de sl_k incompatible", .{});
+        return e;
+    };
+    try kvdump.expectShape(&header, "sl_v", "F32", &SL_SHAPE);
+    try kvdump.expectShape(&header, "fl_k", "F32", &FL_SHAPE);
+    try kvdump.expectShape(&header, "fl_v", "F32", &FL_SHAPE);
+    // (6) invariant d'état : la shape déclarée de ids_fed EST step_next. Un manifest forgé
+    // (step_next mentí) meurt ici, avant toute lecture de données.
+    kvdump.expectShape(&header, "ids_fed", "I32", &ids_shape) catch {
+        const declared = kvdump.entryBytes(&header, "ids_fed") catch 0;
+        log.err("--load-cache : ids_fed ({d} octets déclarés) incohérent avec step_next={d} (attendu {d} octets)", .{ declared, step_next, step_next * 4 });
+        return error.KvDumpInconsistentState;
+    };
+    if (step_next == 0) {
+        log.err("--load-cache : step_next=0 — un état sans aucun token feedé n'est pas un état de reprise", .{});
+        return error.KvDumpInconsistentState;
+    }
+    // (5) fingerprint du checkpoint, par CONTENU (taille + xxh64 du header) — jamais par chemin :
+    // un même checkpoint atteint par un autre symlink reste valide, un autre checkpoint de même
+    // taille est arrêté par le hash du header (noms/shapes/offsets de tous ses tenseurs).
+    const fp = try kvdump.ckptFingerprint(allocator, io, ckpt_path);
+    const want_bytes = try kvdump.metaInt(&header, "ckpt_bytes", 10);
+    const want_hdr = try kvdump.metaInt(&header, "ckpt_hdr_xxh64", 16);
+    if (fp.bytes != want_bytes or fp.hdr_xxh64 != want_hdr) {
+        log.err("--load-cache : checkpoint DIFFÉRENT de celui du dump (bytes {d} vs {d}, hdr_xxh64 {x} vs {x})", .{ fp.bytes, want_bytes, fp.hdr_xxh64, want_hdr });
+        return error.KvDumpCheckpointMismatch;
+    }
+    // (8) gencfg : la politique est re-dérivée des fichiers COURANTS — c'est voulu, mais l'écart
+    // doit être VISIBLE. WARN, pas un refus (spec §4.5, dernière ligne).
+    if (header.metaGet("gencfg_path")) |gp| {
+        if (!std.mem.eql(u8, gp, gencfg_path)) {
+            log.warn("--load-cache : gencfg du dump `{s}` != courant `{s}` — la politique appliquée est la COURANTE", .{ gp, gencfg_path });
+        }
+    }
+    if (header.metaGet("sampling")) |sp| {
+        if (!std.mem.eql(u8, sp, "off")) log.warn("--load-cache : le dump portait sampling={s} — un restore avec d'autres warpers diverge légitimement", .{sp});
+    }
+
+    // `ids_fed` : petit (step_next x 4 octets), lu ICI parce que les pré-checks de run() en
+    // dépendent (la garde oracle compare positions[0] à ids.len). Checksum vérifié.
+    const raw = try allocator.alloc(i32, step_next);
+    defer allocator.free(raw);
+    try kvdump.readTensorInto(io, file, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
+    const ids_fed = try allocator.alloc(u32, step_next);
+    errdefer allocator.free(ids_fed);
+    for (raw, 0..) |t, k| {
+        if (t < 0 or t >= VOCAB_CONTRACT) {
+            log.err("--load-cache : ids_fed[{d}] = {d} hors vocab [0,{d})", .{ k, t, VOCAB_CONTRACT });
+            return error.TokenOutOfRange;
+        }
+        ids_fed[k] = @intCast(t);
+    }
+    if (fed_next_u >= VOCAB_CONTRACT) {
+        log.err("--load-cache : fed_next = {d} hors vocab [0,{d})", .{ fed_next_u, VOCAB_CONTRACT });
+        return error.TokenOutOfRange;
+    }
+    return .{
+        .file = file,
+        .header = header,
+        .path = path,
+        .step_next = step_next,
+        .fed_next = @intCast(fed_next_u),
+        .ids_fed = ids_fed,
+    };
+}
+
+/// Phase 2 : les GiB. Le chrono de C-D démarre à la PREMIÈRE ligne — la lecture des 2,6 GiB est
+/// DANS la fenêtre (un chrono qui l'exclurait serait biaisé vers le PASS) ; la compile est
+/// dehors, des deux côtés de la comparaison.
+fn loadCacheTensors(io: std.Io, mc: *const ManifestCheck, host: anytype) !Resume {
+    const t_load0: std.Io.Timestamp = .now(io, .awake);
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
+    log.info("KVLOAD: {s} l_max={d} step_next={d} fed_next={d} ids={d} (reprise sans prefill)", .{ mc.path, L_MAX, mc.step_next, mc.fed_next, mc.ids_fed.len });
+    log.info("KVLOAD: contexte de {d} tokens (non réaffiché)", .{mc.ids_fed.len});
+    return .{ .step_next = mc.step_next, .fed_next = mc.fed_next, .t_load0 = t_load0 };
+}
 
 /// Écrit l'état E1-E4 (spec §4.1) : 4 caches f32 + ids_fed i32 + manifest auto-décrivant.
 /// Le fingerprint du checkpoint est par CONTENU (taille + xxh64 du header), jamais par chemin.
@@ -2368,7 +2528,7 @@ fn dumpCacheFile(allocator: std.mem.Allocator, io: std.Io, ds: DumpSpec, host: a
     log.info("KVDUMP: {s} l_max={d} step_next={d} fed_next={d} ids={d} octets={d} xxh64_ok", .{ ds.path, L_MAX, step_next, fed_next, ids_fed.len, total });
 }
 
-fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32, dump_spec: ?DumpSpec) !void {
+fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32, dump_spec: ?DumpSpec, resume_state: ?Resume) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -2380,7 +2540,10 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.len, limit, L_MAX });
         return error.SequenceTooLong;
     }
-    if (ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+    // kvdump (spec §4.3) : en mode resume cette garde est REMPLACÉE par `step_next + limit <=
+    // L_MAX` (assurée par la garde de place ci-dessus, ids.len == step_next). Un état repris
+    // dépasse légitimement la fenêtre glissante : elle protégeait le prefill, qui n'a pas lieu.
+    if (resume_state == null and ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.len, SLIDING_WINDOW });
         return error.PromptTooLong;
     }
@@ -2443,6 +2606,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
 
     var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
+    // kvdump : reprise — `step` et `fed` viennent du dump. La boucle entre DIRECTEMENT en phase
+    // de génération (`in_gen_phase = step + 1 >= ids.len` est vrai par l'invariant
+    // ids_fed.len == step_next). Rien d'autre ne change : mêmes call_args, même exécutable,
+    // mêmes compteurs (D10).
+    if (resume_state) |rs| {
+        step = rs.step_next;
+        fed = rs.fed_next;
+    }
     const t0: std.Io.Timestamp = .now(io, .awake);
     // Step 2.7 (spec [it.6]) : capturé au dernier step de prefill (cf plus bas), initialisé à t0
     // par sûreté (jamais réellement lu à cette valeur — le prefill compte toujours ≥1 step).
@@ -2620,6 +2791,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.appendBounded(tok); // D10 (C5) : idem — error.OutOfMemory si la borne était fausse, jamais une UB
+        // kvdump / C-D : l'instrument du gain. Fenêtre = du DÉBUT de la lecture des tenseurs
+        // (phase 2, post-compile) au PREMIER token produit — les GiB relus sont DEDANS.
+        if (resume_state) |rs| {
+            if (generated.items.len == 1) {
+                const dt_s = @as(f64, @floatFromInt(rs.t_load0.untilNow(io, .awake).toNanoseconds())) / std.time.ns_per_s;
+                log.info("KVLOAD-PERF: chargement+h2d+reprise -> 1er token en {d:.3}s", .{dt_s});
+            }
+        }
         // D10 (C8) : sonde VmRSS — tokens générés 20 et 200, buffers de pile (zéro alloc Zig).
         if (generated.items.len == 20) rss_t20 = mem_probe.rssKb(io);
         if (generated.items.len == 200) rss_t200 = mem_probe.rssKb(io);
@@ -2753,7 +2932,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     const pf_s = elapsed_s - gen_s;
     const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.len)) / pf_s else 0;
     const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
-    log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+    // kvdump : en reprise, le champ « prefill » serait un MENSONGE (aucun prefill n'a eu lieu ;
+    // t_prefill_end n'est jamais réassigné, donc pf_s ne mesurerait que du bruit).
+    if (resume_state) |rs| {
+        const rs_rate = if (elapsed_s > 0) @as(f64, @floatFromInt(generated.items.len)) / elapsed_s else 0;
+        log.info("PERF-RESUME : reprise @step={d}, {d} tokens générés en {d:.3}s ({d:.1} tok/s)", .{ rs.step_next, generated.items.len, elapsed_s, rs_rate });
+    } else {
+        log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+    }
 
     // D10 (C8/AL-RSS) : émis AVANT le verdict oracle A1 — un A1Mismatch n'avale pas la mesure.
     if (rss_t20 != null and rss_t200 != null) {

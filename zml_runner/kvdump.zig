@@ -6,7 +6,7 @@
 // (sl_k, sl_v, fl_k, fl_v en F32, ids_fed en I32). Le writer généralise
 // `writeIdsSafetensors` (gemma4_g12auto.zig) : header JSON, longueur u64 LE, données brutes.
 // Aucune API non prouvée dans ce repo : string-building par allocPrint/appendSlice (patron
-// joinKeys), parsing par `std.json.parseFromSlice` (patron gemma4_bbatch.zig:406-426),
+// joinKeys), parsing par `std.json.parseFromSliceLeaky` sur une arena (cf readHeader),
 // I/O par `writePositionalAll`/`readPositionalAll`/`length` (signatures confirmées Task 0.5
 // contre lib/std/Io/File.zig:400,656,687 du SDK Zig 0.16.0-dev.2722).
 const std = @import("std");
@@ -33,13 +33,11 @@ pub const Entry = struct { dtype: []const u8, shape: []i64, off0: usize, off1: u
 
 pub const Header = struct {
     arena: std.heap.ArenaAllocator,
-    parsed: std.json.Parsed(std.json.Value),
     meta: std.StringHashMapUnmanaged([]const u8),
     entries: std.StringHashMapUnmanaged(Entry),
     data_base: usize, // 8 + header_len : base absolue des data_offsets
 
     pub fn deinit(self: *Header) void {
-        self.parsed.deinit();
         self.arena.deinit();
     }
 
@@ -95,8 +93,8 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, path: []const u8, tensors
 }
 
 /// Lit et parse le header. Ne lit AUCUN tenseur. `file` reste ouvert, possédé par l'appelant.
-/// Le `Header` retourné possède l'arena ET le `Parsed` : toutes les slices qu'il expose
-/// (clés, strings de manifest, shapes) vivent jusqu'à `deinit`.
+/// Le `Header` retourné possède l'arena : toutes les slices qu'il expose (clés, strings de
+/// manifest, shapes) y vivent et restent valides jusqu'à `deinit`.
 pub fn readHeader(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File) !Header {
     var len_le: [8]u8 = undefined;
     const n0 = try file.readPositionalAll(io, &len_le, 0);
@@ -109,14 +107,19 @@ pub fn readHeader(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File) !Header
     const hbuf = try a.alloc(u8, hlen);
     const n1 = file.readPositionalAll(io, hbuf, 8) catch return ReadError.KvDumpTruncated;
     if (n1 != hlen) return ReadError.KvDumpTruncated;
-    // `.alloc_always` : les strings du parse ne pointent PAS dans hbuf (patron gencfg.zig:239).
-    var parsed = std.json.parseFromSlice(std.json.Value, a, hbuf, .{ .allocate = .alloc_always }) catch
+    // ⚠ `parseFromSliceLeaky` — PAS `parseFromSlice` (le patron gencfg.zig:239, qui garde un
+    // `Parsed`). Un `Parsed` retenu dans ce struct est un PIÈGE MORTEL ici : `Parsed.deinit()`
+    // lit `self.arena.child_allocator`, or ce child_allocator est `arena.allocator()` — il
+    // capture l'adresse de l'ArenaAllocator LOCAL à cette fonction. Le struct étant retourné
+    // PAR VALEUR, ce pointeur devient pendouillant et le deinit segfaulte (mordu à l'exécution
+    // du premier restore réel, Task 5). En Leaky, tout vit dans `a` et une seule arena possède
+    // tout — `deinit` opère sur la copie, dont le child_allocator est le gpa.
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, hbuf, .{ .allocate = .alloc_always }) catch
         return ReadError.KvDumpBadFormat;
-    errdefer parsed.deinit();
-    if (parsed.value != .object) return ReadError.KvDumpBadFormat;
+    if (parsed != .object) return ReadError.KvDumpBadFormat;
     var meta: std.StringHashMapUnmanaged([]const u8) = .empty;
     var entries: std.StringHashMapUnmanaged(Entry) = .empty;
-    var it = parsed.value.object.iterator();
+    var it = parsed.object.iterator();
     while (it.next()) |e| {
         const key = e.key_ptr.*;
         if (std.mem.eql(u8, key, "__metadata__")) {
@@ -148,7 +151,7 @@ pub fn readHeader(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File) !Header
             });
         }
     }
-    return .{ .arena = arena, .parsed = parsed, .meta = meta, .entries = entries, .data_base = 8 + hlen };
+    return .{ .arena = arena, .meta = meta, .entries = entries, .data_base = 8 + hlen };
 }
 
 /// Taille en octets déclarée par le header pour ce tenseur (data_offsets), sans lire les données.
