@@ -23,14 +23,15 @@
 > `docs/superpowers/plans/2026-08-09-kv-cache-dump-restore.md`. En cas d'écart plan/spec,
 > **LA SPEC FAIT FOI**.
 >
-> **⚖ DEUX DÉCISIONS OUVERTES pour Régis** (proposées ici, à trancher avant l'implémentation —
-> le plan les traite selon la proposition, les changer est localisé) :
-> 1. **Sampling armé + dump** : proposé = **refus bruyant** (`error.DumpWithSamplingArmed`).
->    L'alternative (sérialiser l'état du PRNG Xoshiro256, 32 octets) est faisable mais ajoute
->    une claim d'équivalence stochastique qu'aucun gate simple ne prouve proprement. Dette
->    documentée si refus retenu.
-> 2. **Périmètre 8k** : proposé = gates sur **1280 + 4k** seulement ; le code est le même
->    `comptime` pour `g12a8k` mais aucun gate ne l'exerce (dette écrite, comme DA-4).
+> **✅ DEUX DÉCISIONS TRANCHÉES — GO Régis, 9 août 2026 (« Go pour les propositions par
+> défaut ») :**
+> 1. **Sampling armé + dump = refus bruyant** (`error.DumpWithSamplingArmed`). La
+>    sérialisation de l'état du PRNG Xoshiro256 (32 octets) est une **dette documentée** —
+>    elle ajouterait une claim d'équivalence stochastique qu'aucun gate simple ne prouve.
+> 2. **Gates sur 1280 + 4k seulement** ; le code est le même `comptime` pour `g12a8k` mais
+>    aucun gate ne l'exerce (**dette écrite**, comme DA-4).
+>
+> La session d'implémentation applique ces décisions telles quelles — plus rien n'est ouvert.
 
 ---
 
