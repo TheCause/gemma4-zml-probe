@@ -1,0 +1,5 @@
+mode         : dc4
+ids référence: 32  ids run: 32  comparés: 32
+n_match      : 0/32
+1re divergence: @gen=0  ref=108 got=4509  marge=12.624261
+VERDICT DC4  : PASS — divergence attendue dans les 4 premiers tokens

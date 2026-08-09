@@ -1,0 +1,5 @@
+mode         : dc3
+ids référence: 32  ids run: 32  comparés: 32
+n_match      : 32/32
+1re divergence: AUCUNE
+VERDICT DC3  : PASS — 1er step identique, aucune divergence sur 32 tokens

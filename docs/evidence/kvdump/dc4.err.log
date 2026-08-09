@@ -1,0 +1,56 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2626640 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.293s
+info: [mem] post-compile (go/no-go): RSS=3300288 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: KVLOAD: /tmp/dc5/dc4_zero.kvdump l_max=1280 step_next=43 fed_next=1017 ids=43 (reprise sans prefill)
+info: KVLOAD: contexte de 43 tokens (non réaffiché)
+info: Boucle autonome : 43 steps de prefill, puis génération (limite 32 = max_tokens)
+info:   top5 @ gen=0 : idx={ 258882, 4509, 112884, 104933, 33203 } val={ 28.267262, 22.108814, 21.926632, 21.871073, 21.80458 } rank_used=1 chosen=4509
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.689s
+info:   top5 @ gen=1 : idx={ 49612, 1314, 177505, 108716, 21750 } val={ 21.353712, 21.340883, 21.205465, 21.155334, 21.147188 } rank_used=0 chosen=49612
+info:   top5 @ gen=2 : idx={ 1185, 236775, 1373, 1390, 236761 } val={ 20.486162, 20.329586, 19.922604, 19.91815, 19.279951 } rank_used=0 chosen=1185
+info:   top5 @ gen=3 : idx={ 236761, 236779, 236770, 236778, 236764 } val={ 24.265406, 22.860668, 22.026344, 21.557571, 20.72827 } rank_used=0 chosen=236761
+info:   top5 @ gen=4 : idx={ 236770, 236761, 236779, 236778, 236800 } val={ 23.914352, 23.141228, 22.92778, 22.122704, 21.58449 } rank_used=0 chosen=236770
+info:   top5 @ gen=5 : idx={ 236770, 236778, 236761, 236800, 236771 } val={ 27.520195, 25.78414, 22.561798, 22.123875, 20.837326 } rank_used=0 chosen=236770
+info:   top5 @ gen=6 : idx={ 236770, 236761, 236800, 236778, 236810 } val={ 27.372993, 22.288063, 20.187084, 19.906784, 19.764008 } rank_used=0 chosen=236770
+info:   top5 @ gen=7 : idx={ 236770, 236778, 236761, 236800, 236810 } val={ 28.539902, 21.669971, 21.070877, 20.169044, 19.190933 } rank_used=0 chosen=236770
+info:   top5 @ gen=8 : idx={ 236770, 236778, 236761, 236800, 236771 } val={ 29.005722, 21.116121, 20.81271, 18.677792, 16.851727 } rank_used=0 chosen=236770
+info:   top5 @ gen=9 : idx={ 236770, 236761, 236778, 236800, 236779 } val={ 28.574203, 21.862923, 21.743465, 20.083431, 18.649702 } rank_used=0 chosen=236770
+info:   top5 @ gen=10 : idx={ 236770, 236761, 236778, 236800, 236779 } val={ 28.205502, 22.758207, 22.379229, 21.52766, 21.104198 } rank_used=0 chosen=236770
+info:   top5 @ gen=11 : idx={ 236770, 236800, 236778, 236779, 236761 } val={ 26.243752, 22.166693, 21.81548, 21.543613, 21.12589 } rank_used=0 chosen=236770
+info:   top5 @ gen=12 : idx={ 236770, 236778, 236800, 236761, 236779 } val={ 26.134716, 22.793034, 22.436323, 21.71701, 21.497835 } rank_used=0 chosen=236770
+info:   top5 @ gen=13 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.211025, 23.7628, 22.569206, 22.013033, 21.49417 } rank_used=0 chosen=236770
+info:   top5 @ gen=14 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.22636, 23.33857, 22.154469, 22.047989, 21.079824 } rank_used=0 chosen=236770
+info:   top5 @ gen=15 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.49746, 23.612833, 22.162186, 22.124905, 21.733398 } rank_used=0 chosen=236770
+info:   top5 @ gen=16 : idx={ 236770, 236778, 236800, 236761, 236779 } val={ 26.59856, 23.883492, 22.814352, 22.169853, 22.160236 } rank_used=0 chosen=236770
+info:   top5 @ gen=17 : idx={ 236770, 236778, 236800, 236779, 236761 } val={ 26.675568, 23.719841, 22.95282, 22.659994, 22.242939 } rank_used=0 chosen=236770
+info:   top5 @ gen=18 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.000996, 23.715736, 23.098955, 22.108088, 21.959087 } rank_used=0 chosen=236770
+info:   top5 @ gen=19 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.178404, 23.732069, 23.178951, 21.791689, 21.613403 } rank_used=0 chosen=236770
+info:   top5 @ gen=20 : idx={ 236770, 236778, 236800, 236761, 236810 } val={ 27.245237, 24.03962, 23.607515, 22.17275, 21.691961 } rank_used=0 chosen=236770
+info:   top5 @ gen=21 : idx={ 236770, 236778, 236800, 236810, 236761 } val={ 27.199657, 24.34357, 23.893442, 22.027279, 22.020493 } rank_used=0 chosen=236770
+info:   top5 @ gen=22 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.275826, 24.487106, 23.733387, 22.403694, 22.235199 } rank_used=0 chosen=236770
+info:   top5 @ gen=23 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.515295, 24.422745, 23.599642, 22.593016, 22.412462 } rank_used=0 chosen=236770
+info:   top5 @ gen=24 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.334885, 24.475775, 23.594826, 23.074192, 22.696766 } rank_used=0 chosen=236770
+info:   top5 @ gen=25 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.186184, 24.566235, 23.30027, 23.160564, 22.464882 } rank_used=0 chosen=236770
+info:   top5 @ gen=26 : idx={ 236770, 236778, 236800, 236771, 236761 } val={ 27.110495, 24.207561, 23.151073, 22.959677, 22.571085 } rank_used=0 chosen=236770
+info:   top5 @ gen=27 : idx={ 236770, 236778, 236771, 236800, 236761 } val={ 27.094769, 24.0507, 23.18193, 23.098875, 22.723495 } rank_used=0 chosen=236770
+info:   top5 @ gen=28 : idx={ 236770, 236778, 236800, 236771, 236761 } val={ 27.244053, 23.869228, 23.156782, 22.715803, 22.679136 } rank_used=0 chosen=236770
+info:   top5 @ gen=29 : idx={ 236770, 236778, 236800, 236771, 236761 } val={ 27.203583, 23.706278, 23.354572, 22.533596, 22.205877 } rank_used=0 chosen=236770
+info:   top5 @ gen=30 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.26059, 23.830408, 23.492788, 22.82855, 22.443014 } rank_used=0 chosen=236770
+info:   top5 @ gen=31 : idx={ 236770, 236778, 236800, 236771, 236810 } val={ 27.31318, 23.778032, 23.265947, 22.865759, 22.466963 } rank_used=0 chosen=236770
+info: GENCFG: suppress a mordu 1 fois sur 32 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=75
+info: ALLOC-TOTAL: alloc=757 free=716 bytes=954787616 shards=0
+info: PERF-RESUME : reprise @step=43, 32 tokens générés en 3.382s (9.5 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=3981200 t200=null)
+info: mode libre : 32 tokens générés (EOT_ID=106, max_tokens=32)
+info: generated = { 4509, 49612, 1185, 236761, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770, 236770 }
+info: arrêt : max-tokens (32)
