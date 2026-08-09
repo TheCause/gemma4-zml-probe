@@ -47,6 +47,9 @@ const sampling = @import("sampling.zig");
 // D10 : compteur d'allocations (spec 2026-07-30 zero-alloc, C1) — wrapper std-only de init.gpa,
 // toujours actif ; porteur des gates AL-0/AL-VAC/AL-BASE. `builtin.mode` : bannière BUILD (§8).
 const alloc_count = @import("alloc_count.zig");
+// Dump/restore du KV-cache (spec 2026-08-09) — module std-only : writer/reader safetensors
+// généralisé, manifest `__metadata__`, checksums xxh64. Aucun octet de graphe (DC0).
+const kvdump = @import("kvdump.zig");
 const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{ .log_level = .info };
@@ -156,6 +159,7 @@ const Args = struct {
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
     selftest_alloc_count: bool = false, // S-AC (D10) : le compteur compte, host-only
+    selftest_kvdump_io: ?[]const u8 = null, // DC1 : round-trip fichier + mutant, host-only (dir existant)
     draws: usize = 10000,
     // Sampling phase 2 — défauts NEUTRES : sans eux, le chemin B n'est pas armé et le code
     // d'avant le chantier est strictement inchangé.
@@ -192,6 +196,7 @@ const usage =
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
     "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
+    "[--selftest-kvdump-io DIR (DC1 : round-trip kvdump + mutant ; host-only ; DIR doit exister)] " ++
     "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
@@ -299,6 +304,13 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.selftest_draw = process_args[i];
         } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
             args.selftest_alloc_count = true;
+        } else if (std.mem.eql(u8, a, "--selftest-kvdump-io")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-kvdump-io attend une valeur (répertoire de travail EXISTANT)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_kvdump_io = process_args[i];
         } else if (std.mem.eql(u8, a, "--no-pin")) {
             args.no_pin = true;
         } else if (std.mem.eql(u8, a, "--draws")) {
@@ -1560,6 +1572,106 @@ fn writeIdsSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try f.writePositionalAll(io, std.mem.sliceAsBytes(data), 8 + header.len);
 }
 
+// === DC1 (spec kvdump §5) : round-trip du format kvdump + MUTANT, host-only. Aucun GPU, aucun
+// poids : c'est le format de fichier qu'on teste, pas le modèle. `dir` doit EXISTER (l'API
+// std.Io.Dir de cette toolchain n'expose pas de makeDir — le run le crée en amont).
+// Le gate ne vaut que parce qu'il contient sa propre contre-preuve : un octet de données flippé,
+// manifest INTACT, DOIT rendre KvDumpChecksumMismatch. Sans ce mutant, un checksum jamais vérifié
+// passerait pour vérifié (leçon feedback_invariant_tue_le_controle).
+fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    // (0) Compatibilité INTER-LANGAGE du checksum, contrôlée AVANT tout le reste : le manifest est
+    // écrit par Zig et relu par Python (script 71, gate DC1 volet Python). Si les deux xxh64 ne
+    // sont pas la même fonction, tout le dispositif de checksums est un décor — et on ne
+    // l'apprendrait qu'après un run GPU. Référence MESURÉE sur la VM (Task 0.4) :
+    // `xxhash.xxh64(b"x").intdigest()` == 6665539201184043299.
+    const ref_x = kvdump.xxh64("x");
+    if (ref_x != 6665539201184043299) {
+        log.err("KVIO: xxh64(\"x\") = {d} != 6665539201184043299 (référence Python xxhash) — les deux implémentations ne calculent pas le même hash", .{ref_x});
+        return error.KvIoHashDivergence;
+    }
+
+    var a_vals: [24]f32 = undefined;
+    for (0..24) |k| a_vals[k] = @floatFromInt(k);
+    var b_vals: [6]i32 = .{ 7, -1, 0, 262143, 3, 12 };
+    const a_bytes = std.mem.sliceAsBytes(a_vals[0..]);
+    const b_bytes = std.mem.sliceAsBytes(b_vals[0..]);
+    const a_h = kvdump.xxh64(a_bytes);
+    const b_h = kvdump.xxh64(b_bytes);
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/self.kvdump", .{dir});
+    defer allocator.free(path);
+
+    var hx_a: [32]u8 = undefined;
+    var hx_b: [32]u8 = undefined;
+    const meta = [_]kvdump.MetaKV{
+        .{ .k = "format", .v = kvdump.FORMAT },
+        .{ .k = "l_max", .v = "9999" },
+        .{ .k = "step_next", .v = "6" },
+        .{ .k = "a_xxh64", .v = try std.fmt.bufPrint(&hx_a, "{x}", .{a_h}) },
+        .{ .k = "b_xxh64", .v = try std.fmt.bufPrint(&hx_b, "{x}", .{b_h}) },
+    };
+    const sh_a = [_]i64{ 2, 3, 4 };
+    const sh_b = [_]i64{6};
+    const tensors = [_]kvdump.TensorOut{
+        .{ .name = "a", .dtype = "F32", .shape = &sh_a, .bytes = a_bytes },
+        .{ .name = "b", .dtype = "I32", .shape = &sh_b, .bytes = b_bytes },
+    };
+    kvdump.write(allocator, io, path, &tensors, &meta) catch |e| {
+        log.err("KVIO: écriture impossible ({s}) : {s} — le répertoire existe-t-il ?", .{ path, @errorName(e) });
+        return e;
+    };
+
+    // (1) relecture : header + meta + shapes + données, dans des buffers NEUFS.
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    defer f.close(io);
+    var h = try kvdump.readHeader(allocator, io, f);
+    defer h.deinit();
+    const fmt_got = h.metaGet("format") orelse return error.KvDumpBadFormat;
+    if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
+        log.err("KVIO: format relu = {s} != {s}", .{ fmt_got, kvdump.FORMAT });
+        return error.KvDumpBadFormat;
+    }
+    const l_max_got = try kvdump.metaInt(&h, "l_max", 10);
+    const step_next_got = try kvdump.metaInt(&h, "step_next", 10);
+    if (l_max_got != 9999 or step_next_got != 6) {
+        log.err("KVIO: manifest non round-trippé : l_max={d} step_next={d}", .{ l_max_got, step_next_got });
+        return error.KvIoMetaRoundTrip;
+    }
+    try kvdump.expectShape(&h, "a", "F32", &sh_a);
+    try kvdump.expectShape(&h, "b", "I32", &sh_b);
+
+    const got_a = try allocator.alloc(u8, a_bytes.len);
+    defer allocator.free(got_a);
+    const got_b = try allocator.alloc(u8, b_bytes.len);
+    defer allocator.free(got_b);
+    try kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    try kvdump.readTensorInto(io, f, &h, "b", got_b, b_h);
+    if (!std.mem.eql(u8, got_a, a_bytes) or !std.mem.eql(u8, got_b, b_bytes)) {
+        log.err("KVIO: round-trip NON bit-identique (a_ok={} b_ok={})", .{ std.mem.eql(u8, got_a, a_bytes), std.mem.eql(u8, got_b, b_bytes) });
+        return error.KvIoRoundTrip;
+    }
+
+    // (2) MUTANT INTÉGRÉ : 1 octet flippé dans les DONNÉES de `a`, manifest INTACT.
+    // La contre-preuve du gate : si ce flip passe, le checksum ne vérifie rien.
+    const mut_off = h.data_base + 3;
+    var one: [1]u8 = undefined;
+    if (try f.readPositionalAll(io, &one, mut_off) != 1) return error.KvIoMutantSetup;
+    one[0] ^= 0xFF;
+    try f.writePositionalAll(io, &one, mut_off);
+    const mut_res = kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    if (mut_res) |_| {
+        log.err("KVIO: MUTANT NON VU — un octet flippé a passé le checksum : le contrôle est VACUEUX", .{});
+        return error.KvIoMutantNotSeen;
+    } else |e| {
+        if (e != error.KvDumpChecksumMismatch) {
+            log.err("KVIO: mutant refusé par la mauvaise erreur : {s} (attendu KvDumpChecksumMismatch)", .{@errorName(e)});
+            return error.KvIoMutantWrongError;
+        }
+    }
+
+    log.info("KVIO: round-trip PASS + mutant VU (ChecksumMismatch)", .{});
+}
+
 pub fn run(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -1581,7 +1693,7 @@ pub fn run(init: std.process.Init) !void {
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
         args.selftest_gather != null or args.selftest_gencfg != null or
         args.selftest_sampling != null or args.selftest_draw != null or
-        args.selftest_alloc_count))
+        args.selftest_alloc_count or args.selftest_kvdump_io != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
@@ -1619,6 +1731,14 @@ pub fn run(init: std.process.Init) !void {
     // 1 remap + 2 free via le wrapper, compteurs comparés aux attendus (spec D10 §5). ===
     if (args.selftest_alloc_count) {
         try selftestAllocCount(allocator, &counter);
+        return;
+    }
+
+    // === DC1 (kvdump) : round-trip fichier + mutant, host-only — même patron d'early-return,
+    // AVANT tokenizer/VRAM/Platform/poids. C'est ce qui rend le gate exécutable en une seconde
+    // et sans GPU (spec kvdump §5, livrable 1). ===
+    if (args.selftest_kvdump_io) |dir| {
+        try selftestKvdumpIo(allocator, io, dir);
         return;
     }
 
