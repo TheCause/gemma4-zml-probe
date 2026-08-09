@@ -2,6 +2,23 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
+## ⏳ Chantier « dump/restore du KV-cache » — SPÉCIFIÉ ET PLANIFIÉ, zéro ligne de code (9 août 2026)
+
+**Demande Régis (9 août)** : sauvegarder le contenu d'un KV-cache et le réimplanter à la
+demande. Cadrage fait en session M1, **exécution prévue dans une session dédiée (Opus)**.
+
+- **Spec (contrats)** : `docs/superpowers/specs/2026-08-09-kv-cache-dump-restore-design.md`
+  **rév. 2** — 5 claims pré-enregistrées (dont : bit-exact intra-process ; inter-process
+  borné par la bistabilité, 1ʳᵉ divergence ≤ 1,873e-3 ; gain ≥ ×30 vs re-calcul à 4k, kill
+  < ×5), 8 gates DC0-DC7, manifest auto-décrivant, 11 refus bruyants tous à voir échouer.
+- **Plan** : `docs/superpowers/plans/2026-08-09-kv-cache-dump-restore.md` **rév. 2** —
+  10 tasks, code inline, 1 tour de revue adversariale (19 findings, 3 bloquants corrigés :
+  DC6 auto-saboté par les allocs du dump, garde `--prompt` qui tuait tout `--load-cache`,
+  DC7 à l'antécédent irréalisable à cause de l'arrêt EOS).
+- **⚖ 2 décisions ouvertes pour Régis** (en-tête de spec, propositions par défaut) :
+  sampling armé + dump = refus bruyant ; gates 1280+4k seulement (8k = dette).
+- Branche prévue : `kv-dump-restore`. Rien d'implémenté au 9 août.
+
 ## État 9-10 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
 
 **Le portage est complet et la claim de fidélité est solide aux deux régimes de précision.**
