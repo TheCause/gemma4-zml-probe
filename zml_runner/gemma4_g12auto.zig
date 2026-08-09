@@ -185,6 +185,10 @@ const Args = struct {
     no_prealloc: bool = false, // U10 : preallocate=false, nvidia-smi mesure la VRAM réelle (mécanisme gen_long_gpu)
     no_pin: bool = false, // D10 (C7) : désactive l'allocation DMA (pinned) de work — A/B de M-PIN
     repl: bool = false, // mode RÉSIDENT (spec 2026-07-26 repl-mode) : compile une fois, prompts en boucle sur stdin
+    // Dump/restore du KV-cache (spec 2026-08-09) — l'état E1-E4 d'une génération dans UN
+    // safetensors auto-décrivant ; le restore repart sans re-prefill.
+    dump_cache: ?[]const u8 = null, // --dump-cache <fichier> : état E1-E4 en fin de generateOnce
+    load_cache: ?[]const u8 = null, // --load-cache <fichier> : reprise sans prefill
 };
 
 const usage =
@@ -203,7 +207,9 @@ const usage =
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
     "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
-    "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)]";
+    "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)] " ++
+    "[--dump-cache F (état KV+ids en fin de génération -> safetensors ; exclut --repl et --seed)] " ++
+    "[--load-cache F (reprise sans prefill ; avec --max-tokens ou --oracle ; exclut --prompt/--repl)]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -369,6 +375,20 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.gen_config = process_args[i];
+        } else if (std.mem.eql(u8, a, "--dump-cache")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--dump-cache attend une valeur (chemin du fichier .kvdump à écrire)", .{});
+                return error.MissingArgument;
+            }
+            args.dump_cache = process_args[i];
+        } else if (std.mem.eql(u8, a, "--load-cache")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--load-cache attend une valeur (chemin d'un fichier .kvdump)", .{});
+                return error.MissingArgument;
+            }
+            args.load_cache = process_args[i];
         } else if (std.mem.eql(u8, a, "--no-gen-config")) {
             args.no_gen_config = true;
         } else {
@@ -1699,6 +1719,29 @@ pub fn run(init: std.process.Init) !void {
         return error.ConflictingFlags;
     }
 
+    // === kvdump (spec 2026-08-09 §4.5) : les QUATRE refus de combinaisons de flags. Placés ICI,
+    // au plus tôt (~1 s, aucune compile, aucun GPU) : un flag silencieusement inopérant serait un
+    // mensonge, et chacun de ces refus est VU échouer par le gate DC5. ===
+    if (args.load_cache != null and args.repl) {
+        log.err("--load-cache + --repl non supporté (spec §3 : sémantique multi-tour absente)", .{});
+        return error.LoadCacheReplUnsupported;
+    }
+    if (args.dump_cache != null and args.repl) {
+        log.err("--dump-cache + --repl non supporté v1 (spec §4.5 : un flag inopérant serait un mensonge)", .{});
+        return error.DumpCacheReplUnsupported;
+    }
+    if (args.load_cache != null and args.prompt != null) {
+        log.err("--load-cache + --prompt : le contexte vient du dump, pas d'un prompt (spec §3)", .{});
+        return error.LoadCacheWithPrompt;
+    }
+    // Décision Régis ACTÉE (GO 9 août) : sampling armé + dump = refus bruyant. L'état du PRNG
+    // Xoshiro256 n'est PAS sérialisé — le sérialiser ajouterait une claim d'équivalence
+    // stochastique qu'aucun gate simple ne prouve. Dette écrite au doc de résultats.
+    if (args.dump_cache != null and args.seed != null) {
+        log.err("--dump-cache + sampling armé non supporté v1 (état PRNG non sérialisé — spec §3, dette)", .{});
+        return error.DumpWithSamplingArmed;
+    }
+
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
         try selftestInputs(allocator, io, fixture_path);
@@ -1743,9 +1786,12 @@ pub fn run(init: std.process.Init) !void {
     }
 
     // --repl : --prompt devient OPTIONNEL (s'il est fourni : premier prompt de la boucle).
+    // --load-cache : --prompt est INTERDIT (refus ci-dessus) — les ids viennent du manifest du
+    // dump. Sans cette exemption, TOUTE reprise mourrait ici, avant même la lecture du fichier
+    // (finding bloquant de la revue kvdump).
     const prompt_text = args.prompt orelse blk: {
-        if (args.repl) break :blk "";
-        log.err("--prompt est requis (sauf --repl)\n{s}", .{usage});
+        if (args.repl or args.load_cache != null) break :blk "";
+        log.err("--prompt est requis (sauf --repl et --load-cache)\n{s}", .{usage});
         return error.MissingArgument;
     };
 
@@ -1772,7 +1818,10 @@ pub fn run(init: std.process.Init) !void {
 
     // Tokenisation du prompt CLI via promptToIds (extraction repl-mode — même chemin qu'en
     // résident). En --repl sans --prompt : liste vide, la boucle stdin fournira les prompts.
-    var ids: std.ArrayList(u32) = if (args.repl and prompt_text.len == 0)
+    // --load-cache : aucune tokenisation — `ids` sera REMPLI par `ids_fed` du manifest (Task 5,
+    // avant les pré-checks de run()). Le tokenizer reste chargé : le décodage de la continuation
+    // en a besoin.
+    var ids: std.ArrayList(u32) = if (args.load_cache != null or (args.repl and prompt_text.len == 0))
         .empty
     else
         try promptToIds(allocator, &encoder, prompt_text);

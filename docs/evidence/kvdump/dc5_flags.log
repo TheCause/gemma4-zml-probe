@@ -1,0 +1,16 @@
+=== --load-cache /tmp/x --repl ===
+error: --load-cache + --repl non supporté (spec §3 : sémantique multi-tour absente)
+error: LoadCacheReplUnsupported
+exit=1
+=== --dump-cache /tmp/x --repl ===
+error: --dump-cache + --repl non supporté v1 (spec §4.5 : un flag inopérant serait un mensonge)
+error: DumpCacheReplUnsupported
+exit=1
+=== --load-cache /tmp/x --prompt a ===
+error: --load-cache + --prompt : le contexte vient du dump, pas d'un prompt (spec §3)
+error: LoadCacheWithPrompt
+exit=1
+=== --dump-cache /tmp/x --prompt a --seed 1 --max-tokens 2 ===
+error: --dump-cache + sampling armé non supporté v1 (état PRNG non sérialisé — spec §3, dette)
+error: DumpWithSamplingArmed
+exit=1
