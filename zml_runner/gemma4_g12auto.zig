@@ -2255,8 +2255,11 @@ pub fn run(init: std.process.Init) !void {
     // Writer stdout UNIQUE pour toute la session (fix R1 : un 2e writer sur le même fd
     // entrelace ses octets avec le premier — une seule file d'écriture).
     var stdout_w = std.Io.File.stdout().writer(io, &.{});
+    // kvdump : le dump n'existe qu'en one-shot (le refus DumpCacheReplUnsupported garantit qu'on
+    // n'arrive jamais ici avec le flag en --repl ; le `null` des sites REPL est un invariant).
+    const dump_spec: ?DumpSpec = if (args.dump_cache) |p| .{ .path = p, .ckpt_path = args.ckpt } else null;
     if (!args.repl) {
-        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items, dump_spec);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -2266,7 +2269,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2295,7 +2298,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2312,7 +2315,60 @@ pub fn run(init: std.process.Init) !void {
 // ci-dessous (one-shot, 1er prompt du REPL, prompts suivants du REPL) doivent partager LA même
 // politique. Un oubli sur l'un des trois la rendrait silencieusement inopérante dans ce mode —
 // c'est exactement ce que le gate GC10 vérifie.
-fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+// kvdump (spec 2026-08-09 §4.2) : ce qu'il faut pour écrire le manifest — le chemin de sortie et
+// le checkpoint à empreinter. Le chemin gencfg vient de `policy.path`, déjà passé à generateOnce.
+const DumpSpec = struct { path: []const u8, ckpt_path: []const u8 };
+
+// Shapes des 4 caches — DÉCLARÉES UNE FOIS : le dump les écrit, le restore les exige. Deux
+// listes séparées auraient pu diverger en silence, et `KvDumpShapeMismatch` n'aurait plus
+// discriminé qu'entre deux erreurs de frappe.
+const SL_SHAPE = [_]i64{ @intCast(NUM_SLIDING_SLOTS), 1, KVH_SL, L_MAX, HD_S };
+const FL_SHAPE = [_]i64{ @intCast(NUM_FULL_SLOTS), 1, KVH_FL, L_MAX, HD_F };
+
+/// Écrit l'état E1-E4 (spec §4.1) : 4 caches f32 + ids_fed i32 + manifest auto-décrivant.
+/// Le fingerprint du checkpoint est par CONTENU (taille + xxh64 du header), jamais par chemin.
+fn dumpCacheFile(allocator: std.mem.Allocator, io: std.Io, ds: DumpSpec, host: anytype, ids_fed: []const i32, step_next: usize, fed_next: i64, stop_reason: anytype, policy: *const gencfg.GenCfg, scfg: *const sampling.SamplingCfg) !void {
+    const ids_shape = [_]i64{@intCast(ids_fed.len)};
+    const ids_bytes = std.mem.sliceAsBytes(ids_fed);
+    const fp = try kvdump.ckptFingerprint(allocator, io, ds.ckpt_path);
+    var buf: [12][96]u8 = undefined;
+    // `sampling` est une trace INFORMATIVE : un restore avec d'autres warpers diverge
+    // légitimement, mais l'écart doit être VISIBLE (spec §4.1). Le dump avec sampling ARMÉ +
+    // seed est refusé en amont (DumpWithSamplingArmed) — ici on trace ce qui était demandé.
+    const sampling_str = if (scfg.pathArmed())
+        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d}", .{ scfg.temperature, scfg.top_k, scfg.top_p })
+    else
+        "off";
+    const meta = [_]kvdump.MetaKV{
+        .{ .k = "format", .v = kvdump.FORMAT },
+        .{ .k = "l_max", .v = try std.fmt.bufPrint(&buf[0], "{d}", .{L_MAX}) },
+        .{ .k = "step_next", .v = try std.fmt.bufPrint(&buf[1], "{d}", .{step_next}) },
+        .{ .k = "fed_next", .v = try std.fmt.bufPrint(&buf[2], "{d}", .{fed_next}) },
+        .{ .k = "stop_reason", .v = @tagName(stop_reason) },
+        .{ .k = "ckpt_bytes", .v = try std.fmt.bufPrint(&buf[3], "{d}", .{fp.bytes}) },
+        .{ .k = "ckpt_hdr_xxh64", .v = try std.fmt.bufPrint(&buf[4], "{x}", .{fp.hdr_xxh64}) },
+        .{ .k = "gencfg_path", .v = policy.path },
+        .{ .k = "build_mode", .v = @tagName(builtin.mode) },
+        .{ .k = "sampling", .v = sampling_str },
+        .{ .k = "sl_k_xxh64", .v = try std.fmt.bufPrint(&buf[5], "{x}", .{kvdump.xxh64(host.cache_sl_k)}) },
+        .{ .k = "sl_v_xxh64", .v = try std.fmt.bufPrint(&buf[6], "{x}", .{kvdump.xxh64(host.cache_sl_v)}) },
+        .{ .k = "fl_k_xxh64", .v = try std.fmt.bufPrint(&buf[7], "{x}", .{kvdump.xxh64(host.cache_fl_k)}) },
+        .{ .k = "fl_v_xxh64", .v = try std.fmt.bufPrint(&buf[8], "{x}", .{kvdump.xxh64(host.cache_fl_v)}) },
+        .{ .k = "ids_fed_xxh64", .v = try std.fmt.bufPrint(&buf[9], "{x}", .{kvdump.xxh64(ids_bytes)}) },
+    };
+    const tensors = [_]kvdump.TensorOut{
+        .{ .name = "sl_k", .dtype = "F32", .shape = &SL_SHAPE, .bytes = host.cache_sl_k },
+        .{ .name = "sl_v", .dtype = "F32", .shape = &SL_SHAPE, .bytes = host.cache_sl_v },
+        .{ .name = "fl_k", .dtype = "F32", .shape = &FL_SHAPE, .bytes = host.cache_fl_k },
+        .{ .name = "fl_v", .dtype = "F32", .shape = &FL_SHAPE, .bytes = host.cache_fl_v },
+        .{ .name = "ids_fed", .dtype = "I32", .shape = &ids_shape, .bytes = ids_bytes },
+    };
+    try kvdump.write(allocator, io, ds.path, &tensors, &meta);
+    const total = 2 * host.cache_sl_k.len + 2 * host.cache_fl_k.len + ids_bytes.len;
+    log.info("KVDUMP: {s} l_max={d} step_next={d} fed_next={d} ids={d} octets={d} xxh64_ok", .{ ds.path, L_MAX, step_next, fed_next, ids_fed.len, total });
+}
+
+fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32, dump_spec: ?DumpSpec) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -2602,6 +2658,54 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     // quelques ns d'écart l'un de l'autre (back-to-back, aucun travail entre les deux) —
     // négligeable à cette échelle.
     const gen_elapsed = t_prefill_end.untilNow(io, .awake);
+
+    // D10 : deltas ALLOC-LOOP FIGÉS ICI, avant tout travail post-boucle (le dump alloue via
+    // l'allocateur compté ; sans ce gel, la ligne ALLOC-LOOP l'imputerait à la boucle et
+    // DC6 échouerait par construction — finding bloquant de revue kvdump).
+    const al_alloc = counter.n_alloc - al0_alloc;
+    const al_resize = counter.n_resize - al0_resize;
+    const al_remap = counter.n_remap - al0_remap;
+    const al_free = counter.n_free - al0_free;
+    const al_bytes = counter.bytes_alloc - al0_bytes;
+
+    // === kvdump (spec §4.2) : POINT DE DUMP UNIQUE — après la boucle et le gel des deltas,
+    // AVANT les deinit du cache. Les 4 buffers lus sont les SORTIES du dernier step (le swap
+    // précède tous les `break`) : jamais un buffer DONNÉ, le contrat de donation tient. ===
+    if (dump_spec) |ds| {
+        // d2h des 4 buffers FINAUX vers les slices host EXISTANTES (zéro alloc de 2,6 GiB,
+        // plafond B10 intact — spec §4.2). toSlice : le mécanisme D2H prouvé (D10/C2).
+        try cache_buf.sl_k.toSlice(io, zml.Slice.init(cache_buf.sl_k.shape(), host.cache_sl_k));
+        try cache_buf.sl_v.toSlice(io, zml.Slice.init(cache_buf.sl_v.shape(), host.cache_sl_v));
+        try cache_buf.fl_k.toSlice(io, zml.Slice.init(cache_buf.fl_k.shape(), host.cache_fl_k));
+        try cache_buf.fl_v.toSlice(io, zml.Slice.init(cache_buf.fl_v.shape(), host.cache_fl_v));
+
+        if (generated.items.len == 0) {
+            log.err("KVDUMP: aucun token généré — état sans fed_next, dump refusé", .{});
+            return error.KvDumpInconsistentState;
+        }
+        const step_next: usize = step + 1;
+        // ids_fed = ids ++ generated[0..len-1] (le dernier généré n'a PAS été feedé).
+        // Invariant spec §4.2 : ids_fed.len == step_next — assertion dure, jamais silencieuse.
+        const n_gen_fed = generated.items.len - 1;
+        if (ids.len + n_gen_fed != step_next) {
+            log.err("KVDUMP: invariant cassé ids({d})+gen_fed({d}) != step_next({d})", .{ ids.len, n_gen_fed, step_next });
+            return error.KvDumpInconsistentState;
+        }
+        const ids_fed = try allocator.alloc(i32, step_next);
+        defer allocator.free(ids_fed);
+        for (ids, 0..) |t, k| ids_fed[k] = @intCast(t);
+        for (0..n_gen_fed) |k| ids_fed[ids.len + k] = @intCast(generated.items[k]);
+        const fed_next: i64 = generated.items[generated.items.len - 1];
+
+        try dumpCacheFile(allocator, io, ds, host, ids_fed, step_next, fed_next, stop_reason, policy, scfg);
+
+        // Contrat « cache ZÉROS par génération » (:2162) restauré pour l'appel suivant.
+        @memset(host.cache_sl_k, 0);
+        @memset(host.cache_sl_v, 0);
+        @memset(host.cache_fl_k, 0);
+        @memset(host.cache_fl_v, 0);
+    }
+
     cache_buf.sl_k.deinit();
     cache_buf.sl_v.deinit();
     cache_buf.fl_k.deinit();
@@ -2614,9 +2718,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
     // D10 : deltas de la fenêtre ALLOC-LOOP (gate AL-0/AL-BASE) + totaux process (non-vacuité).
     log.info("ALLOC-LOOP: alloc={d} resize={d} remap={d} free={d} bytes={d} steps={d}", .{
-        counter.n_alloc - al0_alloc, counter.n_resize - al0_resize,
-        counter.n_remap - al0_remap, counter.n_free - al0_free,
-        counter.bytes_alloc - al0_bytes, step + 1,
+        al_alloc, al_resize, al_remap, al_free, al_bytes, step + 1,
     });
     log.info("ALLOC-TOTAL: alloc={d} free={d} bytes={d} shards={d}", .{
         counter.n_alloc, counter.n_free, counter.bytes_alloc, scfg.n_shards,
