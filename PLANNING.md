@@ -2,22 +2,39 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
-## ⏳ Chantier « dump/restore du KV-cache » — SPÉCIFIÉ ET PLANIFIÉ, zéro ligne de code (9 août 2026)
+## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
 
 **Demande Régis (9 août)** : sauvegarder le contenu d'un KV-cache et le réimplanter à la
-demande. Cadrage fait en session M1, **exécution prévue dans une session dédiée (Opus)**.
+demande. **Livré** sur la branche `kv-dump-restore` — résultats complets dans
+`docs/KVDUMP_RESULTS.md`.
 
-- **Spec (contrats)** : `docs/superpowers/specs/2026-08-09-kv-cache-dump-restore-design.md`
-  **rév. 2** — 5 claims pré-enregistrées (dont : bit-exact intra-process ; inter-process
-  borné par la bistabilité, 1ʳᵉ divergence ≤ 1,873e-3 ; gain ≥ ×30 vs re-calcul à 4k, kill
-  < ×5), 8 gates DC0-DC7, manifest auto-décrivant, 11 refus bruyants tous à voir échouer.
-- **Plan** : `docs/superpowers/plans/2026-08-09-kv-cache-dump-restore.md` **rév. 2** —
-  10 tasks, code inline, 1 tour de revue adversariale (19 findings, 3 bloquants corrigés :
-  DC6 auto-saboté par les allocs du dump, garde `--prompt` qui tuait tout `--load-cache`,
-  DC7 à l'antécédent irréalisable à cause de l'arrêt EOS).
-- **⚖ 2 décisions ouvertes pour Régis** (en-tête de spec, propositions par défaut) :
-  sampling armé + dump = refus bruyant ; gates 1280+4k seulement (8k = dette).
-- Branche prévue : `kv-dump-restore`. Rien d'implémenté au 9 août.
+**Ce que ça fait** : `--dump-cache <f>` écrit l'état complet d'une génération (4 caches KV f32
++ tous les tokens feedés + manifest auto-décrivant) dans UN safetensors ; `--load-cache <f>`
+le réimplante et **reprend sans re-calculer le préfixe**.
+
+- **8 gates verts**, tags `gate/dc0-pass` … `gate/dc7-pass` (+ `gate/dc1-host-pass`) :
+  **DC0** le graphe n'a pas bougé (md5 HLO identiques aux témoins pré-code, `engine.zig`
+  0 ligne de diff) · **DC1** round-trip + 2 mutants vus · **DC2** équivalence intra-process
+  **32/32 bit-identiques** (ids, indices ET bits des valeurs) · **DC3** inter-process
+  **32/32, aucune divergence** (au-delà du critère, qui admettait un tie ≤ 1,873e-3) ·
+  **DC4** mordant : cache zéroté ⇒ divergence dès **`@gen=0`** · **DC5** **11 refus** bruyants
+  tous VUS échouer · **DC6** `ALLOC-LOOP: alloc=0` **identique** aux 3 runs (nu/dump/load),
+  RSS 140-184 KiB < plafond 5 120 · **DC7** **gain ×500,5** (449,485 s de calcul contre
+  0,898 s de restore, à 4k sur 3 927 positions).
+- **Les 5 claims pré-enregistrées sont jugées** : C-A, C-B, C-E confirmées ; **C-C et C-D
+  confirmées AU-DELÀ** de leur prédiction. Les grandeurs prédites tombent **à l'octet**
+  (dump 1280 = 880 803 840 o, dump 4k = 2 818 572 288 o) et **à 0,3 %** pour le temps de calcul.
+- **2 décisions Régis appliquées** (GO 9 août) : sampling armé + dump = refus bruyant (PRNG
+  non sérialisé, dette K1) ; gates 1280+4k, 8k non exercé (dette K2).
+- **Dettes** : K1 PRNG · K2 8k · K3 E2B · K4 `--repl` · K5 reprise avec prompt neuf ·
+  K6 compression · K7 message du refus « tronqué » · **K8 le 0,898 s est une lecture À CHAUD**
+  (cache de pages ; à froid le gain resterait ≥ ×130, mesure non faite faute de root).
+- **Ce que l'exécution a appris** : un segfault au premier restore réel, causé par une
+  déviation « prudente » du plan (`parseFromSlice` + `Parsed` conservé → `child_allocator`
+  pendouillant après un retour par valeur). **Un patron du repo est un patron AVEC son
+  contexte de vie.**
+- Pièces à conviction sur la VM (`/data/gemma4-zml-probe/kvdump/`) : `dc2.kvdump` (840 Mo),
+  `dc7_4k.kvdump` (2,6 Go), témoins HLO. **À supprimer sur GO Régis, après le merge.**
 
 ## État 9-10 juillet 2026 (🏁 portage validé CPU+GPU, G2 fidélité bf16 PASS — PR generation-longue → main)
 
