@@ -53,7 +53,8 @@ prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
 | **Gemma 4 12B on one 3090 (W4-J2)** | official `gemma-4-12B-it-qat-w4a16-ct` (48 layers, heterogeneous GQA/MQA with K=V full layers) decodes in ZML: **1150 tokens @ 9.0 tok/s** (**9.6-9.7 tok/s** re-measured in a proven build mode, see below), real VRAM peak **16 680 MiB** (bf16 weights alone: 24 GB — impossible); teacher-forced **== HF-fp32 STRICT, 48/48 + 1150/1150, zero requalification** (fp32-compute oracle on bf16 storage); E2B engine preserved by **byte-identical HLO** proof | `docs/U_12B_RESULTS.md` |
 | **Decoding policy** (`generation_config`) | the port now applies what Google ships: `suppress_tokens` + the **3 EOS**, then host-side `top_k`/`top_p`/`temperature` and **seed-reproducible sampling** — **6 of the 8 keys**, instead of a greedy the model card does not recommend. Graph untouched (byte-identical HLO) | PR #17/#18, `docs/GENERATION_CONFIG_RESULTS.md`, `docs/SAMPLING_RESULTS.md` |
 | **Zero host allocation per step (D10)** | the decode loop performs **no Zig allocator call per step** (device→host straight into a persistent buffer, top-k to the stack, hoisted call args, pre-reserved lists) — and the ban is **enforced by a permanent counter gate**, not by code review. Sampling block **3 796 → 908.7 µs/step** (0.86 % of a step). *Pinned memory hypothesis refuted by A/B* | PR #19, `docs/D10_RESULTS.md` |
-| **KV-cache dump/restore** | save the state of a running generation (4 KV caches + every fed token + a self-describing manifest) into **one safetensors**, then re-implant it and continue **without re-computing the prefix**. Restoring a 3 927-position state costs **0.898 s** where re-computing it costs **449.5 s** — a **×500 speedup**. Continuation is **bit-identical, 32/32** (ids, top-5 indices *and* value bits) intra-process, and **32/32 with zero divergence** across processes. 8 gates, **11 loud refusals** each seen to fire, graph untouched (byte-identical HLO), per-step allocation ban still holds | PR #20, `docs/KVDUMP_RESULTS.md` |
+| **KV-cache dump/restore** | save the state of a running generation (4 KV caches + every fed token + a self-describing manifest) into **one safetensors**, then re-implant it and continue **without re-computing the prefix**. Restoring a 3 927-position state costs **0.898 s warm / 10.8 s cold** where re-computing it costs **449.5 s** — a **×500 speedup warm, ×41 cold** (both measured, neither replaces the other). Continuation is **bit-identical, 32/32** (ids, top-5 indices *and* value bits) intra-process, and **32/32 with zero divergence** across processes. 8 gates, **11 loud refusals** each seen to fire, graph untouched (byte-identical HLO), per-step allocation ban still holds | PR #20, `docs/KVDUMP_RESULTS.md` |
+| **Technical-debt sweep** (10 Aug 2026) | four debts settled with evidence rather than assertions: `applyTopP` and `applyTemperature` now have **GPU coverage** (386 armed steps, **0 disagreement** against a differently-written f64 reference, full antecedent — and two "obvious" mutants proven **vacuous** before being coded); the truncated-dump refusal is **loud** (3 of 7 sites seen firing, the other 4 declared unverified); the README speaks **one language**, with the scope gate extended bilingually at constant strictness; and the **cold** restore is measured — ×41.4, which **requalified** a previously published ≥ ×130 estimate | `docs/SAMPLING_RESULTS.md` §7, `docs/KVDUMP_RESULTS.md` §3 |
 
 ## Why
 
@@ -260,14 +261,18 @@ token-for-token gates.
 **Sampling is no longer a limitation** (12B only): `top_k`/`top_p`/`temperature` + seed-reproducible
 draw are implemented host-side and gated. **Neither is losing a generation's state**: it can be
 dumped and re-implanted (see above). Still open, written down rather than hidden:
-**repetition penalty** (specified, not executed), **`applyTopP` has no GPU coverage** (fixture only),
-the **E2B** runners don't expose logits so the decoding policy can't apply there, and C/PJRT-side
-allocations are *bounded* (< ~450 mallocs/step, measured) rather than counted.
+**repetition penalty** (specified, not executed), the **E2B** runners don't expose logits so the
+decoding policy can't apply there, and C/PJRT-side allocations are *bounded* (< ~450 mallocs/step,
+measured) rather than counted. **`applyTopP` is no longer uncovered**: as of 10 Aug 2026 it is
+gated on GPU against an independently written reference (386 armed steps, 0 disagreement, full
+antecedent) — `docs/SAMPLING_RESULTS.md` §7.
 
 On dump/restore specifically: the **PRNG state is not serialized** (dumping with an armed seed is
-refused, not silently approximated), the **8k variant compiles the same code but no gate exercises
-it**, and the ×500 figure was measured on a **warm** read — a cold read would be NVMe-bound, where
-the speedup would still be ≥ ×130 (declared as a measurement debt, not as a result).
+refused, not silently approximated), and the **8k variant compiles the same code but no gate
+exercises it**. The cold-read debt is **settled** (10 Aug 2026): a cold restore takes **10.823 s**
+(~0.264 GiB/s on this VM) for a **×41.4** speedup — the `≥ ×30` claim holds cold, while the earlier
+`≥ ×130` estimate assumed 1 GiB/s and has been **requalified**, exactly as the pre-registered
+prediction said it would have to be.
 
 **Next (at the design stage):** an upstream-ZML flash-attention path (batch > 1) would require
 paged KV; a Triton kernel is the credible route.

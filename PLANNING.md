@@ -18,7 +18,7 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | PLANNING périmé (2 fronts 🔴 du 30 juil) · D11 | **SOLDÉES** — voir ci-dessous |
 | K7 (refus « tronqué » muet) · README bilingue | **SOLDÉES** (10 août) |
 | D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
-| K8 (restore à froid) | en cours, sur GO |
+| K8 (restore à froid) | **SOLDÉE** (10 août) — 10,823 s à froid ⇒ **×41,4** ; claim C-D tient, le « ≥ ×130 » **requalifié** comme la prédiction l'annonçait |
 | K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
 | Phase 1 repetition penalty (SUSPENDUE) · Triton paged attention | plans dédiés, hors chantier dettes |
 
