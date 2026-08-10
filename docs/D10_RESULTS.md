@@ -116,4 +116,11 @@ publié, et le « 0,96 ns par élément-opération » était du code debug.
 boucles de step** (génération et vacuity), compté par un wrapper au point de substitution unique
 `init.gpa`, publié à chaque run. Les allocations du C de PJRT (DA-1) et de `std.Io.Threaded`
 (DA-6) sont hors de cet instrument — bornées indirectement par AL-RSS (< 5 120 KiB sur 180
-tokens). La claim « == HF » du projet est inchangée (EQ-48/EQ-124/EQ-PONT le prouvent).
+tokens). La claim « == HF » du projet est inchangée (EQ-48/EQ-124/EQ-PONT le prouvent) — et elle
+garde sa portée d'origine : **même argmax sur les logits bruts**, ce qui n'est PAS « reproduit ce
+que `generate()` produirait ». Voir `docs/GENERATION_CONFIG_RESULTS.md` §2.
+
+*(Qualificatif ajouté le 10 août 2026. Ce document énonçait la claim **nue** depuis le 30 juillet,
+soit le lendemain de l'instauration du gate GC11 : il aurait dû figurer dans sa liste de cibles
+dès l'origine, et n'y était pas. L'omission est réparée des deux côtés — le texte ici, la liste
+dans `scripts/gc11_claim_scope.sh`.)*

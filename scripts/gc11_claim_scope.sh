@@ -33,7 +33,24 @@ CIBLES=(
   docs/CACHE_DONATION_RESULTS.md
   docs/REPL_RESULTS.md
   docs/GENERATION_CONFIG_RESULTS.md
+  # Ajoutés le 10 août 2026 (recensement fait pendant la clôture K5). Ce ne sont PAS des
+  # documents « en plus » : ce sont des documents de RÉSULTATS, exactement la nature de ceux
+  # déjà listés, qui avaient été OUBLIÉS — D10_RESULTS.md a même été écrit le 30 juillet, soit
+  # le LENDEMAIN de l'instauration de ce gate. Réparer une omission, pas élargir la portée.
+  docs/D10_RESULTS.md
+  docs/SAMPLING_RESULTS.md
 )
+# ⚠ NON ajoutés, et c'est délibéré : docs/BATCHING_RESULTS.md (12 juil), docs/W4_RESULTS.md
+# (24 juil) et docs/TURBOQUANT_ZML_RESULTS.md (4 juin) énoncent aussi la claim nue, mais tous
+# trois sont ANTÉRIEURS au gate — même statut que les plans et journaux : ils disaient ce qui
+# était su quand ils ont été écrits. Les qualifier après coup demanderait une décision, pas un
+# correctif. Recensement complet et daté : PLANNING.md, section K5.
+#
+# ⚠ LIMITE STRUCTURELLE CONNUE de ce gate : cette liste est EN DUR. Un document de résultats
+# créé demain n'y sera pas, et le gate ne le dira pas — il RÉTRÉCIT à chaque document ajouté au
+# repo. C'est ce qui a laissé D10_RESULTS.md dehors pendant 11 jours. La découverte automatique
+# (tout docs/*_RESULTS.md, moins une liste d'exclusion explicite) est le correctif de fond ;
+# elle change la portée du gate et attend une décision Régis.
 
 cd "$(dirname "$0")/.." || exit 2
 
