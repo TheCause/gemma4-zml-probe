@@ -248,20 +248,25 @@ git commit -m "penalty(témoins) : RP-1 vérifié soldé (GC8), md5 HLO témoin 
 - Create : `scripts/76_penalty_vectors.py`
 - Create : `fixtures/penalty_vectors.safetensors` (committée, `git add -f`)
 
-- [ ] **Step 1 : Écrire le producteur** — reprendre le code de la Task 2 du plan du 27 juil
+- [x] **Step 1 : Écrire le producteur** — reprendre le code de la Task 2 du plan du 27 juil
   (`docs/superpowers/plans/2026-07-27-sampling-repetition-penalty.md:283-327`) TEL QUEL, avec
   ces seules corrections : nom de fichier `76_penalty_vectors.py`, et exécution dans le venv
   M4 (`~/ml-venvs/g12b`) où transformers 5.14.1 est installé. Le producteur appelle
   `RepetitionPenaltyLogitsProcessor` — retranscrire la formule est INTERDIT (spec C5).
 
-- [ ] **Step 2 : Exécuter et vérifier la non-vacuité**
+- [x] **Step 2 : Exécuter et vérifier la non-vacuité**
 
 Run : `python3 scripts/76_penalty_vectors.py`
 Expected : `touched_1.0 == 0` et `touched_{0.8,1.15,1.5}` == **6** (tokens DISTINCTS de
 `hist`, pas 9). Si 9 : le processor ne déduplique pas, STOP — toute la spec est à revoir.
 Noter la version transformers affichée.
+→ Mesuré le 10 août 2026 sur M4 (venv `~/ml-venvs/g12b`, le repo n'y est pas cloné :
+exécution dans `/tmp/rp76/`, fixture rapatriée) : `touched_1.0 = 0`,
+`touched_0.8 = touched_1.15 = touched_1.5 = 6`. **La dédup HF est confirmée** (6 distincts
+sur 9 ids). transformers **5.14.1**, torch 2.13.0. Métadonnées archivées dans
+`docs/evidence/penalty/rp1_fixture_meta.json`.
 
-- [ ] **Step 3 : Commit**
+- [x] **Step 3 : Commit**
 
 ```bash
 git add scripts/76_penalty_vectors.py
