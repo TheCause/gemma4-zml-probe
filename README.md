@@ -266,10 +266,11 @@ on four penalty values, graph unchanged (same HLO md5 with the penalty armed), z
 per step, and steerable at runtime from the resident REPL (`:penalty`). The runner reproduces
 **HF's own trajectory token for token** under penalty (48/48 at both 1.15 and 0.8), and the
 counter-test — same fixture with the penalty disarmed — fails as it must (17/48). Measured cost:
-**+1.6 % of the host-side block**, which sits below the protocol's resolution floor. One of the
-three corruption counter-tests turned out **vacuous on the reference trajectory** and is written
-up as such rather than quietly dropped — `docs/SAMPLING_RESULTS.md` §8.6. Still open, written
-down rather than hidden: the **E2B** runners don't expose logits so the decoding policy can't apply
+**+1.6 % of the host-side block**, which sits below the protocol's resolution floor. All three
+corruption counter-tests are seen to fail; the third one first came out **vacuous** on the
+reference prompt, which turned out to say more about the antecedent than about the corruption —
+the story, and the discriminating prompt that settled it (0/48, diverging at the very first
+token), are in `docs/SAMPLING_RESULTS.md` §8.6. Still open, written down rather than hidden: the **E2B** runners don't expose logits so the decoding policy can't apply
 there, and C/PJRT-side allocations are *bounded* (< ~450 mallocs/step, measured) rather than
 counted. **`applyTopP` is no longer uncovered**: as of 10 Aug 2026 it is
 gated on GPU against an independently written reference (386 armed steps, 0 disagreement, full
