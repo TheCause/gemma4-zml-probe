@@ -1,0 +1,639 @@
+{
+  "source": "69_u8_gen_oracle.py (mode --context-ids — K5/PF1, spec 2026-08-10 §4.5)",
+  "oracle": "UN prefill HF CPU de [ctx_ids ++ ids[:-1]] ; tête lm_head+softcap par chunks ; DEUX canaux publiés par position (brut in-graph / post-politique) — le juge est le script 80, pas celui-ci",
+  "mode": "context",
+  "compute_dtype": "float32",
+  "ctx_from": 49,
+  "C": 69,
+  "m": 8,
+  "prefill_len": 76,
+  "context_fixture": "/tmp/pf1_outB.safetensors",
+  "window": {
+    "sliding_window": 1024,
+    "bites_in_prefill": null
+  },
+  "positions": [
+    {
+      "p": 49,
+      "argmax_raw": 611,
+      "margin_raw": 6.446974,
+      "top5_raw_ids": [
+        611,
+        1724,
+        506,
+        6533,
+        4677
+      ],
+      "top5_raw_vals": [
+        27.8205,
+        21.3735,
+        21.3075,
+        18.2263,
+        18.1319
+      ],
+      "fed_at_next": 106,
+      "argmax_policy": 611,
+      "margin_policy": 6.446974
+    },
+    {
+      "p": 50,
+      "argmax_raw": 611,
+      "margin_raw": 3.975006,
+      "top5_raw_ids": [
+        611,
+        506,
+        1724,
+        5213,
+        6533
+      ],
+      "top5_raw_vals": [
+        27.372,
+        23.397,
+        21.9288,
+        21.8772,
+        21.2599
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 611,
+      "margin_policy": 3.975006
+    },
+    {
+      "p": 51,
+      "argmax_raw": 7624,
+      "margin_raw": 2.258205,
+      "top5_raw_ids": [
+        7624,
+        1437,
+        1018,
+        611,
+        69073
+      ],
+      "top5_raw_vals": [
+        25.9265,
+        23.6683,
+        23.3373,
+        22.9248,
+        22.0662
+      ],
+      "fed_at_next": 105,
+      "argmax_policy": 7624,
+      "margin_policy": 2.258205
+    },
+    {
+      "p": 52,
+      "argmax_raw": 611,
+      "margin_raw": 0.437057,
+      "top5_raw_ids": [
+        611,
+        45518,
+        236761,
+        236829,
+        659
+      ],
+      "top5_raw_vals": [
+        20.2715,
+        19.8344,
+        18.1177,
+        15.7864,
+        15.5806
+      ],
+      "fed_at_next": 2364,
+      "argmax_policy": 611,
+      "margin_policy": 0.437057
+    },
+    {
+      "p": 53,
+      "argmax_raw": 107,
+      "margin_raw": 5.084177,
+      "top5_raw_ids": [
+        107,
+        108,
+        236768,
+        236761,
+        45518
+      ],
+      "top5_raw_vals": [
+        25.5473,
+        20.4632,
+        18.1386,
+        18.0535,
+        17.1555
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 5.084177
+    },
+    {
+      "p": 54,
+      "argmax_raw": 100,
+      "margin_raw": 4.830868,
+      "top5_raw_ids": [
+        100,
+        101,
+        7624,
+        45518,
+        236829
+      ],
+      "top5_raw_vals": [
+        27.5764,
+        22.7456,
+        21.3327,
+        19.3394,
+        19.3392
+      ],
+      "fed_at_next": 3689,
+      "argmax_policy": 100,
+      "margin_policy": 4.830868
+    },
+    {
+      "p": 55,
+      "argmax_raw": 563,
+      "margin_raw": 1.798599,
+      "top5_raw_ids": [
+        563,
+        236789,
+        691,
+        776,
+        9439
+      ],
+      "top5_raw_vals": [
+        26.1673,
+        24.3687,
+        24.0671,
+        24.0079,
+        23.7278
+      ],
+      "fed_at_next": 563,
+      "argmax_policy": 563,
+      "margin_policy": 1.798599
+    },
+    {
+      "p": 56,
+      "argmax_raw": 506,
+      "margin_raw": 2.383411,
+      "top5_raw_ids": [
+        506,
+        625,
+        822,
+        1041,
+        496
+      ],
+      "top5_raw_vals": [
+        28.4596,
+        26.0762,
+        25.8503,
+        25.8131,
+        23.9438
+      ],
+      "fed_at_next": 1041,
+      "argmax_policy": 506,
+      "margin_policy": 2.383411
+    },
+    {
+      "p": 57,
+      "argmax_raw": 1463,
+      "margin_raw": 1.573627,
+      "top5_raw_ids": [
+        1463,
+        2033,
+        3155,
+        3925,
+        63937
+      ],
+      "top5_raw_vals": [
+        27.6183,
+        26.0446,
+        25.1133,
+        22.4411,
+        22.3124
+      ],
+      "fed_at_next": 1463,
+      "argmax_policy": 1463,
+      "margin_policy": 1.573627
+    },
+    {
+      "p": 58,
+      "argmax_raw": 236881,
+      "margin_raw": 3.577173,
+      "top5_raw_ids": [
+        236881,
+        532,
+        1570,
+        236764,
+        236761
+      ],
+      "top5_raw_vals": [
+        27.9413,
+        24.3641,
+        24.1138,
+        22.6073,
+        21.2245
+      ],
+      "fed_at_next": 236881,
+      "argmax_policy": 236881,
+      "margin_policy": 3.577173
+    },
+    {
+      "p": 59,
+      "argmax_raw": 107,
+      "margin_raw": 3.684563,
+      "top5_raw_ids": [
+        107,
+        106,
+        100,
+        236743,
+        101
+      ],
+      "top5_raw_vals": [
+        27.4966,
+        23.8121,
+        22.6861,
+        22.4754,
+        21.1203
+      ],
+      "fed_at_next": 106,
+      "argmax_policy": 107,
+      "margin_policy": 3.684563
+    },
+    {
+      "p": 60,
+      "argmax_raw": 107,
+      "margin_raw": 1.55735,
+      "top5_raw_ids": [
+        107,
+        45518,
+        236829,
+        236813,
+        611
+      ],
+      "top5_raw_vals": [
+        21.6946,
+        20.1372,
+        18.3797,
+        16.576,
+        16.224
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 1.55735
+    },
+    {
+      "p": 61,
+      "argmax_raw": 100,
+      "margin_raw": 3.700659,
+      "top5_raw_ids": [
+        100,
+        107,
+        45518,
+        101,
+        236829
+      ],
+      "top5_raw_vals": [
+        21.6394,
+        17.9387,
+        17.8739,
+        17.2099,
+        17.0048
+      ],
+      "fed_at_next": 105,
+      "argmax_policy": 100,
+      "margin_policy": 3.700659
+    },
+    {
+      "p": 62,
+      "argmax_raw": 45518,
+      "margin_raw": 4.153423,
+      "top5_raw_ids": [
+        45518,
+        107,
+        108,
+        236829,
+        100
+      ],
+      "top5_raw_vals": [
+        22.5439,
+        18.3905,
+        16.2769,
+        15.6843,
+        14.7613
+      ],
+      "fed_at_next": 4368,
+      "argmax_policy": 45518,
+      "margin_policy": 4.153423
+    },
+    {
+      "p": 63,
+      "argmax_raw": 45518,
+      "margin_raw": 1.771475,
+      "top5_raw_ids": [
+        45518,
+        107,
+        100,
+        611,
+        236829
+      ],
+      "top5_raw_vals": [
+        19.5962,
+        17.8247,
+        14.1251,
+        14.1121,
+        13.8318
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 45518,
+      "margin_policy": 1.771475
+    },
+    {
+      "p": 64,
+      "argmax_raw": 100,
+      "margin_raw": 10.105213,
+      "top5_raw_ids": [
+        100,
+        11069,
+        236813,
+        236820,
+        236829
+      ],
+      "top5_raw_vals": [
+        27.5984,
+        17.4932,
+        15.047,
+        14.2753,
+        14.0072
+      ],
+      "fed_at_next": 100,
+      "argmax_policy": 100,
+      "margin_policy": 10.105213
+    },
+    {
+      "p": 65,
+      "argmax_raw": 45518,
+      "margin_raw": 9.990007,
+      "top5_raw_ids": [
+        45518,
+        44027,
+        3305,
+        235950,
+        107
+      ],
+      "top5_raw_vals": [
+        26.6153,
+        16.6253,
+        15.7437,
+        12.9841,
+        12.4311
+      ],
+      "fed_at_next": 45518,
+      "argmax_policy": 45518,
+      "margin_policy": 9.990007
+    },
+    {
+      "p": 66,
+      "argmax_raw": 107,
+      "margin_raw": 13.932848,
+      "top5_raw_ids": [
+        107,
+        236743,
+        236761,
+        1269,
+        236793
+      ],
+      "top5_raw_vals": [
+        27.3908,
+        13.4579,
+        13.1371,
+        12.3524,
+        12.3289
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 13.932848
+    },
+    {
+      "p": 67,
+      "argmax_raw": 101,
+      "margin_raw": 12.39467,
+      "top5_raw_ids": [
+        101,
+        236745,
+        7216,
+        236774,
+        107
+      ],
+      "top5_raw_vals": [
+        26.2188,
+        13.8241,
+        13.2565,
+        12.748,
+        12.0236
+      ],
+      "fed_at_next": 101,
+      "argmax_policy": 101,
+      "margin_policy": 12.39467
+    },
+    {
+      "p": 68,
+      "argmax_raw": 11069,
+      "margin_raw": 7.511715,
+      "top5_raw_ids": [
+        11069,
+        100,
+        22515,
+        3048,
+        236770
+      ],
+      "top5_raw_vals": [
+        25.8034,
+        18.2916,
+        14.7501,
+        14.4856,
+        13.9381
+      ],
+      "fed_at_next": 11069,
+      "argmax_policy": 11069,
+      "margin_policy": 7.511715
+    },
+    {
+      "p": 69,
+      "argmax_raw": 1463,
+      "margin_raw": 14.77834,
+      "top5_raw_ids": [
+        1463,
+        73132,
+        8885,
+        7343,
+        237518
+      ],
+      "top5_raw_vals": [
+        25.1648,
+        10.3865,
+        9.7722,
+        9.5942,
+        9.2623
+      ],
+      "fed_at_next": 1463,
+      "argmax_policy": 1463,
+      "margin_policy": 14.77834
+    },
+    {
+      "p": 70,
+      "argmax_raw": 563,
+      "margin_raw": 11.320676,
+      "top5_raw_ids": [
+        563,
+        237026,
+        820,
+        2375,
+        236764
+      ],
+      "top5_raw_vals": [
+        26.2196,
+        14.8989,
+        14.6376,
+        12.9559,
+        12.2111
+      ],
+      "fed_at_next": 563,
+      "argmax_policy": 563,
+      "margin_policy": 11.320676
+    },
+    {
+      "p": 71,
+      "argmax_raw": 26509,
+      "margin_raw": 7.138739,
+      "top5_raw_ids": [
+        26509,
+        5213,
+        69073,
+        52808,
+        22929
+      ],
+      "top5_raw_vals": [
+        27.8083,
+        20.6695,
+        17.9709,
+        15.642,
+        14.9457
+      ],
+      "fed_at_next": 26509,
+      "argmax_policy": 26509,
+      "margin_policy": 7.138739
+    },
+    {
+      "p": 72,
+      "argmax_raw": 1641,
+      "margin_raw": 10.190886,
+      "top5_raw_ids": [
+        1641,
+        2743,
+        952,
+        116550,
+        121165
+      ],
+      "top5_raw_vals": [
+        25.9767,
+        15.7858,
+        15.016,
+        13.9572,
+        13.943
+      ],
+      "fed_at_next": 1641,
+      "argmax_policy": 1641,
+      "margin_policy": 10.190886
+    },
+    {
+      "p": 73,
+      "argmax_raw": 7867,
+      "margin_raw": 8.023799,
+      "top5_raw_ids": [
+        7867,
+        40630,
+        8111,
+        516,
+        1673
+      ],
+      "top5_raw_vals": [
+        23.9497,
+        15.9259,
+        15.4093,
+        14.2153,
+        12.9137
+      ],
+      "fed_at_next": 7867,
+      "argmax_policy": 7867,
+      "margin_policy": 8.023799
+    },
+    {
+      "p": 74,
+      "argmax_raw": 236761,
+      "margin_raw": 7.61462,
+      "top5_raw_ids": [
+        236761,
+        236764,
+        532,
+        236779,
+        236793
+      ],
+      "top5_raw_vals": [
+        28.0386,
+        20.424,
+        17.4991,
+        15.9697,
+        14.1882
+      ],
+      "fed_at_next": 236761,
+      "argmax_policy": 236761,
+      "margin_policy": 7.61462
+    },
+    {
+      "p": 75,
+      "argmax_raw": 106,
+      "margin_raw": 10.074265,
+      "top5_raw_ids": [
+        106,
+        236779,
+        1599,
+        8945,
+        236771
+      ],
+      "top5_raw_vals": [
+        27.9628,
+        17.8885,
+        17.2219,
+        15.8434,
+        15.2215
+      ],
+      "fed_at_next": 106,
+      "argmax_policy": 106,
+      "margin_policy": 10.074265
+    }
+  ],
+  "gen_policy": {
+    "applied": true,
+    "suppress_tokens": [
+      258883,
+      258882
+    ],
+    "eos_token_id": [
+      1,
+      106,
+      50
+    ],
+    "source": "model.generation_config (from_pretrained)",
+    "processor": "transformers.generation.logits_process.SuppressTokensLogitsProcessor",
+    "note": "SUPPRESSION seulement — l'arrêt EOS n'est PAS appliqué par cet oracle (mode --oracle du runner : suppression ON, arrêt OFF, décision Régis n°3)"
+  },
+  "script_md5": "00cf8c441c41d5aea1e766d75b4f2ee1",
+  "chrono_s": {
+    "load": 5.6,
+    "prefill_backbone": 33.0,
+    "head_sweep": 0.8,
+    "host": "M4"
+  },
+  "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "weights": "<oracle-host>/ml-data/weights_12b_dq",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0"
+  }
+}

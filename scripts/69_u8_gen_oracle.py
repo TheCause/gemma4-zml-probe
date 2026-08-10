@@ -766,7 +766,9 @@ def main() -> None:
     # dérivé en fp32. Le laisser tourner en bf16 aurait été un CHANGEMENT D'INSTRUMENT
     # SILENCIEUX — précisément la faute qui a produit les requalifications en cascade de J2.
     # Le mode décode par DÉFAUT reste bf16 : la reproduction de `u8_gen48` n'est pas touchée.
-    if args.compute_fp32 and not args.teacher_force:
+    # K5 : `--context-ids` est un mode teacher-forcé, pas un décodage — l'avertissement ci-dessous
+    # y serait FAUX, et un log de gate qui se décrit mal trompe sa propre relecture.
+    if args.compute_fp32 and not args.teacher_force and not args.context_ids:
         print("⚠ --compute-fp32 en mode DÉCODE : instrument fp32 (hooks par-module) sur un "
               "décodage autonome. Consigné au manifest ; NE reproduit PAS `u8_gen48` (bf16).",
               flush=True)
