@@ -201,7 +201,13 @@ def cmd_shift_fwd(a):
 
     ⚠ shift-BACK (tronquer d'une position) a été analysé et REJETÉ à la spec (C-K5-B) :
     l'état tronqué est AUTO-COHÉRENT — le run forgé réécrirait ce slot à l'identique, et son
-    mordant nul serait sain, donc ininterprétable comme gate."""
+    mordant nul serait sain, donc ininterprétable comme gate.
+
+    `--n N` (défaut 1) : mentir de N positions. Ajouté APRÈS mesure — à N=1 la corruption
+    déplace bel et bien les 19 logits comparés (|Δ| jusqu'à 1,07) mais ne fait basculer AUCUN
+    argmax, les marges du scénario valant 3,70 en médiane. Le paramètre sert à établir la
+    SENSIBILITÉ du gate (à partir de combien de positions le mensonge devient visible en
+    argmax), pas à forcer un vert."""
     _, hdr, base = read_header(a.src)
     meta = hdr["__metadata__"]
     ent = dict(entries(hdr))
@@ -214,8 +220,11 @@ def cmd_shift_fwd(a):
     with open(a.src, "rb") as f:
         f.seek(base + off0)
         ids = np.frombuffer(f.read(off1 - off0), dtype=np.int32)
+    n_shift = getattr(a, "n", 1)
+    if n_shift < 1:
+        raise SystemExit("--n doit valoir au moins 1")
     phantom = np.int32(int(meta["fed_next"]))
-    new_ids = np.append(ids, phantom)
+    new_ids = np.append(ids, np.full(n_shift, phantom, dtype=np.int32))
     new_blob = new_ids.tobytes()
 
     # Offsets RECALCULÉS séquentiellement dans l'ordre du fichier : ids_fed est le dernier
@@ -228,7 +237,7 @@ def cmd_shift_fwd(a):
         hdr[k]["data_offsets"] = [cursor, cursor + length]
         cursor += length
     hdr["ids_fed"]["shape"] = [len(new_ids)]
-    meta["step_next"] = str(int(meta["step_next"]) + 1)
+    meta["step_next"] = str(int(meta["step_next"]) + n_shift)
     meta["ids_fed_xxh64"] = f"{xxhash.xxh64(new_blob).intdigest():x}"
 
     def writer(fo):
@@ -394,6 +403,7 @@ def main():
     s = sub.add_parser("shift-fwd")
     s.add_argument("src")
     s.add_argument("dst")
+    s.add_argument("--n", type=int, default=1, help="mentir de N positions (défaut 1)")
     s.set_defaults(fn=cmd_shift_fwd)
 
     s = sub.add_parser("verdict")
