@@ -203,9 +203,16 @@ l'historique et le bitset de déduplication sont alloués **une fois** par run.
 | **RP2** — non-régression penalty neutre | **PASS**, référence **requalifiée** | `main` **recompilé sans une ligne du chantier** produit les mêmes ids que le code pénalisé neutre : 4 runs, 3 binaires distincts, tous `06a5953f…`. ⚠ Le témoin figé en début de chantier s'est révélé non reproductible — cf `docs/evidence/penalty/FINDING_temoin_ids_non_reproductible.md`. |
 | **RP5** — état par prompt en `--repl` | **PASS** | 2 passes du même prompt sous `:penalty 1.15` ⇒ **textes identiques**, `n_penalty_touched=60` aux deux, **`hist_len=61` aux DEUX** (sans re-seed : 93). Confirmé sur **20 passes** (20 textes identiques, `hist_len=53` à la 1ʳᵉ comme à la 20ᵉ). |
 | **RP6** — directives du repl | **PASS** (a/b/c/d) | (a) directives seules ⇒ **0 génération, 0 ligne `PENALTY:`** ; (b) `:penalty` agit au prompt **suivant** (1 seule ligne `PENALTY:` sur 2 générations) ; (c) le texte produit sous `:penalty 1.15` est **mot pour mot** le `reponse_hf` du manifest oracle 1.15 ; (d) `0, -1, nan, inf, abc`, valeur absente, `:ignore-prompt maybe` et directive inconnue ⇒ message par cas, **valeur inchangée**, **session vivante**. |
-| **RP7** — récitation | *mesure publiée, sans PASS/FAIL* (décision D4) | Sur 48 tokens HF : `rp=1,0` ⇒ plus long n-gramme répété **2**, bigrammes répétés **1**, distincts 39/48 · `rp=1,15` ⇒ **1 / 0 / 38** · `rp=0,8` ⇒ **4 / 4 / 34**. La métrique bouge **dans les deux sens** attendus. |
+| **RP3** — le runner sous penalty produit **les ids de HF** | **PASS** | **48/48** pour `rp=1,15` **et** pour `rp=0,8`, prompt vérifié **littéralement** (29 ids), `n_penalty_touched = 76/76`, `alloc=0`. **Non-vacuité exercée** : la même fixture 1,15 **sans** armer la penalty ⇒ `A1 FAIL 17/48`, 1er mismatch à `gen=17` — exactement la position de 1ʳᵉ divergence du mordant. |
+| **RP4** — corruptions vues FAIL | **2/3 mordent**, la 3ᵉ **VACUE et déclarée** | (a) branches de signe échangées ⇒ **FAIL 15/48** (@11) · (b) déduplication retirée ⇒ **FAIL 34/48** (@34) · (c) `ignore_prompt` inversé ⇒ **A1 PASS 48/48, ne mord pas**. Code sain restauré et re-vérifié PASS. Instruction de (c) en 8.5. |
+| **RP7** — récitation | *mesure publiée, sans PASS/FAIL* (décision D4) | Sur 48 tokens HF : `rp=1,0` ⇒ plus long n-gramme répété **2**, bigrammes répétés **1**, distincts 39/48 · `rp=1,15` ⇒ **1 / 0 / 38** · `rp=0,8` ⇒ **4 / 4 / 34**. À **200 tokens et longueur égale** (runner) : OFF ⇒ **4 / 13 / 3**, distincts 123/200 · ON `rp=1,15` ⇒ **2 / 6 / 0**, distincts **135/200**. La métrique bouge **dans les deux sens** attendus. |
+| **M1** — coût | *mesure publiée, sans PASS/FAIL* | Chemin B armé **des deux côtés** par `--top-k 1` (sinon `M-COUT` n'est pas publié côté OFF) : **699,7 µs/step** sans penalty vs **711,1 µs/step** avec ⇒ **+11,4 µs, +1,6 %**. L'écart est dans le **D2H** (436,3 → 453,8) ; les **warpers ne bougent pas** (248,2 → 242,8, en baisse). Le surcoût de la penalty est **sous le plancher de résolution**. |
 | **Round-trip dump/restore** | **PASS** | dump 24 tokens : `hist_len=53 = 29 + 24` · restore 8 tokens : `hist_len=60 = 52 + 8`, avec **`step_next=52` lu indépendamment au manifest**. Sans le seed de reprise, `hist_len` vaudrait 8. |
-| **RP3 / RP4 / M1** | **EN ATTENTE** | Fixtures et mordant prêts (voir 8.2) ; runs GPU suspendus — la 3090 est occupée par un autre travail. À exécuter à la prochaine fenêtre. |
+
+⚠ **Ne pas comparer ces 699 µs aux 3 730 µs du §2.** Ce n'est pas une accélération : le régime
+diffère. Le `M-COUT` historique tournait sous `top_k=64, top_p=0,95`, où `applyTopP` **trie** son
+sous-ensemble ; ici `--top-k 1` seul, et `applyTopP` sort immédiatement (`p >= 1,0`). Les deux
+chiffres mesurent le même bloc sur des charges différentes.
 
 ### 8.2 Mordant des fixtures oracle (l'antécédent de RP3)
 
@@ -265,4 +272,28 @@ d'accuser le code qu'on vient d'écrire.
   le dépassement vient d'une dérive de base du repl, **antérieure à ce chantier**.
 - **`--ignore-prompt` + `--load-cache`** : refusé (`IgnorePromptWithLoadCache`), refus exercé.
   Sous reprise, `ids` vaut `ids_fed` complet et « le prompt » n'y est plus une notion définie.
-- **RP3 / RP4 / M1** : non exécutés faute de GPU disponible, fixtures prêtes.
+
+### 8.6 RP4 (c) est VACUE sur la trajectoire de référence — instruit, pas accepté
+
+La corruption (c) inverse `ignore_prompt` au point d'insertion. Sous RP3 (`ignore_prompt=false`),
+elle revient à **ne pas pénaliser le prompt**. Elle a produit **`A1 PASS 48/48`** : sur cette
+trajectoire, pénaliser le prompt ou non **ne change aucun des 48 tokens**. Un mordant nul se
+publie et s'instruit — il ne s'accepte pas.
+
+**Ce qui a été mesuré ensuite :**
+
+1. **Confirmation directe** : le code **sain** lancé avec `--ignore-prompt` sur la fixture 1,15
+   donne lui aussi `A1 PASS 48/48` (`n_penalty_empty_hist = 29` — les 29 steps de prefill ont
+   un historique légitimement vide, exactement le cas prévu par l'exemption de `PenaltyInert`).
+   La corruption n'était donc pas « trop faible » : la trajectoire est **indifférente** à cette
+   frontière.
+2. **Le flag est bien OPÉRANT** : recherche bornée à 3 essais d'un prompt où `--ignore-prompt`
+   change les ids — **les 3 mordent** (« Banana banana banana… », « Kaleidoscope… », « Repeat
+   after me: quartz… »). Ce n'est donc pas le flag qui est inerte, c'est le prompt de référence
+   qui est atypique : sa génération réutilise si massivement ses propres tokens que le prompt
+   n'apporte presque aucun id distinct supplémentaire à l'historique.
+
+**Ce qui reste à prouver, et c'est écrit** : que l'historique inclut le prompt **conformément à
+HF**. Les points 1-2 établissent que le flag agit, pas que le **défaut** (prompt inclus) est le
+bon. Le gate qui le prouverait est une fixture oracle sur un prompt discriminant — voir la ligne
+« RP4 (c) » du tableau 8.1 et l'état de cette dette ci-dessus.

@@ -1,0 +1,46 @@
+d79325d27902af0d81e2419524945980  /data/rqz_workspace/zml/bazel-bin/examples/rqz/gemma4_g12auto
+########## RP3 : --oracle fixture rp=1.15, runner --repetition-penalty 1.15 ##########
+exit=0
+info: BUILD: mode=ReleaseFast
+info: --oracle : prompt vérifié LITTÉRALEMENT (29 ids identiques à la fixture)
+info: --oracle : 48 steps de génération attendus (fed.len), prompt vérifié (ids.len=29 == positions[0])
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=76
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=77 prompt_len=29 générés=48 n_penalty_touched=76 n_penalty_empty_hist=0
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+--- marge minimale du run (instrument de requalification) ---
+0.026249
+########## RP3 : --oracle fixture rp=0.8, runner --repetition-penalty 0.8 ##########
+exit=0
+info: BUILD: mode=ReleaseFast
+info: --oracle : prompt vérifié LITTÉRALEMENT (29 ids identiques à la fixture)
+info: --oracle : 48 steps de génération attendus (fed.len), prompt vérifié (ids.len=29 == positions[0])
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=76
+info: PENALTY: rp=0.8 ignore_prompt=false hist_len=77 prompt_len=29 générés=48 n_penalty_touched=76 n_penalty_empty_hist=0
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+--- marge minimale du run (instrument de requalification) ---
+0.004210
+
+########## CONTRE-TEST de non-vacuité : fixture 1.15 SANS armer la penalty ##########
+(doit FAIL — sinon la fixture ne se distingue pas d'une trajectoire neutre)
+exit=1 (attendu non-zéro)
+error: A1 FAIL — 17/48 match, 1er mismatch au step gen=17
+ALL DONE
+########## M1 / RP7 — run OFF (chemin B armé par --top-k 1, penalty neutre) ##########
+exit=0
+info: BUILD: mode=ReleaseFast
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=228
+info: S2-PONT: steps_comparés=228 désaccords=0 égalités_exactes=0 (chemin B armé)
+info: M-COUT: bloc chemin B — moyenne 699.7 µs/step (D2H seul 436.3 µs, warpers 248.2 µs), max 1192.6 µs, sur 228 steps (MESURE PUBLIÉE, pas un gate)
+info: --out-ids : 200 ids écrits -> /data/gemma4-zml-probe/t7_off.safetensors
+
+########## M1 / RP7 — run ON (mêmes args + --repetition-penalty 1.15) ##########
+exit=0
+info: BUILD: mode=ReleaseFast
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=228
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=229 prompt_len=29 générés=200 n_penalty_touched=228 n_penalty_empty_hist=0
+info: S2-PONT: steps_comparés=228 désaccords=26 égalités_exactes=0 (chemin B armé)
+info: S2-PONT: les désaccords ci-dessus sont ATTENDUS sous penalty armée (chemin A = topK in-graph sur logits NUS) — ce n'est pas un FAIL
+info: M-COUT: bloc chemin B — moyenne 711.1 µs/step (D2H seul 453.8 µs, warpers 242.8 µs), max 3084.7 µs, sur 228 steps (MESURE PUBLIÉE, pas un gate)
+info: --out-ids : 200 ids écrits -> /data/gemma4-zml-probe/t7_on.safetensors
+ALL DONE
+########## RP4 : les 3 corruptions ##########

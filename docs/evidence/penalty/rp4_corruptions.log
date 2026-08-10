@@ -1,0 +1,24 @@
+===================== CORRUPTION (a) : branches de signe échangées =====================
+corruption (a) appliquée
+build rc=0
+run rc=1 (attendu NON-ZÉRO : la corruption doit être VUE échouer)
+error: A1 FAIL — 15/48 match, 1er mismatch au step gen=11
+
+===================== CORRUPTION (b) : déduplication retirée =====================
+corruption (b) appliquée
+build rc=0
+run rc=1 (attendu NON-ZÉRO : la corruption doit être VUE échouer)
+error: A1 FAIL — 34/48 match, 1er mismatch au step gen=34
+
+===================== CORRUPTION (c) : ignore_prompt inversé =====================
+corruption (c) appliquée
+build rc=0
+run rc=0 (attendu NON-ZÉRO : la corruption doit être VUE échouer)
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+
+===================== RESTAURATION du code sain =====================
+worktree retiré
+rebuild sain rc=0
+run sain rc=0 (attendu 0 : le code sain doit REPASSER)
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+ALL DONE

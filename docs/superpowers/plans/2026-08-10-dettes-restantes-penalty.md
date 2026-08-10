@@ -534,16 +534,28 @@ Hamming des `fed` entre 1.0 et chacun des deux autres : attendu **≥ 3 sur 48**
 ~40 par cascade). Publier les valeurs réelles. Si < 3 : changer de prompt, le gate ne
 passe PAS à vide.
 
-- [ ] **Step 3 : RP3 — le gate** : runner `--oracle <fixture pénalisée>` pour 0.8 et 1.15.
+- [x] **Step 3 : RP3 — le gate** : runner `--oracle <fixture pénalisée>` pour 0.8 et 1.15.
   Expected : **ids == HF**, `n_penalty_touched > 0`, marge min publiée. Mismatch → §7-3 de
   la spec (3 conditions, ε = 2e-3, fenêtre attendue VIDE — marge min historique 0,0279).
+→ **RP3 PASS** le 10 août 2026 : **48/48 pour 1,15 ET pour 0,8**, `n_penalty_touched=76/76`,
+`alloc=0`, prompt vérifié **littéralement** (29 ids — le check est passé de « même longueur »
+à l'identité, grâce au tenseur `prompt_ids` neuf). Marges min des runs : 0,026249 (1,15) et
+0,004210 (0,8). **Non-vacuité exercée** : même fixture 1,15 **sans** armer la penalty ⇒
+`A1 FAIL 17/48` au step 17 — la position exacte de 1ʳᵉ divergence du mordant.
 
-- [ ] **Step 4 : RP4 — les trois corruptions**, chacune → RP3 **FAIL vu** :
+- [x] **Step 4 : RP4 — les trois corruptions**, chacune → RP3 **FAIL vu** :
   (a) branches de signe échangées ; (b) dédup retirée (`seen` ignoré) ; (c) `ignore_prompt`
   forcé à l'inverse. Publier le mordant de chacune (plancher 1 ; un mordant faible face à la
   cascade attendue est à instruire). Corruptions dans un worktree jetable, jamais committées.
+→ (a) **FAIL vu** 15/48 (@11), mordant **33** · (b) **FAIL vu** 34/48 (@34), mordant **14** ·
+(c) **A1 PASS 48/48 — mordant 0, VACUE**. Conformément à la consigne du plan, (c) est
+**instruite et non acceptée** : le code sain sous `--ignore-prompt` passe lui aussi 48/48, donc
+la trajectoire est indifférente à cette frontière ; et une recherche **bornée à 3 essais** d'un
+prompt discriminant en a trouvé **3 sur 3**, prouvant que le flag est opérant. Détail complet
+et ce qui reste à prouver : `SAMPLING_RESULTS.md` §8.6. Code sain restauré et re-vérifié PASS ;
+worktree jetable supprimé, aucune corruption committée.
 
-- [ ] **Step 5 : Commit + tags** (`gate/rp3-pass`, `gate/rp4-pass`)
+- [x] **Step 5 : Commit + tags** (`gate/rp3-pass`, `gate/rp4-pass`)
 
 ---
 
@@ -608,18 +620,33 @@ que celle d'allocation, pas une qui lui ressemble.
 
 ### Task 7 : RP7 selon l'arbitrage D4 + M1 (coût)
 
-- [ ] **Step 1 : RP7** — si D4 = requalification (reco) : mesurer la métrique n-gramme
+- [x] **Step 1 : RP7** — si D4 = requalification (reco) : mesurer la métrique n-gramme
   (longueur max de n-gramme répété, 200 derniers tokens) sur le témoin long ET sur un run
   `--repetition-penalty 1.15`, publier les deux SANS verdict, dette D5 close par
   requalification datée. Si D4 = chercher un prompt qui récite : borné à 3 essais, sinon
   vacuité déclarée.
+→ Publié, **sans verdict** (D4 = requalification). Outil : `scripts/77_ngram_repetition.py`.
+À 200 tokens, longueur égale : OFF ⇒ plus long n-gramme répété **4**, bigrammes **13**,
+trigrammes **3**, distincts 123/200 · ON `rp=1,15` ⇒ **2 / 6 / 0**, distincts **135/200**.
+Sur les 3 trajectoires HF de 48 tokens, la métrique bouge **dans les deux sens** : `rp=0,8`
+(qui encourage la répétition) donne **4 / 4 / 34**, contre **1 / 0 / 38** à `rp=1,15`.
+**Dette D5 close par requalification datée du 10 août 2026.**
 
-- [ ] **Step 2 : M1** — le chrono `M-COUT` existant (`d2h_ns`/`warp_ns`) englobe déjà la
+- [x] **Step 2 : M1** — le chrono `M-COUT` existant (`d2h_ns`/`warp_ns`) englobe déjà la
   chaîne : publier warp µs/step penalty ON vs OFF (2 runs, mêmes RUN_ARGS, build prouvé
   `ReleaseFast`). Mesure publiée, PAS un gate. ⚠ Ne pas armer `--gate-d1d2` pendant la
   mesure (il travaille dans la fenêtre chronométrée et l'invalide, `SAMPLING_RESULTS.md` §7).
+→ ⚠ **Correction au plan, nécessaire** : `--repetition-penalty 1.0` **n'arme pas** le chemin B,
+donc `M-COUT` n'aurait pas été publié côté OFF et il n'y aurait rien eu à comparer. Les deux
+runs sont donc armés par `--top-k 1` (le régime neutre du gate-pont), ce qui fait de la penalty
+la **seule** variable. `--gate-d1d2` non armé, `BUILD: mode=ReleaseFast` aux deux.
+→ **699,7 µs/step** (OFF) vs **711,1 µs/step** (ON) ⇒ **+11,4 µs, +1,6 %**. L'écart vit dans le
+**D2H** (436,3 → 453,8 µs) ; les **warpers ne bougent pas** (248,2 → 242,8, en baisse). Le
+surcoût de la penalty est **sous le plancher de résolution** de l'instrument.
 
-- [ ] **Step 3 : Commit** (+ tag `gate/rp7-pass` seulement si D4 a retenu un gate)
+- [x] **Step 3 : Commit** (+ tag `gate/rp7-pass` seulement si D4 a retenu un gate)
+→ Pas de tag `gate/rp7-pass` : D4 a retenu une **mesure publiée**, pas un gate. Un tag `-pass`
+sur une mesure sans critère serait un faux verdict.
 
 ---
 
