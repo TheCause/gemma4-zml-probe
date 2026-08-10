@@ -231,6 +231,20 @@ const usage =
 // Type EXACT du retour de std.process.Args.toSlice (cf lib/std/process/Args.zig) : une slice
 // d'éléments sentinelle-terminés — chaque élément coerce vers []const u8 mais la slice ENTIÈRE
 // ne coerce PAS vers []const []const u8 (piège de typage, d'où la signature précise ici).
+/// Validation UNIQUE de la repetition penalty — partagée par le flag CLI et la directive `:penalty`
+/// du repl. Deux implémentations dériveraient : la CLI refuserait `nan` et le repl l'accepterait,
+/// et c'est précisément par le repl que l'utilisateur explore les valeurs.
+///
+/// ⚠ Garde en ACCEPTATION, même raison qu'à `--temperature` : la forme « p <= 0 → rejet »
+/// laisserait passer NaN (toute comparaison avec NaN est fausse). Avec p = NaN, `p != 1.0` est
+/// VRAI, la penalty s'armerait, chaque logit pénalisé deviendrait NaN, et l'argmax rendrait un
+/// token arbitraire SANS erreur.
+fn parsePenalty(s: []const u8) ?f32 {
+    const v = std.fmt.parseFloat(f32, s) catch return null;
+    if (!(v > 0 and std.math.isFinite(v))) return null;
+    return v;
+}
+
 fn parseArgs(process_args: []const [:0]const u8) !Args {
     if (process_args.len < 3) {
         log.err("{s}", .{usage});
@@ -400,16 +414,10 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
         } else if (std.mem.eql(u8, a, "--repetition-penalty")) {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
-            const v = std.fmt.parseFloat(f32, process_args[i]) catch return error.InvalidRepetitionPenalty;
-            // ⚠ Garde en ACCEPTATION, même raison qu'à `--temperature` : « p <= 0 → rejet »
-            // laisserait passer NaN (toute comparaison avec NaN est fausse). Avec p = NaN,
-            // `p != 1.0` est VRAI, la penalty s'armerait, et chaque logit pénalisé deviendrait
-            // NaN — l'argmax rendrait alors un token arbitraire SANS erreur.
-            if (!(v > 0 and std.math.isFinite(v))) {
+            args.repetition_penalty = parsePenalty(process_args[i]) orelse {
                 log.err("--repetition-penalty {s} refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)", .{process_args[i]});
                 return error.InvalidRepetitionPenalty;
-            }
-            args.repetition_penalty = v;
+            };
         } else if (std.mem.eql(u8, a, "--ignore-prompt")) {
             args.ignore_prompt = true;
         } else if (std.mem.eql(u8, a, "--gate-d1d2")) {
@@ -2140,16 +2148,25 @@ pub fn run(init: std.process.Init) !void {
         .repetition_penalty = args.repetition_penalty,
         .ignore_prompt = args.ignore_prompt,
     };
+    // ⚠ `chain_armed` est figé ICI, et c'est ce qui pilote allocations ET `defer` — jamais un
+    // `scfg.pathArmed()` ré-évalué. Deux raisons, toutes deux mordantes depuis que le repl a des
+    // directives : (1) `:penalty` peut armer le chemin B EN COURS de session, sur des buffers qui
+    // n'auraient jamais été alloués (mordu au gate RP5 : « chemin B : logits 1048576 octets !=
+    // work 0 octets ») ; (2) un `defer if (scfg.pathArmed())` ré-évalué à la sortie deviendrait
+    // VRAI après un `:penalty` et libérerait un `scratch` jamais initialisé — un `undefined`
+    // passé à `deinit`. La condition de libération doit être la MÊME EXPRESSION que celle
+    // d'allocation, pas une expression qui lui ressemble.
+    const chain_armed = scfg.pathArmed() or args.repl;
     // D10 (C7) : `work` n'est plus alloué ICI — il déménage APRÈS la création de la Platform
     // (DmaAllocator exige un Device vivant), avec son defer. Le scratch et le reste restent.
-    if (scfg.pathArmed()) {
+    if (chain_armed) {
         scfg.scratch = try sampling.Scratch.init(allocator, VOCAB_CONTRACT);
         scfg.resetPerPrompt();
-        log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet ARMÉ ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
+        log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet {s} ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.pathArmed()) "ARMÉ" else "prêt (repl : armable par directive)", if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
     } else {
         log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
     }
-    defer if (scfg.pathArmed()) scfg.scratch.deinit(allocator);
+    defer if (chain_armed) scfg.scratch.deinit(allocator);
 
     // === Phase 1 (penalty) : historique et bitset alloués UNE FOIS, ici — jamais dans la boucle
     // (interdit D10, `ALLOC-LOOP: alloc=0`). Alloués SEULEMENT si la penalty est armée : à 1.0 le
@@ -2158,11 +2175,15 @@ pub fn run(init: std.process.Init) !void {
     // La borne L_MAX est celle que la garde de lancement de `generateOnce` fait déjà respecter
     // (`ids.len + limit <= L_MAX`) : l'historique ne peut donc pas déborder, et une garde de borne
     // explicite reste posée à l'append (une borne « impossible » non gardée est une UB en attente).
-    const penalty_armed = scfg.repetition_penalty != 1.0;
+    // ⚠ En `--repl`, on alloue MÊME si la penalty est neutre au lancement : la directive
+    // `:penalty` peut l'armer en cours de session, et sans buffers elle serait un flag inopérant
+    // — exactement le mensonge que le repo refuse ailleurs. Coût du cas neutre : L_MAX×4 octets
+    // + 32 Kio, une fois par session résidente, et une écriture d'id par step.
+    const penalty_armed = scfg.repetition_penalty != 1.0 or args.repl;
     if (penalty_armed) {
         scfg.hist = try allocator.alloc(u32, @intCast(L_MAX));
         scfg.seen = try allocator.alloc(u64, (VOCAB_CONTRACT + 63) / 64);
-        log.info("PENALTY: armée rp={d} ignore_prompt={} (hist {d} ids max, seen {d} Kio)", .{ scfg.repetition_penalty, scfg.ignore_prompt, L_MAX, (scfg.seen.len * @sizeOf(u64)) / 1024 });
+        log.info("PENALTY: buffers alloués — rp={d} ignore_prompt={} (hist {d} ids max, seen {d} Kio{s})", .{ scfg.repetition_penalty, scfg.ignore_prompt, L_MAX, (scfg.seen.len * @sizeOf(u64)) / 1024, if (scfg.repetition_penalty == 1.0) " ; NEUTRE au lancement, armable par :penalty" else "" });
     } else if (scfg.ignore_prompt) {
         // Un flag inopérant est un mensonge : le dire au lieu de le laisser passer en silence.
         log.warn("--ignore-prompt sans --repetition-penalty : SANS EFFET (il n'y a pas de penalty à restreindre)", .{});
@@ -2222,12 +2243,33 @@ pub fn run(init: std.process.Init) !void {
             log.err("--oracle : fixture 'positions' vide", .{});
             return error.EmptyFixture;
         }
-        // Déviation assumée (longueur seule) : les prompt_ids complets ne vivent que dans le
-        // manifest sidecar JSON — positions[0]==ids.len est le check le plus fort possible sur la
+        // Déviation historique (longueur seule) : les prompt_ids complets ne vivaient que dans le
+        // manifest sidecar JSON — positions[0]==ids.len était le check le plus fort possible sur la
         // fixture seule ; un prompt FAUX de même longueur échouerait bruyamment au compare step 0.
         if (positions_fx[0] != @as(i32, @intCast(ids.items.len))) {
             log.err("--oracle : positions[0]={d} (seq_len fixture) != ids.len={d} (prompt rendu) — mismatch prompt/fixture", .{ positions_fx[0], ids.items.len });
             return error.OraclePromptMismatch;
+        }
+        // Depuis la phase 1 (penalty), l'oracle exporte AUSSI `prompt_ids` en tenseur : la
+        // comparaison devient LITTÉRALE et la déviation ci-dessus est soldée. Le tenseur reste
+        // OPTIONNEL — les fixtures historiques du repo (u8_gen48 et sa famille) ne le portent pas,
+        // et les casser pour renforcer un check serait un mauvais échange. Absent : on le DIT.
+        if (reg.tensors.get("prompt_ids") != null) {
+            const pids = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "prompt_ids");
+            defer allocator.free(pids);
+            if (pids.len != ids.items.len) {
+                log.err("--oracle : prompt_ids de la fixture = {d} ids != prompt rendu {d}", .{ pids.len, ids.items.len });
+                return error.OraclePromptMismatch;
+            }
+            for (pids, 0..) |p, i| {
+                if (p != @as(i32, @intCast(ids.items[i]))) {
+                    log.err("--oracle : prompt_ids[{d}] = {d} (fixture) != {d} (prompt rendu) — template ou prompt DIFFÉRENT ; un mismatch d'ids qui suivrait serait attribué à tort au sampling", .{ i, p, ids.items[i] });
+                    return error.OraclePromptMismatch;
+                }
+            }
+            log.info("--oracle : prompt vérifié LITTÉRALEMENT ({d} ids identiques à la fixture)", .{pids.len});
+        } else {
+            log.warn("--oracle : fixture sans tenseur 'prompt_ids' (antérieure à la phase 1) — vérification du prompt limitée à sa LONGUEUR", .{});
         }
         const fed_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "fed");
         if (fed_fx.len == 0) {
@@ -2287,7 +2329,7 @@ pub fn run(init: std.process.Init) !void {
     // alloué » est STRUCTUREL, pas puni par un panic (catch unreachable = UB en ReleaseFast). ===
     var dma = zml.mem.DmaAllocator.init(allocator, &platform.devices[0]);
     var pin_on = !args.no_pin;
-    if (scfg.pathArmed()) {
+    if (chain_armed) { // même condition qu'à l'allocation du scratch — cf note sur `chain_armed`
         if (pin_on) {
             scfg.work = dma.allocator().alloc(f32, VOCAB_CONTRACT) catch blk: {
                 pin_on = false;
@@ -2306,7 +2348,7 @@ pub fn run(init: std.process.Init) !void {
     }
     // Ordre LIFO : ce defer est déclaré APRÈS `defer platform.deinit` → il s'exécute AVANT lui
     // (dmaUnmap exige la plateforme vivante).
-    defer if (scfg.pathArmed()) {
+    defer if (chain_armed) {
         if (pin_on) dma.allocator().free(scfg.work) else allocator.free(scfg.work);
     };
 
@@ -2606,6 +2648,44 @@ pub fn run(init: std.process.Init) !void {
         const line_raw = line_opt orelse break;
         const line = std.mem.trim(u8, line_raw, " \t\r");
         if (line.len == 0) break;
+        // === Directives (spec §3.4) : une ligne commençant par ':' n'est JAMAIS un prompt. ===
+        // Une valeur invalide affiche un message et la session CONTINUE — un repl qui meurt sur
+        // une faute de frappe perdrait la compile qu'il est justement là pour amortir.
+        if (line[0] == ':') {
+            const sp = std.mem.indexOfScalar(u8, line, ' ');
+            const cmd = if (sp) |at| line[0..at] else line;
+            const arg = if (sp) |at| std.mem.trim(u8, line[at + 1 ..], " \t") else "";
+            if (std.mem.eql(u8, cmd, ":penalty")) {
+                if (parsePenalty(arg)) |v| {
+                    scfg.repetition_penalty = v;
+                    try stdout_w.interface.print(":penalty = {d} (appliquée au prompt SUIVANT)\n", .{v});
+                } else {
+                    try stdout_w.interface.print(":penalty : valeur invalide '{s}' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : {d}\n", .{ arg, scfg.repetition_penalty });
+                }
+            } else if (std.mem.eql(u8, cmd, ":ignore-prompt")) {
+                if (std.mem.eql(u8, arg, "on")) {
+                    scfg.ignore_prompt = true;
+                    try stdout_w.interface.print(":ignore-prompt = on (seuls les tokens générés sont pénalisés)\n", .{});
+                } else if (std.mem.eql(u8, arg, "off")) {
+                    scfg.ignore_prompt = false;
+                    try stdout_w.interface.print(":ignore-prompt = off (défaut HF : prompt ++ généré)\n", .{});
+                } else {
+                    try stdout_w.interface.print(":ignore-prompt : attendu 'on' ou 'off', reçu '{s}'. Inchangé : {}\n", .{ arg, scfg.ignore_prompt });
+                }
+            } else if (std.mem.eql(u8, cmd, ":params")) {
+                try stdout_w.interface.print("params: rp={d} ignore_prompt={} T={d} top_k={d} top_p={d} min_keep={d} seed={?d} max_tokens={d}\n", .{ scfg.repetition_penalty, scfg.ignore_prompt, scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, max_tokens });
+            } else if (std.mem.eql(u8, cmd, ":help")) {
+                try stdout_w.interface.print(
+                    "directives : :penalty <f>  :ignore-prompt on|off  :params  :help\n" ++
+                        "             (ligne vide ou EOF pour quitter ; une ligne commençant par ':' n'est jamais un prompt)\n",
+                    .{},
+                );
+            } else {
+                try stdout_w.interface.print("directive inconnue '{s}' — :help pour la liste. La ligne n'a PAS été traitée comme un prompt.\n", .{cmd});
+            }
+            try stdout_w.interface.flush();
+            continue;
+        }
         var pids = promptToIds(allocator, &encoder, line) catch |e| {
             log.err("prompt refusé (tokenisation : {s}) — prompt suivant", .{@errorName(e)});
             continue;

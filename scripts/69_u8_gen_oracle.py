@@ -186,29 +186,49 @@ def encode_prompt(tok, prompt: str):
     return enc, ids, S
 
 
-def step_top5(logits_1d: torch.Tensor, proc=None):
+def step_top5(logits_1d: torch.Tensor, proc=None, penalty_proc=None, hist_ids=None):
     """top-5 (+marge top1−top2) d'un vecteur logits [V] — f32 pour les marges.
 
-    Ordre IMPOSÉ (plan 4.2) : les asserts portent sur les logits BRUTS, la politique s'applique
+    Ordre IMPOSÉ (plan 4.2) : les asserts portent sur les logits BRUTS, la chaîne s'applique
     ENSUITE sur une copie, le topk après elle. Asserter après la politique reviendrait à tester la
     finitude de `-inf` qu'on a nous-mêmes écrits.
 
-    Rend `(idxs_bruts, vals_bruts, marge_brute, max_abs, politique|None)`.
+    ⚠ La PENALTY est appliquée ICI et pas avant l'appel, pour une raison mesurable : diviser un
+    logit positif par 0,8 le porte à 37,5 et ferait sauter l'assert `max_abs <= SOFTCAP`, qui
+    parle du modèle et non de la chaîne. L'ordre obtenu est exactement celui de HF, mesuré (F8) :
+    RepetitionPenalty(4) → SuppressTokens(15).
+
+    ⚠ Le processor est APPELÉ (spec C5) : retranscrire son `torch.where` des deux côtés ferait
+    passer une faute commune à l'oracle et au runner.
+
+    Rend `(idxs_bruts, vals_bruts, marge_brute, max_abs, chaîne|None)`. Le 5ᵉ élément est le
+    top-5 après CHAÎNE COMPLÈTE (penalty puis politique) — c'est lui qui décide du token retenu.
     """
     lg = logits_1d.float()
     assert torch.isfinite(lg).all(), "logits non finis"
     max_abs = float(lg.abs().max())
     assert max_abs <= SOFTCAP, f"softcap VIOLÉ : max|logits|={max_abs} > {SOFTCAP}"
-    vals, idxs = torch.topk(lg, TOPK)
+    vals, idxs = torch.topk(lg, TOPK)  # BRUT — schéma inchangé, les gates historiques le lisent
+    lg_chain, touched = lg, False
+    if penalty_proc is not None:
+        assert hist_ids is not None and hist_ids.numel() > 0, \
+            "penalty armée sans historique : le processor recevrait un input_ids vide"
+        lg_chain = penalty_proc(hist_ids.unsqueeze(0), lg.clone().unsqueeze(0))[0]
+        touched = bool((lg_chain != lg).any())
     pol = None
     if proc is not None:
-        lg_p = apply_policy(lg.unsqueeze(0), proc)[0]
+        lg_p = apply_policy(lg_chain.unsqueeze(0), proc)[0]
         pvals, pidxs = torch.topk(lg_p, TOPK)
         # Avec V=262144 et |S|=2, il reste toujours ≥ 5 candidats finis : un -inf ici signalerait
         # une liste de suppression aberrante, et json.dump écrirait `-Infinity` (JSON non standard).
         assert torch.isfinite(pvals).all(), "top-5 POST-politique contient un -inf"
         pol = (pidxs.to(torch.int32), pvals)
-    return idxs.to(torch.int32), vals, float(vals[0] - vals[1]), max_abs, pol
+    elif penalty_proc is not None:
+        # Penalty armée SANS politique (--no-gen-policy) : la sélection doit quand même suivre la
+        # chaîne, sinon la penalty serait calculée puis jetée et le gate passerait à vide.
+        pvals, pidxs = torch.topk(lg_chain, TOPK)
+        pol = (pidxs.to(torch.int32), pvals)
+    return idxs.to(torch.int32), vals, float(vals[0] - vals[1]), max_abs, pol, touched
 
 
 def mode_decode(args, model, tok, tpl_sha, t_load, versions):
@@ -223,6 +243,15 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
         print(f"calcul fp32 armé (mode décode) : {n_hooked} sous-modules hookés", flush=True)
     enc, prompt_ids, S = encode_prompt(tok, args.prompt)
     n = int(args.n_tokens)
+    # --- Phase 1 : repetition penalty, par le VRAI processor (spec C5) ---
+    # Historique = prompt ++ tokens générés, qui est le défaut HF (`input_ids` complet). Le runner
+    # tient le même contrat côté Zig ; c'est cette égalité de définition qui rend RP3 concluant.
+    penalty_proc = None
+    if args.repetition_penalty != 1.0:
+        from transformers.generation.logits_process import RepetitionPenaltyLogitsProcessor
+        penalty_proc = RepetitionPenaltyLogitsProcessor(penalty=float(args.repetition_penalty))
+        print(f"PENALTY: armée rp={args.repetition_penalty} (processor HF, historique = prompt ++ généré)", flush=True)
+    n_penalty_touched = 0
     eot_id = 106  # <turn|> (mesuré, cf gemma4_g12auto.zig) — informatif seulement : en mode
     # --oracle le runner NE s'arrête PAS à l'EOT (limite = fed.len), l'oracle non plus.
 
@@ -239,7 +268,12 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     assert out.logits.dtype == want_logits_dtype, \
         f"logits {out.logits.dtype} != {want_logits_dtype} (compute_fp32={args.compute_fp32})"
     pkv = out.past_key_values
-    idxs, vals, margin, max_abs, pol = step_top5(out.logits[0, -1, :], proc)
+    # ⚠ s0 est produit par le prefill, HORS boucle : la penalty s'y applique AUSSI, sinon la
+    # divergence avec le runner serait garantie dès le token 0. À ce point HF a vu exactement le
+    # prompt — l'historique est donc `prompt_ids`.
+    idxs, vals, margin, max_abs, pol, touched = step_top5(out.logits[0, -1, :], proc, penalty_proc, prompt_ids)
+    if touched:
+        n_penalty_touched += 1
     # Le token retenu est celui d'APRÈS politique quand elle s'applique — c'est ce que fait le
     # runner en mode --oracle (suppression ON). Sans cela, la fixture serait produite par un
     # décodage que le runner ne reproduit plus, et le mode --oracle comparerait deux politiques
@@ -269,7 +303,12 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
             out = model(input_ids=torch.tensor([[seq[-1]]], dtype=torch.long),
                         past_key_values=pkv, use_cache=True)
         dt = time.monotonic() - tk
-        idxs, vals, margin, max_abs, pol = step_top5(out.logits[0, -1, :], proc)
+        # Historique au step k = prompt ++ les k tokens déjà produits — exactement l'`input_ids`
+        # que HF passerait à son processor à ce point (`seq` contient k éléments AVANT l'append).
+        hist_k = torch.cat([prompt_ids, torch.tensor(seq, dtype=prompt_ids.dtype)]) if penalty_proc is not None else None
+        idxs, vals, margin, max_abs, pol, touched = step_top5(out.logits[0, -1, :], proc, penalty_proc, hist_k)
+        if touched:
+            n_penalty_touched += 1
         chosen_k = int(pol[0][0]) if pol is not None else int(idxs[0])
         seq.append(chosen_k)
         times.append(dt)
@@ -316,10 +355,22 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
     positions = torch.arange(S, S + n, dtype=torch.int32)  # positions[0] == S (check runner)
     print(f"politique : a mordu {n_policy_bites} fois sur {n} tokens "
           f"({'ACTIVE' if proc is not None else 'INACTIVE'})", flush=True)
+    # Non-vacuité de la penalty, côté oracle : une fixture produite par une penalty qui n'a
+    # jamais rien changé ferait passer RP3 sans rien prouver (elle serait identique à la fixture
+    # neutre). On le VOIT ici, avant que le runner ne soit comparé à elle.
+    if penalty_proc is not None:
+        print(f"PENALTY: n_penalty_touched={n_penalty_touched} sur {n_eff} steps", flush=True)
+        assert n_penalty_touched > 0, \
+            "penalty armée mais AUCUN logit changé sur toute la trajectoire : fixture inexploitable"
     tensors = {
         "positions": positions.contiguous(),
         "fed": torch.tensor(fed, dtype=torch.int32),
         "expected": torch.tensor(expected, dtype=torch.int32),
+        # ⚠ prompt_ids en TENSEUR, pas seulement au manifest JSON : le runner ne lit pas le JSON,
+        # et sans ce tenseur il ne peut pas vérifier LITTÉRALEMENT qu'il a été templaté sur le
+        # même prompt que l'oracle. Un désaccord de template produirait un mismatch d'ids
+        # attribué à tort à la penalty.
+        "prompt_ids": prompt_ids.to(torch.int32).contiguous(),
         # `top5_ids`/`top5_vals` restent LE BRUT (schéma inchangé, plan 4.3) : les gates
         # historiques les lisent, et la marge brute est l'instrument de requalification
         # pré-enregistré de U8/W4g. Le post-politique s'AJOUTE, il ne remplace pas.
@@ -339,6 +390,10 @@ def mode_decode(args, model, tok, tpl_sha, t_load, versions):
         "prompt_ids": prompt_ids.tolist(),
         "seq_len": S,
         "n_decode": n,
+        # Phase 1 : le réglage qui a produit CETTE trajectoire. Sans lui au manifest, deux
+        # fixtures de penalties différentes seraient indiscernables une fois sur le disque.
+        "repetition_penalty": float(args.repetition_penalty),
+        "n_penalty_touched": n_penalty_touched,
         "fed_head": fed[:8], "expected_head": expected[:8],
         "eot_id": eot_id, "eot_pos_in_fed": eot_pos,
         "reponse_hf": tok.decode(fed, skip_special_tokens=True),
@@ -543,6 +598,10 @@ def main() -> None:
                          "(défaut off — u8_gen48 a été produite sans arrêt)")
     ap.add_argument("--host-label", default="M4",
                     help="étiquette chrono D6 (M4|VM) — JAMAIS le hostname réel (anonymisation)")
+    ap.add_argument("--repetition-penalty", type=float, default=1.0,
+                    help="phase 1 : RepetitionPenaltyLogitsProcessor HF appliqué en tête de "
+                         "chaîne (avant suppress_tokens). 1.0 = neutre. Historique = prompt ++ "
+                         "généré, le défaut HF.")
     args = ap.parse_args()
     # ⚠ La garde « --compute-fp32 n'existe qu'en --teacher-force » est LEVÉE (prérequis GC8,
     # plan 6.1). Raison : GC8 compare la trajectoire libre du runner corrigé à un décodage HF

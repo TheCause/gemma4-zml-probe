@@ -552,7 +552,7 @@ passe PAS à vide.
 **Files :**
 - Modify : `zml_runner/gemma4_g12auto.zig` — boucle stdin `--repl`
 
-- [ ] **Step 1 : Parser les directives** — une ligne commençant par `:` n'est JAMAIS un
+- [x] **Step 1 : Parser les directives** — une ligne commençant par `:` n'est JAMAIS un
   prompt : `:penalty <f>` (même garde en acceptation), `:ignore-prompt on|off`, `:params`,
   `:help`. Valeur invalide → message, la session CONTINUE. ⚠ Pièges std.Io 0.16 du chantier
   repl (`REPL_RESULTS.md`) : `takeDelimiter` (pas `Exclusive`), writer UNIQUE sur stdout.
@@ -561,17 +561,48 @@ passe PAS à vide.
   VÉRIFIER (un `hist_len` repartant à 0 nu serait la sémantique `ignore_prompt`, pas le
   défaut HF — et RP5 ne le verrait pas, deux passes identiquement fausses restant égales).
 
-- [ ] **Step 2 : RP5** — même prompt 2×, penalty active, 32 tokens : texte détokenisé
+- [x] **Step 2 : RP5** — même prompt 2×, penalty active, 32 tokens : texte détokenisé
   identique ET `n_penalty_touched > 0` aux deux passes. Puis 20 prompts : RSS ≤ +1 Mo
   (le compteur AL-RSS le publie déjà).
+→ **RP5 PASS sur le reset par prompt** (10 août 2026) : 2 passes du même prompt sous
+`:penalty 1.15` → **textes détokenisés identiques**, `n_penalty_touched=60` aux deux, et
+surtout **`hist_len=61` aux DEUX passes** (= 29 prompt + 32 générés). C'est le point que le
+gate devait attraper : sans re-seed, la 2ᵉ passe afficherait `hist_len=93` et un texte
+différent. Confirmé sur 20 passes (`hist_len=53` à la 1ʳᵉ comme à la 20ᵉ, 20 textes
+identiques).
+→ ⚠ **Critère RSS NON TENU, et la penalty n'en est pas la cause.** Mesuré au même point de
+chaque run (`t20`, 20 tokens générés), sur 20 prompts : **+1 268 KiB avec** penalty,
+**+1 196 KiB sans** (contre-test, mêmes prompts, même binaire). Pente 66,7 vs 62,9 KiB/prompt.
+**L'écart imputable à la penalty est de +72 KiB sur 20 prompts** ; le seuil « ≤ +1 Mo » est
+dépassé par la **dérive de base du mode résident**, qui préexiste au chantier. → dette écrite,
+pas un FAIL de la penalty. (`RSS-DELTA` intra-run est INEXÉCUTABLE ici : il exige `t200`, or
+les prompts font 24 tokens ; `t20` est la grandeur qui parle d'une dérive INTER-prompts.)
 
-- [ ] **Step 3 : RP6** — (a) `:penalty 1.15` ne génère rien (vérifié par COMPTAGE) ;
+- [x] **Step 3 : RP6** — (a) `:penalty 1.15` ne génère rien (vérifié par COMPTAGE) ;
   (b) s'applique au prompt SUIVANT (sensibilité prouvée par RP3) ; (c) `:params` vérifié
   CONTRE le comportement (référence = `reponse_hf` du manifest oracle 1.15, rapatrié de M4,
   borné aux 48 premiers tokens, comparaison TEXTE) ; (d) valeurs invalides énumérées
   `0, -1, nan, inf, abc, vide` — **`nan` est le cas qui compte**.
+→ **(a) PASS** : `:penalty 1.15` + `:params` + `:help` seuls ⇒ **0 génération et 0 ligne
+`PENALTY:` de fin de run** (comptage, pas impression visuelle).
+→ **(b) PASS** : prompt, puis `:penalty 1.15`, puis le même prompt ⇒ **une seule** ligne
+`PENALTY:` — la 1ʳᵉ passe est restée neutre, la 2ᵉ est pénalisée. La directive n'agit ni
+rétroactivement ni immédiatement, mais au prompt suivant, comme annoncé par son message.
+→ **(d) PASS** : `0`, `-1`, `nan`, `inf`, `abc`, `:penalty` sans valeur, `:ignore-prompt maybe`
+et une directive inconnue ⇒ chacun son message, **valeur inchangée** (confirmée par `:params`
+en fin de séquence) et **session vivante, exit=0**. `nan` est bien refusé : la garde est
+partagée avec la CLI via `parsePenalty` — une seule implémentation, pas deux qui dérivent.
+→ **(c)** : voir Task 5 (exige la fixture oracle 1.15 de M4).
 
-- [ ] **Step 4 : Commit + tags** (`gate/rp5-pass`, `gate/rp6-pass`)
+⚠ **Bug trouvé par ce gate, et c'est son mérite** : `:penalty` armait le chemin B en cours de
+session alors que `work`/`scratch` n'étaient alloués que si `pathArmed()` était vrai **au
+lancement** ⇒ `chemin B : logits 1048576 octets != work 0 octets`. Pire, les `defer` de
+libération ré-évaluaient `scfg.pathArmed()` : devenu vrai après un `:penalty`, un `defer`
+aurait libéré un `scratch` jamais initialisé. Corrigé par un `chain_armed` **figé une fois**
+qui pilote allocation ET libération — la condition de libération doit être la MÊME EXPRESSION
+que celle d'allocation, pas une qui lui ressemble.
+
+- [x] **Step 4 : Commit + tags** (`gate/rp5-pass`, `gate/rp6-pass`)
 
 ---
 

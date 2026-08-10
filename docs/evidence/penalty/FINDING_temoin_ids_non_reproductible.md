@@ -41,18 +41,34 @@ qu'une comparaison au témoin : elle contrôle la variable « fenêtre », que l
 **Établi :** un témoin d'ids de 200 tokens capturé à T n'est pas garanti reproductible à T+1h
 sur cette machine, à graphe, poids et prompt identiques.
 
-**NON établi :** la cause exacte. Le candidat le plus plausible est un choix d'algorithme
-(autotuning cuBLAS/XLA) sensible à l'état de la machine, stable dans une fenêtre et pas entre
-deux. Il manque une mesure pour trancher, et cette mesure est manquante par NOTRE faute :
+**Établi après coup, par une mesure INDÉPENDANTE :** l'oracle HF fp32 lancé sur M4 sur le même
+prompt publie `marges : min=0.004589 @ gen=47`. **La marge minimale de toute la trajectoire
+tombe exactement au token 47** — le token où la divergence commence. À cet endroit, les deux
+premiers candidats sont séparés de **0,0046**, soit **six fois moins** que la marge min
+historique du repo (0,0279, citée par la spec comme fenêtre de requalification). Un écart
+d'exécution infime suffit donc à faire basculer la sélection, et tout ce qui suit est la
+cascade autorégressive de ce basculement unique. Ce n'est pas une régression : c'est un quasi
+ex æquo qui tombe d'un côté ou de l'autre.
+
+**NON établi :** ce qui, dans l'exécution, a produit cet écart infime (candidat le plus
+plausible : choix d'algorithme cuBLAS/XLA sensible à l'état de la machine, stable dans une
+fenêtre et pas entre deux). Une mesure manque pour trancher, et elle manque par NOTRE faute :
 **le md5 du binaire de 07:15 n'a pas été capturé avec le témoin**. Sans lui, on ne peut pas
 prouver formellement que ce binaire correspondait au code de `main` — le `24 action cache hit`
 du build de la Task 1 en est un indice fort, pas une preuve.
 
 ## Pourquoi ça n'avait jamais été vu
 
-Les gates oracle historiques du repo portent sur des trajectoires de **48 tokens**
-(`u8_gen48` et sa famille). La divergence apparaît ici au token **47**. Le témoin de 200
-tokens introduit par ce plan est le premier instrument du repo assez long pour l'exposer.
+Deux raisons, et il faut les distinguer pour ne pas sur-généraliser :
+
+1. **La longueur.** Les gates oracle historiques portent sur des trajectoires de 48 tokens
+   (`u8_gen48` et sa famille). Plus une trajectoire est longue, plus elle a de chances de
+   traverser un point de décision serré — et il suffit d'un seul pour que tout ce qui suit
+   diverge.
+2. **Le prompt.** La marge min de 0,0046 est propre à CE prompt (« l'histoire du zéro »), qui
+   n'est pas celui des gates historiques. On ne peut donc pas dire « les gates du repo étaient
+   à un token de tomber » — on peut dire que ce prompt-ci passe par une zone où la sélection
+   ne tient qu'à 0,0046, et que rien ne garantit qu'un autre prompt long n'en fasse pas autant.
 
 ## Conséquences
 
