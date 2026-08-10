@@ -24,6 +24,9 @@ EV = ROOT / "docs" / "evidence" / "k5"
 SC = ROOT / "scripts"
 VERBOSE = "--verbose" in sys.argv
 HLO_REF = "297679847aa04b719942d75d093adf2b"
+# Commit de base du chantier K5 (HEAD de `main` au moment du `git checkout -b`). Référence
+# FIGÉE pour PF0 : comparer à `main` deviendrait vacueux dès la branche mergée.
+K5_BASE = "66de8ec"
 
 results = []
 
@@ -54,9 +57,17 @@ def pf0():
     ap = need_file("hlo_witness_apres.md5").read_text().split()[0]
     assert av == HLO_REF, f"md5 AVANT {av} != témoin de référence {HLO_REF}"
     assert ap == HLO_REF, f"md5 APRÈS {ap} != témoin de référence {HLO_REF}"
-    rc, out = run(["git", "diff", "main", "--stat", "--", "zml_runner/engine.zig"])
-    assert out == "", f"engine.zig a bougé :\n{out}"
-    return f"md5 HLO avant == après == {HLO_REF[:12]}… ; engine.zig 0 octet de diff"
+    # ⚠ Comparer à `main` serait un contrôle qui ne peut plus échouer UNE FOIS LA BRANCHE
+    # MERGÉE (main == HEAD ⇒ diff vide par construction). On compare donc le blob d'engine.zig
+    # au commit de base du chantier, figé : la référence ne bouge pas avec l'intégration.
+    rc, base_blob = run(["git", "rev-parse", f"{K5_BASE}:zml_runner/engine.zig"])
+    assert rc == 0, f"référence introuvable ({K5_BASE}) : {base_blob}"
+    rc, head_blob = run(["git", "rev-parse", "HEAD:zml_runner/engine.zig"])
+    assert rc == 0, f"engine.zig introuvable à HEAD : {head_blob}"
+    assert base_blob == head_blob, (
+        f"engine.zig a bougé depuis {K5_BASE} : blob {head_blob[:12]}… != {base_blob[:12]}…")
+    return (f"md5 HLO avant == après == {HLO_REF[:12]}… ; engine.zig identique à {K5_BASE} "
+            f"(blob {head_blob[:12]}…)")
 
 
 # ---------------------------------------------------------------- PF1 / PF3
