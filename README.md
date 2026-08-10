@@ -1,12 +1,12 @@
 # gemma4-zml-probe
 
-> **⚠ Portée de la claim « == HF »** (passe de nuance, chantier `generation_config` du 29 juil 2026).
-> Partout dans ce document, « == HF » signifie **même argmax sur les logits bruts** — un critère
-> plus strict que comparer deux `generate()`, mais **pas** le même énoncé. Jusqu'au 29 juil le
-> portage n'appliquait **pas** `generation_config.json` (`suppress_tokens`, EOS multiples) : la
-> lecture « reproduit ce que `generate()` produirait » était **fausse**. Elle est devenue vraie
-> **pour le 12B en mode libre** et reste **fausse pour les runners E2B**.
-> Détail et chiffres : `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
+> **⚠ Scope of the "== HF" claim** (nuance pass, `generation_config` work, 29 Jul 2026).
+> Throughout this document, "== HF" means **same argmax on the raw logits** — a stricter
+> criterion than comparing two `generate()` calls, but **not** the same statement. Until
+> 29 Jul the port did **not** apply `generation_config.json` (`suppress_tokens`, multiple
+> EOS): the reading "reproduces what `generate()` would produce" was **false**. It became
+> true **for the 12B in free-running mode** and remains **false for the E2B runners**.
+> Details and figures: `docs/GENERATION_CONFIG_RESULTS.md` · `docs/FINDING_GENERATION_CONFIG.md`.
 >
 > **⚠ Build mode of published benchmarks (30 Jul 2026).** `-c opt` only sets the C++ backend; the
 > Zig frontend mode is a separate Bazel flag. Throughput figures published before that date were

@@ -1,0 +1,48 @@
+GC11 — dette « README bilingue », 10 août 2026 : AVANT / APRÈS
+Décision Régis : README en ANGLAIS intégral. Le marqueur du gate était le littéral
+FRANÇAIS « argmax sur les logits bruts » — traduire le README le rend donc NU au sens
+du gate. Ce FAIL est l'ÉTAT ATTENDU, pas un bug : c'est le gate qui mord.
+
+===== (1) ÉTAT AVANT — README traduit, marqueur encore FR-seul → FAIL ATTENDU =====
+$ ./scripts/gc11_claim_scope.sh
+GC11 — recensement de la claim « == HF » dans les documents de catégorie (i) :
+  NU  README.md : 11 occurrence(s) de « == HF », marqueur de portée ABSENT
+  OK  PLANNING.md : 11 occurrence(s), marqueur présent
+  OK  docs/CARTOGRAPHIE_portage.md : 6 occurrence(s), marqueur présent
+  OK  docs/DOCUMENTATION.md : 27 occurrence(s), marqueur présent
+  OK  docs/U_12B_RESULTS.md : 3 occurrence(s), marqueur présent
+  OK  docs/MASKS_INGRAPH_RESULTS.md : 3 occurrence(s), marqueur présent
+  OK  docs/CACHE_DONATION_RESULTS.md : 3 occurrence(s), marqueur présent
+  OK  docs/GENERATION_CONFIG_RESULTS.md : 1 occurrence(s), marqueur présent
+  (8 document(s) de catégorie (i) énonçant la claim)
+GC11 FAIL — au moins un document énonce « == HF » sans marqueur de portée.
+rc=1
+
+===== (2) ÉTAT APRÈS — marqueur étendu en OU logique bilingue (portée constante) =====
+$ ./scripts/gc11_claim_scope.sh
+GC11 — recensement de la claim « == HF » dans les documents de catégorie (i) :
+  OK  README.md : 11 occurrence(s), marqueur présent (EN)
+  OK  PLANNING.md : 11 occurrence(s), marqueur présent (FR)
+  OK  docs/CARTOGRAPHIE_portage.md : 6 occurrence(s), marqueur présent (FR)
+  OK  docs/DOCUMENTATION.md : 27 occurrence(s), marqueur présent (FR)
+  OK  docs/U_12B_RESULTS.md : 3 occurrence(s), marqueur présent (FR)
+  OK  docs/MASKS_INGRAPH_RESULTS.md : 3 occurrence(s), marqueur présent (FR)
+  OK  docs/CACHE_DONATION_RESULTS.md : 3 occurrence(s), marqueur présent (FR)
+  OK  docs/GENERATION_CONFIG_RESULTS.md : 1 occurrence(s), marqueur présent (FR)
+  (8 document(s) de catégorie (i) énonçant la claim)
+GC11 PASS — 0 site de catégorie (i) sans qualificatif de portée.
+rc=0
+
+===== (3) CONTRE-PREUVES — self-test étendu (nu FR, nu EN, EN qualifié) =====
+$ ./scripts/gc11_claim_scope.sh --self-test
+CONTRE-PREUVE (a) — un document nu FR, EXAMINÉ SEUL, doit faire ÉCHOUER le gate :
+  NU  /var/folders/2k/d4n0bv4s4r319c15vlmgnzvr0000gn/T/tmp.urp5QWN3VY/CANARY_claim_fr.md : 1 occurrence(s) de « == HF », marqueur de portée ABSENT (ni FR ni EN)
+  (1 document(s) de catégorie (i) énonçant la claim)
+CONTRE-PREUVE (b) — un document nu EN, EXAMINÉ SEUL, doit faire ÉCHOUER le gate :
+  NU  /var/folders/2k/d4n0bv4s4r319c15vlmgnzvr0000gn/T/tmp.urp5QWN3VY/CANARY_claim_en.md : 1 occurrence(s) de « == HF », marqueur de portée ABSENT (ni FR ni EN)
+  (1 document(s) de catégorie (i) énonçant la claim)
+CONTRE-ÉPREUVE (c) — un document EN PORTANT le marqueur anglais doit PASSER :
+  OK  /var/folders/2k/d4n0bv4s4r319c15vlmgnzvr0000gn/T/tmp.urp5QWN3VY/CANARY_claim_en_ok.md : 1 occurrence(s), marqueur présent (EN)
+  (1 document(s) de catégorie (i) énonçant la claim)
+GC11 SELF-TEST PASS — le gate mord dans les DEUX langues, et accepte les DEUX langues.
+rc=0
