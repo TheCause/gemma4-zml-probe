@@ -1667,7 +1667,7 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     // (1) relecture : header + meta + shapes + données, dans des buffers NEUFS.
     var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
     defer f.close(io);
-    var h = try kvdump.readHeader(allocator, io, f);
+    var h = try kvdump.readHeader(allocator, io, f, path);
     defer h.deinit();
     const fmt_got = h.metaGet("format") orelse return error.KvDumpBadFormat;
     if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
@@ -1687,8 +1687,8 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     defer allocator.free(got_a);
     const got_b = try allocator.alloc(u8, b_bytes.len);
     defer allocator.free(got_b);
-    try kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
-    try kvdump.readTensorInto(io, f, &h, "b", got_b, b_h);
+    try kvdump.readTensorInto(io, f, path, &h, "a", got_a, a_h);
+    try kvdump.readTensorInto(io, f, path, &h, "b", got_b, b_h);
     if (!std.mem.eql(u8, got_a, a_bytes) or !std.mem.eql(u8, got_b, b_bytes)) {
         log.err("KVIO: round-trip NON bit-identique (a_ok={} b_ok={})", .{ std.mem.eql(u8, got_a, a_bytes), std.mem.eql(u8, got_b, b_bytes) });
         return error.KvIoRoundTrip;
@@ -1701,7 +1701,7 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     if (try f.readPositionalAll(io, &one, mut_off) != 1) return error.KvIoMutantSetup;
     one[0] ^= 0xFF;
     try f.writePositionalAll(io, &one, mut_off);
-    const mut_res = kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    const mut_res = kvdump.readTensorInto(io, f, path, &h, "a", got_a, a_h);
     if (mut_res) |_| {
         log.err("KVIO: MUTANT NON VU — un octet flippé a passé le checksum : le contrôle est VACUEUX", .{});
         return error.KvIoMutantNotSeen;
@@ -2549,7 +2549,7 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         return e;
     };
     errdefer file.close(io);
-    var header = kvdump.readHeader(allocator, io, file) catch |e| {
+    var header = kvdump.readHeader(allocator, io, file, path) catch |e| {
         log.err("--load-cache : header illisible ({s}) : {s}", .{ path, @errorName(e) });
         return e;
     };
@@ -2618,7 +2618,7 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // dépendent (la garde oracle compare positions[0] à ids.len). Checksum vérifié.
     const raw = try allocator.alloc(i32, step_next);
     defer allocator.free(raw);
-    try kvdump.readTensorInto(io, file, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
+    try kvdump.readTensorInto(io, file, path, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
     const ids_fed = try allocator.alloc(u32, step_next);
     errdefer allocator.free(ids_fed);
     for (raw, 0..) |t, k| {
@@ -2647,10 +2647,10 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 /// dehors, des deux côtés de la comparaison.
 fn loadCacheTensors(io: std.Io, mc: *const ManifestCheck, host: anytype) !Resume {
     const t_load0: std.Io.Timestamp = .now(io, .awake);
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
     log.info("KVLOAD: {s} l_max={d} step_next={d} fed_next={d} ids={d} (reprise sans prefill)", .{ mc.path, L_MAX, mc.step_next, mc.fed_next, mc.ids_fed.len });
     log.info("KVLOAD: contexte de {d} tokens (non réaffiché)", .{mc.ids_fed.len});
     return .{ .step_next = mc.step_next, .fed_next = mc.fed_next, .t_load0 = t_load0 };
