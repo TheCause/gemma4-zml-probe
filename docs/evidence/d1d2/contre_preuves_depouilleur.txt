@@ -1,0 +1,14 @@
+CONTRE-PREUVES DU DÉPOUILLEUR 75_d1d2_gpu_bridge.py — 10 août 2026
+Un juge qu'on n'a jamais vu condamner n'est pas un juge. Chaque mutant altère UN chiffre
+des logs RÉELS et doit faire passer le verdict au rouge (rc=1). Le cas nominal, lui, doit
+rester vert (rc=0) : poser la question dans les DEUX sens.
+
+  OK   nominal — logs réels non altérés -> rc=0 (attendu 0)
+  OK   mutant 1 — md5 HLO différent (le graphe aurait bougé) -> rc=1 (attendu 1)
+  OK   mutant 2 — G-D1 : 1 désaccord injecté -> rc=1 (attendu 1)
+  OK   mutant 3 — G-D1 : antécédent VIDE (steps_avec_coupe=0) -> rc=1 (attendu 1)
+  OK   mutant 4 — G-D2 : mutant (a) ne mord plus -> rc=1 (attendu 1)
+  OK   mutant 5 — G-D2 : mutant (b) ne mord plus -> rc=1 (attendu 1)
+
+Refus VU aussi côté binaire : --gate-d1d2 sans régime armé -> GateD1D2NotArmed
+(cf d1d2_refus.err.log) — le gate refuse de passer À VIDE au lieu de compter 0 step.

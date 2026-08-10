@@ -1,0 +1,9 @@
+297679847aa04b719942d75d093adf2b  module_0001.zml.before_optimizations.txt
+
+Témoin HLO `before_optimizations` de la variante 1280 (gemma4_g12auto), capturé sur la VM le
+10 août 2026 AVANT la première ligne de code du pont D1/D2 :
+  XLA_FLAGS="--xla_dump_to=<dir>" gemma4_g12auto <ckpt> <tok> --prompt "witness" --max-tokens 4
+
+⚡ Ce md5 est aussi celui de GC0 (27 juil), de S2-G (29 juil) et de DC0 (9 août) : le graphe de
+cette variante n'a pas bougé d'un bit sur CINQ chantiers successifs. Le correctif K7 du 10 août
+(refus « tronqué » bruyant) est donc lui aussi confirmé host-side par ce même témoin.

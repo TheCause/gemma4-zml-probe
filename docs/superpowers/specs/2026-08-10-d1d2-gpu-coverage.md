@@ -65,7 +65,17 @@ Une référence écrite comme le code testé ne prouve rien : elle compare le co
 |---|---|---|
 | **G-D0** | md5 HLO `before_optimizations` **identique** au témoin capturé avant la 1ʳᵉ ligne de code (le pont est host-side), et `ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0` inchangé | tout md5 différent ; tout compteur d'alloc non nul |
 | **G-D1** | Sur **≥ 300 steps** GPU armés (`top_k=64, top_p=0.95, T=1.0`), l'ensemble des survivants de `applyTopP` == celui de la référence descendante : **0 désaccord**. **Antécédent non vide exigé** : `n_topp_bit ≥ 30` steps où top-p retranche ≥ 1 token *après* top-k | ≥ 1 désaccord (= bug réel de `applyTopP` jamais exercé sur GPU) ; ou `n_topp_bit == 0` ⇒ gate passé **À VIDE**, changer de prompt/paramètres et le **dire** |
-| **G-D2** | Avec `T=0.7` : `n_temp_applied ≥ 300` (la ligne s'exécute), écart max à `logit/T` **exactement 0 ULP**, et la trajectoire **diffère** de celle du run `T=1.0` | `n_temp_applied == 0` (vacuité) ; écart ≠ 0 ; trajectoire identique à `T=1.0` (la température ne ferait rien d'observable) |
+| **G-D2** | Avec `T=0.7` : `n_temp_applied ≥ 300` (la ligne s'exécute enfin sur GPU), **mutant (a)** `n_temp_mul_diffs > 0` (la division se distingue de `× 1/t`), **mutant (b)** `n_order_diffs > 0` (l'ordre de la chaîne a un effet observable) | `n_temp_applied == 0` (vacuité) ; un mutant qui **ne mord pas** — le gate ne prouve alors rien sur le point que ce mutant portait, et sera publié comme tel |
+
+> ⚠ **Correction de la spec, faite AVANT la mesure (10 août).** La rédaction initiale de G-D2
+> exigeait « la trajectoire diffère de celle du run `T=1.0` ». **C'est impossible en régime
+> argmax** — et pour exactement la même raison que le mutant vacu du §4.3 : diviser par `T > 0`
+> est monotone croissante, donc l'argmax désigne le **même** token quelle que soit la température
+> (et `min_keep` garantit que ce token survit toujours à top-p). Le critère aurait été soit
+> impossible à satisfaire, soit satisfait pour une mauvaise raison. Il est remplacé par le
+> mutant (b), qui mesure l'effet là où il existe réellement : **le masque de top-p**. Faire
+> diverger la trajectoire exigerait d'armer le tirage (`--seed`), donc d'introduire le PRNG —
+> hors périmètre (dette K1) et non reproductible d'un run à l'autre.
 
 **Contre-preuves obligatoires — chaque gate doit être VU échouer** (un gate jamais vu échouer
 n'est pas un gate) :

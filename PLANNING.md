@@ -16,8 +16,9 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | Dette | État |
 |---|---|
 | PLANNING périmé (2 fronts 🔴 du 30 juil) · D11 | **SOLDÉES** — voir ci-dessous |
-| K7 (refus « tronqué » muet) · README bilingue | en cours |
-| D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) · K8 (restore à froid) | en cours, sur GO |
+| K7 (refus « tronqué » muet) · README bilingue | **SOLDÉES** (10 août) |
+| D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
+| K8 (restore à froid) | en cours, sur GO |
 | K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
 | Phase 1 repetition penalty (SUSPENDUE) · Triton paged attention | plans dédiés, hors chantier dettes |
 
@@ -160,8 +161,13 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       **dette assumée** : décision Régis du 9 août, gates 1280+4k seulement.
 - [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
       Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
-- [ ] ⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a **aucune couverture GPU** — sa
-      seule couverture est la fixture `S2-U`. Déclarée, pas tue.
+- [x] ~~⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a aucune couverture GPU~~ —
+      **SOLDÉE (10 août, GO Régis)**, avec **D2** : gates **G-D0/G-D1/G-D2** verts. 386 steps GPU
+      armés, **0 désaccord** contre une référence écrite autrement (tri descendant, f64),
+      antécédent **plein** (coupe à 386/386 steps, 23 267 ids), **0 cas frontière**. G-D2 : la
+      température s'exécute enfin sur GPU et **ses 2 mutants mordent**. Graphe **intouché**
+      (md5 HLO identique). ⚠ 2 mutants « évidents » se sont révélés VACUS et ont été remplacés
+      avant codage (monotonie de la division) — `docs/SAMPLING_RESULTS.md` §7.
 - [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
       leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
       coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour

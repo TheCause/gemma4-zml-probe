@@ -4,6 +4,10 @@
 > plus la mesure publiée `M-COUT`. Ce qui n'est pas couvert est écrit au §5 (9 dettes), et ce qui
 > n'y porte pas de chiffre n'a pas été mesuré.
 >
+> **Mise à jour du 10 août 2026 — 3 gates de plus, dettes D1 et D2 SOLDÉES** : `G-D0`, `G-D1`,
+> `G-D2` (couverture GPU de `applyTopP` et `applyTemperature`). Détail, contre-preuves et
+> limites au **§7**.
+>
 > Spec : `docs/superpowers/specs/2026-07-29-sampling-penalty-design.md` (rév. 3) ·
 > Plan : `docs/superpowers/plans/2026-07-29-sampling-phase2.md` (rév. 2) ·
 > Arbitrage des revues : `docs/superpowers/specs/2026-07-29-sampling-penalty-arbitrage.md`
@@ -109,8 +113,8 @@ chantier). Ne restent hors périmètre que `bos_token_id` et `pad_token_id`, san
 
 | # | Dette | Motif |
 |---|---|---|
-| **D1** | **`applyTopP` n'a AUCUNE couverture GPU** — sa seule couverture est la fixture `S2-U` | Le régime neutre du pont est `--top-k 1`, qui **court-circuite** top-p. Un régime neutre par top-p exigerait un véhicule GPU dédié. ⚠ C'est la brique dont les mesures montrent qu'une formulation naïve rend un ensemble **disjoint** de HF : dette **sérieuse et déclarée** |
-| **D2** | **`applyTemperature` n'est pas exercé de bout en bout** | `temperature: 1.0` ⇒ HF n'instancie pas le warper : la config Google ne l'exerce jamais. Couverture = fixture seule |
+| **D1** | ~~**`applyTopP` n'a AUCUNE couverture GPU**~~ **SOLDÉE (10 août 2026)** | Gate **G-D1** vert : **386 steps GPU armés, 0 désaccord** avec une référence écrite AUTREMENT (tri descendant + cumsum `< p` en f64, contre tri ascendant + `cum <= 1-p` en f32). **Antécédent plein** : top-p a coupé à **386 steps sur 386** (23 267 ids retranchés) — le gate n'est pas passé à vide. **0 cas frontière** (`|cum−p| < 1e-9`) : l'accord est structurel, pas un coup de chance numérique. §7 ci-dessous |
+| **D2** | ~~**`applyTemperature` n'est pas exercé de bout en bout**~~ **SOLDÉE (10 août 2026)** | Gate **G-D2** vert : la ligne s'exécute enfin sur GPU (**386 steps** à `T=0.7`), et **les 2 mutants MORDENT** — `x/t` diffère de `x*(1/t)` sur **9 414 388** logits, et l'ordre muté `TopK→TopP→Temp` change **584 ids sur 138 steps**. ⚠ Ce que G-D2 **ne** prouve pas : cf §7, l'égalité à une « référence indépendante » y serait tautologique |
 | **D3** | ~~L'interdit « aucune allocation par step » n'a pas de gate porteur~~ **SOLDÉE (30 juil)** | Gate **AL-0/AL-VAC** (compteur toujours actif, arbitrage B9) + **AL-RSS** (B10) — `docs/D10_RESULTS.md` |
 | **D4** | **Équivalence de l'arrêt runner ↔ HF** : prouvée par aucun gate | Héritée du chantier précédent, **aggravée** par la penalty (pénaliser un id EOS modifie l'arrêt) |
 | **D5** | **`RP7` (« la récitation est-elle levée »)** : suspendu | Le symptôme d'origine n'a jamais été reproduit. Appartient à la spec du 27 juil : à arbitrer là-bas |
@@ -130,3 +134,52 @@ chantier). Ne restent hors périmètre que `bos_token_id` et `pad_token_id`, san
   renvoyant vers `--top-k 1` pour du greedy déterministe.
 - **Gardes en acceptation** (`!(p > 0 and isFinite(p))`) et non en rejet : `p <= 0 → rejet`
   laisserait passer **`NaN`**, toute comparaison avec `NaN` étant fausse.
+
+## 7. D1/D2 — couverture GPU des warpers (10 août 2026, gates G-D0/G-D1/G-D2)
+
+> Spec pré-enregistrée : `docs/superpowers/specs/2026-08-10-d1d2-gpu-coverage.md` (committée
+> **avant** la première ligne de code). Preuves : `docs/evidence/d1d2/`.
+
+**Le trou que ce chantier bouche.** `S2-PONT` compare deux *sélecteurs* et n'est valide qu'en
+**régime neutre** — or son régime neutre est `--top-k 1`, qui **court-circuite précisément
+top-p**. `applyTopP` n'avait donc jamais tourné sur GPU sous contrôle, et `applyTemperature`
+jamais tourné du tout (la config Google porte `temperature: 1.0`, et le runner suit HF en
+n'instanciant pas le warper à `T == 1.0`).
+
+**Méthode.** Pont in-process en régime **armé** (`--gate-d1d2`) : `applyTopP` est confrontée, sur
+le **même vecteur, au même step, dans le même processus**, à une référence **écrite autrement** —
+tri **descendant** + cumsum exclusive `< p` en **f64**, contre tri ascendant + `cum <= 1-p` en f32.
+Insensible à la bistabilité par construction. Le f64 n'est pas un luxe : sommer des probabilités
+des plus grandes vers les plus petites ne donne pas le même f32 que l'inverse, et une référence
+f32 aurait produit du bruit indistinguable d'un vrai désaccord.
+
+| Gate | Prédiction | Mesuré | Verdict |
+|---|---|---|---|
+| **G-D0** | md5 HLO identique au témoin pré-code + `ALLOC-LOOP: alloc=0` | md5 **`297679847aa04b719942d75d093adf2b`** avant **et** après ; `alloc=0 resize=0 remap=0 free=0 bytes=0` sur les 2 runs ; `mode=ReleaseFast` | **PASS** |
+| **G-D1** | ≥ 300 steps, **0 désaccord**, antécédent ≥ 30 steps avec coupe | **386 steps, 0 désaccord**, coupe à **386/386** steps (**23 267** ids retranchés), **0 cas frontière** | **PASS** |
+| **G-D2** | ≥ 300 steps avec température appliquée, **les 2 mutants mordent** | **386 steps** à `T=0.7` ; mutant (a) **9 414 388** logits où `x/t ≠ x*(1/t)` ; mutant (b) **584 ids sur 138 steps** | **PASS** |
+
+**Ce que les contre-preuves ont établi.** Le refus a été **VU** : `--gate-d1d2` sans régime armé
+rend `GateD1D2NotArmed` — le gate refuse de passer à vide plutôt que de compter 0 step. Et le
+**dépouilleur lui-même a été vu condamner** : 5 mutants injectés dans les logs réels (md5 différent,
+1 désaccord, antécédent vide, chacun des 2 mutants neutralisé) le font passer au rouge, tandis que
+le cas nominal reste vert — la question posée dans les deux sens
+(`docs/evidence/d1d2/contre_preuves_depouilleur.txt`).
+
+**⚠ Ce que ce chantier NE prouve PAS, et qui reste écrit.**
+
+1. **G-D2 est plus mince que G-D1, par nature.** Il n'existe qu'une façon d'écrire une division
+   f32 : une « référence indépendante » y comparerait le code à lui-même. G-D2 établit que la
+   ligne s'exécute, qu'elle **divise** (mutant a) et que **l'ordre de la chaîne compte**
+   (mutant b) — rien de plus. C'est écrit ainsi dans la spec, avant la mesure.
+2. **Deux mutants « évidents » se sont révélés VACUS à l'analyse**, et ont dû être remplacés
+   avant d'être écrits dans le code : (i) déplacer la température *après top-k* ne change rien
+   (diviser par `T > 0` est monotone, et le critère de top-k est un pur ordre) — d'où le mutant
+   retenu, *après top-p* ; (ii) exiger que la trajectoire diffère de celle du run `T=1.0` est
+   **impossible en régime argmax**, pour la même raison de monotonie. Les deux auraient produit
+   un gate vert sans contenu.
+3. **La mesure `M-COUT` du même run est invalide** : le pont travaille dans la fenêtre
+   chronométrée. Le binaire l'annonce lui-même par un `log.warn` plutôt que de laisser le chiffre
+   être recopié ailleurs comme comparable.
+4. **E2B toujours hors périmètre** (dette D6), **tie-break D8** non résolu, **phase 1 penalty**
+   suspendue.

@@ -1,0 +1,28 @@
+=== G-D0 — le graphe n'a pas bougé, l'interdit D10 tient ===
+  md5 HLO avant  : 297679847aa04b719942d75d093adf2b
+  md5 HLO après  : 297679847aa04b719942d75d093adf2b
+  identiques     : OUI
+  ALLOC-LOOP d1 : alloc=0 resize=0 remap=0 free=0 bytes=0
+  ALLOC-LOOP d2 : alloc=0 resize=0 remap=0 free=0 bytes=0
+  mode de build  : ReleaseFast, ReleaseFast
+  G-D0 : PASS
+
+=== G-D1 — applyTopP contre une référence écrite AUTREMENT (tri descendant, f64) ===
+  steps comparés          : 386   (seuil 300) OK
+  désaccords              : 0   (prédiction : 0)
+  ANTÉCÉDENT : steps où top-p coupe : 386 (seuil 30) OK
+  ids coupés au total     : 23267
+  frontière serrée (|cum-p|<1e-9) : 0   ex æquo à la frontière : 0
+  G-D1 : PASS
+
+=== G-D2 — applyTemperature exercée sur GPU, + 2 mutants qui doivent MORDRE ===
+  (i)  steps où la température s'exécute : 386 (seuil 300) OK
+  (ii) mutant a — x/t contre x*(1/t)     : 9414388 logits diffèrent -> le gate DISCRIMINE la division
+  (iii) mutant b — ordre TopK->TopP->Temp : 584 ids sur 138 steps -> l ORDRE de la chaîne a un effet observable
+  G-D2 : PASS
+
+===== VERDICT =====
+  G-D0 : PASS
+  G-D1 : PASS
+  G-D2 : PASS
+TOUS VERTS

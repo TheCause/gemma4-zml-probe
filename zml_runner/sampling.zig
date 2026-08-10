@@ -46,6 +46,67 @@ pub const Scratch = struct {
 };
 
 
+/// Buffers et compteurs du gate D1/D2 (couverture GPU de `applyTopP` / `applyTemperature`,
+/// 10 août 2026). Les ALGORITHMES de référence sont dans `sampling_ref.zig` — seules les DONNÉES
+/// sont ici, parce que `SamplingCfg` doit les porter et que `sampling_ref.zig` importe ce fichier
+/// (l'inverse créerait un cycle). Spec : `docs/superpowers/specs/2026-08-10-d1d2-gpu-coverage.md`.
+///
+/// ⚠ Alloué **UNE FOIS**, comme `Scratch` — interdit D10 : aucune allocation par step. Le gate
+/// n'est instancié que sous `--gate-d1d2` : un run ordinaire ne paie ni les ~4,3 MiB ni le temps.
+pub const GateD1D2 = struct {
+    idx: []u32,
+    prob: []f64,
+    /// `keep[i]` — appartenance de l'id `i` aux survivants, selon la RÉFÉRENCE.
+    keep: []bool,
+    /// Idem selon l'implémentation TESTÉE.
+    keep_impl: []bool,
+    /// Vecteur de travail du mutant (b) — chaîne HF dans un ordre muté.
+    mut: []f32,
+    /// État post-suppression, entrée commune de la chaîne nominale et de la chaîne mutée.
+    pre_temp: []f32,
+
+    // --- Compteurs, publiés en fin de run (jamais agrégés au point de masquer un cas) ---
+    n_steps: usize = 0,
+    /// G-D1 : ids où référence et implémentation ne s'accordent pas. Prédiction : 0.
+    n_topp_disagree: usize = 0,
+    /// Premier id en désaccord (−1 si aucun) : un refus se NOMME, il ne se compte pas seulement.
+    first_bad_id: i64 = -1,
+    /// G-D1, ANTÉCÉDENT : steps où top-p a retranché ≥ 1 id APRÈS top-k. À 0, gate passé À VIDE.
+    n_steps_with_cut: usize = 0,
+    n_cut_total: usize = 0,
+    /// Zone où f32 et f64 peuvent légitimement trancher différemment — publiée, pas absorbée.
+    n_boundary_tight: usize = 0,
+    n_boundary_ties: usize = 0,
+    /// G-D2, non-vacuité : steps où `applyTemperature` a réellement été exécuté sur GPU.
+    n_temp_applied: usize = 0,
+    /// G-D2, mutant (a) : logits où `x / t` diffère de `x * (1/t)`. À 0, le mutant ne mord pas.
+    n_temp_mul_diffs: usize = 0,
+    /// G-D2, mutant (b) : ids où l'ordre muté `TopK → TopP → Temp` change les survivants.
+    n_order_diffs: usize = 0,
+    n_steps_with_order_diff: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, vocab: usize) !GateD1D2 {
+        return .{
+            .idx = try allocator.alloc(u32, vocab),
+            .prob = try allocator.alloc(f64, vocab),
+            .keep = try allocator.alloc(bool, vocab),
+            .keep_impl = try allocator.alloc(bool, vocab),
+            .mut = try allocator.alloc(f32, vocab),
+            .pre_temp = try allocator.alloc(f32, vocab),
+        };
+    }
+
+    pub fn deinit(self: *GateD1D2, allocator: std.mem.Allocator) void {
+        allocator.free(self.idx);
+        allocator.free(self.prob);
+        allocator.free(self.keep);
+        allocator.free(self.keep_impl);
+        allocator.free(self.mut);
+        allocator.free(self.pre_temp);
+        self.* = undefined;
+    }
+};
+
 /// Configuration de sampling, passée **PAR POINTEUR** aux 3 sites d'appel de `generateOnce`
 /// (`gencfg.GenCfg` a le même traitement) : la fonction a déjà 20 paramètres positionnels, et un
 /// oubli sur l'un des trois sites rendrait la fonctionnalité silencieusement inopérante en
@@ -65,6 +126,10 @@ pub const SamplingCfg = struct {
     n_steps_compared: usize = 0,
     n_disagree: usize = 0,
     n_exact_top_ties: usize = 0,
+
+    /// Gate D1/D2 — armé par `--gate-d1d2` SEULEMENT. Hors gate, `null` : le chemin de décision
+    /// est strictement celui d'avant, aucune ligne de plus dans la boucle.
+    gate: ?*GateD1D2 = null,
 
     // D10 (DA-3) : nombre de shards de r_logits, capté au 1er step (r_logits est deinit
     // par step — la valeur doit être lue DANS la boucle), publié dans ALLOC-TOTAL.

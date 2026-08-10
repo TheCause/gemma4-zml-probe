@@ -1,0 +1,29 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: T=1 top_k=64 top_p=0.95 min_keep=1 seed=null (chemin complet ARMÉ ; tirage OFF (argmax))
+info: GATE-D1D2: armé — applyTopP comparé à une référence descendante f64, mutants température (division, ordre de chaîne) actifs
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: PIN: ON (work 1 MiB dma-mappé)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2642224 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.581s
+info: [mem] post-compile (go/no-go): RSS=3319384 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 37 steps de prefill, puis génération (limite 350 = max_tokens)
+info:   ... step 256 (219 générés)
+info: GENCFG: suppress a mordu 0 fois sur 350 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=386
+info: ALLOC-TOTAL: alloc=763 free=716 bytes=964857656 shards=1
+info: S2-PONT: steps_comparés=386 désaccords=0 égalités_exactes=0 (chemin B armé)
+info: M-COUT: bloc chemin B — moyenne 1636.3 µs/step (D2H seul 435.9 µs, warpers 1186.6 µs), max 3803.8 µs, sur 386 steps (MESURE PUBLIÉE, pas un gate)
+warning: M-COUT ci-dessus : NON COMPARABLE aux mesures M-COUT publiées — le pont --gate-d1d2 travaille dans la fenêtre chronométrée. Ne pas le citer comme coût des warpers.
+info: G-D1: steps=386 désaccords=0 1er_id_en_désaccord=-1 | ANTÉCÉDENT steps_avec_coupe=386 ids_coupés=23267 | frontière_serrée=0 ex_æquo_frontière=0
+info: G-D2: temp_appliquée=0 steps | mutant_a_division_vs_mul=0 logits | mutant_b_ordre=0 ids sur 0 steps
+info: PERF : prefill 37 steps en 3.941s (9.4 tok/s) ; génération 350 tokens en 36.659s (9.5 tok/s)
+info: RSS-DELTA: 252 KiB (t20=4000420 t200=4000672)
+info: mode libre : 350 tokens générés (EOT_ID=106, max_tokens=350)
+info: generated = { 236865, 669, 36468, 529, 37484, 236787, 562, 10358, 529, 51581, 699, 167139, 531, 48059, 108, 818, 4083, 529, 20124, 563, 711, 14778, 496, 170761, 529, 11442, 12512, 236793, 625, 563, 496, 27725, 22323, 529, 3246, 101250, 69912, 531, 8398, 969, 506, 1657, 529, 3305, 236761, 1030, 563, 506, 3925, 529, 1217, 27069, 8683, 531, 17866, 506, 7628, 13179, 529, 29282, 1131, 5663, 5776, 236764, 532, 10734, 236764, 1131, 506, 37226, 529, 16763, 236761, 1174, 9338, 55462, 24744, 236764, 6049, 699, 506, 99255, 21679, 529, 7116, 48181, 531, 506, 24782, 236764, 35275, 236772, 8970, 8487, 529, 47124, 529, 106255, 580, 496, 3161, 30746, 20684, 236761, 108, 10354, 669, 42344, 529, 167139, 236787, 44813, 90530, 107, 12059, 1680, 14855, 3847, 496, 7860, 573, 14988, 236764, 14464, 15023, 531, 62530, 40442, 531, 6439, 506, 5416, 529, 3246, 3165, 236761, 669, 29435, 41903, 529, 506, 5194, 964, 12974, 156909, 236761, 799, 506, 236743, 236770, 236832, 594, 7691, 236764, 125849, 1133, 85494, 1117, 57884, 532, 228731, 70578, 135144, 5535, 12512, 600, 1456, 496, 1458, 529, 48181, 532, 19524, 531, 2121, 2517, 532, 69878, 236761, 57884, 236858, 236751, 808, 161459, 688, 236829, 568, 236770, 236825, 236812, 236778, 236768, 691, 496, 43405, 529, 1061, 990, 236764, 1699, 496, 6081, 10241, 3361, 531, 614, 223063, 236761, 108, 9675, 236764, 506, 1847, 42681, 8797, 2870, 236772, 48009, 20124, 3588, 528, 506, 236743, 236770, 236819, 594, 7691, 236761, 11791, 603, 129113, 236764, 3187, 2760, 506, 623, 23341, 529, 506, 5194, 2098, 28050, 1662, 506, 78785, 7850, 528, 506, 236743, 236770, 236828, 236800, 236771, 236751, 236761, 5978, 2752, 6340, 7723, 528, 914, 19418, 2779, 531, 11213, 532, 10630, 16305, 236764, 506, 78785, 7850, 691, 38472, 1547, 625, 8314, 506, 11001, 6237, 529, 496, 4532, 5194, 236787, 614, 40442, 13179, 4360, 568, 1437, 623, 13795, 3959, 6571, 568, 1437, 623, 6457, 3959, 532, 506, 5596, 531, 577, 60226, 4323, 89000, 8651, 236761, 22211, 16195, 603, 129113, 236764, 45158, 37937, 217262, 5452, 506, 1171, 71123, 236764, 48857, 600, 768, 496, 5464, 1451, 52266, 4945, 236764, 625, 1451, 992, 52266, 16271, 236764, 14846, 7107, 4252, 653, 1610, 236761, 108, 10354, 669, 64992, 111444, 236787 }
+info: arrêt : max-tokens (350)
