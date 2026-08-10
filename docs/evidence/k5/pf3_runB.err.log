@@ -1,0 +1,89 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: K5: tour 1 clos par { 106, 107 } (fed_next=506 n'est PAS un EOS)
+info: K5: prefill partiel — contexte 1004 ids + fed_next + clôture 2 + tour2 26 ids = 1033 total
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2633016 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.444s
+info: [mem] post-compile (go/no-go): RSS=3311628 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: KVLOAD: /data/gemma4-zml-probe/k5/pf3.kvdump l_max=1280 step_next=1004 fed_next=506 ids=1004 (reprise sans prefill)
+info: KVLOAD: contexte de 1004 tokens (non réaffiché)
+info: Boucle autonome : 1033 steps de prefill, puis génération (limite 32 = max_tokens)
+info:   top5 @ ctx=1004 : idx={ 7593, 15707, 9628, 3718, 26846 } val={ 25.49451, 13.770175, 12.066858, 11.960719, 11.852257 }
+info:   top5 @ ctx=1005 : idx={ 7593, 26846, 15707, 5213, 1390 } val={ 27.250746, 23.448101, 22.219275, 22.199095, 21.416153 }
+info:   top5 @ ctx=1006 : idx={ 100, 26846, 1018, 236820, 1390 } val={ 23.803007, 22.42796, 20.827072, 20.287426, 20.013157 }
+info:   top5 @ ctx=1007 : idx={ 45518, 26846, 236829, 236761, 1018 } val={ 21.56371, 18.625769, 18.609795, 18.070242, 17.895365 }
+info:   top5 @ ctx=1008 : idx={ 107, 236908, 7411, 4060, 108 } val={ 24.18622, 18.236462, 18.231625, 18.177914, 17.92722 }
+info:   top5 @ ctx=1009 : idx={ 100, 45518, 101, 236829, 1018 } val={ 26.38081, 21.734816, 21.178814, 19.90498, 18.71791 }
+info:   top5 @ ctx=1010 : idx={ 506, 496, 1144, 822, 1041 } val={ 27.211668, 23.856928, 23.12073, 23.087954, 21.904074 }
+info:   top5 @ ctx=1011 : idx={ 1927, 63937, 8351, 9228, 2978 } val={ 24.922894, 24.190321, 23.446709, 23.326717, 23.176018 }
+info:   top5 @ ctx=1012 : idx={ 531, 236761, 529, 657, 532 } val={ 26.955887, 26.12926, 23.418901, 23.102058, 22.984499 }
+info:   top5 @ ctx=1013 : idx={ 822, 506, 1041, 672, 1023 } val={ 27.359867, 27.163166, 25.27942, 20.629534, 20.165014 }
+info:   top5 @ ctx=1014 : idx={ 2033, 63937, 3155, 19698, 62073 } val={ 26.695332, 26.572433, 23.452219, 19.131792, 18.99469 }
+info:   top5 @ ctx=1015 : idx={ 236761, 532, 236764, 106, 107 } val={ 27.858412, 23.539576, 22.7553, 20.57176, 20.348656 }
+info:   top5 @ ctx=1016 : idx={ 506, 532, 26509, 107, 1061 } val={ 25.574059, 24.24792, 22.586756, 20.603077, 20.537619 }
+info:   top5 @ ctx=1017 : idx={ 1144, 506, 3442, 1217, 1015 } val={ 27.337038, 26.92602, 25.641619, 25.224602, 23.023869 }
+info:   top5 @ ctx=1018 : idx={ 786, 775, 611, 5869, 506 } val={ 27.187834, 21.643736, 20.90726, 19.722984, 19.540628 }
+info:   top5 @ ctx=1019 : idx={ 529, 3217, 1144, 1015, 1217 } val={ 27.691135, 25.666561, 25.37493, 22.867193, 21.492588 }
+info:   top5 @ ctx=1020 : idx={ 506, 1144, 3217, 1015, 822 } val={ 27.502234, 26.991081, 26.14724, 24.589195, 24.45642 }
+info:   top5 @ ctx=1021 : idx={ 5708, 11133, 3853, 1463, 6376 } val={ 24.925976, 24.024233, 23.984152, 23.875736, 23.596895 }
+info:   top5 @ ctx=1022 : idx={ 236761, 236764, 532, 618, 3622 } val={ 28.38222, 25.177368, 24.789686, 23.409061, 22.874754 }
+info:   top5 @ ctx=1023 : idx={ 108, 107, 106, 236743, 109 } val={ 24.760895, 24.626398, 22.576431, 22.042606, 18.448978 }
+info:   ... step 1024 (0 générés)
+info:   top5 @ ctx=1024 : idx={ 108, 45518, 107, 236829, 138 } val={ 19.369726, 16.52413, 16.019226, 15.675194, 14.286186 }
+info:   top5 @ ctx=1025 : idx={ 100, 45518, 101, 106, 236829 } val={ 19.317266, 16.977894, 16.039227, 14.524693, 14.344162 }
+info:   top5 @ ctx=1026 : idx={ 45518, 107, 594, 3305, 100 } val={ 20.146296, 18.143408, 13.352916, 13.029883, 12.705086 }
+info:   top5 @ ctx=1027 : idx={ 107, 45518, 108, 100, 236761 } val={ 20.867208, 17.022213, 16.212362, 14.767735, 13.936771 }
+info:   top5 @ ctx=1028 : idx={ 100, 236820, 818, 7243, 236783 } val={ 28.46988, 15.9880905, 14.987975, 14.56344, 14.202952 }
+info:   top5 @ ctx=1029 : idx={ 45518, 3305, 44027, 107, 235950 } val={ 26.181427, 15.646523, 15.164462, 12.613001, 12.206118 }
+info:   top5 @ ctx=1030 : idx={ 107, 594, 2506, 1275, 1269 } val={ 26.00787, 12.558468, 11.027424, 10.957389, 10.811153 }
+info:   top5 @ ctx=1031 : idx={ 101, 2061, 236820, 238302, 1251 } val={ 27.686123, 13.65534, 13.403097, 13.35127, 13.244052 }
+info:   top5 @ gen=0 : idx={ 818, 2021, 3834, 17574, 13286 } val={ 27.358099, 25.78524, 22.28123, 21.943508, 20.176495 } rank_used=0 chosen=818
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 3.631s
+info:   top5 @ gen=1 : idx={ 5232, 7274, 16825, 3645, 1595 } val={ 25.251883, 17.955168, 17.440632, 15.898737, 14.316239 } rank_used=0 chosen=5232
+info:   top5 @ gen=2 : idx={ 531, 563, 529, 657, 1677 } val={ 27.005629, 23.781002, 22.910044, 19.00538, 18.542099 } rank_used=0 chosen=531
+info:   top5 @ gen=3 : idx={ 822, 506, 1041, 1023, 26509 } val={ 27.44565, 18.699118, 17.011383, 15.464929, 14.95536 } rank_used=0 chosen=822
+info:   top5 @ gen=4 : idx={ 2033, 62073, 1902, 63937, 1972 } val={ 25.688124, 22.98428, 19.069847, 18.520353, 16.288956 } rank_used=0 chosen=2033
+info:   top5 @ gen=5 : idx={ 563, 1677, 237028, 11979, 236764 } val={ 25.85167, 23.984472, 18.141674, 17.684235, 17.357822 } rank_used=0 chosen=563
+info:   top5 @ gen=6 : idx={ 711, 506, 496, 21304, 7274 } val={ 25.290047, 22.60755, 20.733204, 19.506811, 17.090248 } rank_used=0 chosen=711
+info:   top5 @ gen=7 : idx={ 496, 614, 1133, 506, 2613 } val={ 26.155514, 23.567833, 21.030787, 20.590414, 20.103563 } rank_used=0 chosen=496
+info:   top5 @ gen=8 : idx={ 5232, 33599, 3210, 1977, 3364 } val={ 21.943327, 19.748684, 19.002123, 18.075645, 17.838528 } rank_used=0 chosen=5232
+info:   top5 @ gen=9 : idx={ 529, 9655, 573, 600, 5402 } val={ 23.750137, 23.743952, 23.45634, 23.0518, 21.156197 } rank_used=0 chosen=529
+info:   top5 @ gen=10 : idx={ 33599, 12822, 8349, 25417, 21441 } val={ 19.1248, 18.79992, 18.702066, 18.61306, 18.145737 } rank_used=0 chosen=33599
+info:   top5 @ gen=11 : idx={ 41945, 232544, 45585, 13358, 37863 } val={ 22.897366, 20.431807, 19.605421, 19.382687, 19.203165 } rank_used=0 chosen=41945
+info:   top5 @ gen=12 : idx={ 236793, 236764, 653, 237028, 532 } val={ 27.920237, 27.329014, 26.298431, 24.701809, 24.23642 } rank_used=0 chosen=236793
+info:   top5 @ gen=13 : idx={ 625, 611, 573, 4319, 528 } val={ 27.5718, 16.00699, 15.755915, 15.276853, 15.270415 } rank_used=0 chosen=625
+info:   top5 @ gen=14 : idx={ 563, 1677, 19681, 691, 236789 } val={ 27.152634, 16.90491, 16.129944, 15.484537, 15.392982 } rank_used=0 chosen=563
+info:   top5 @ gen=15 : idx={ 496, 614, 506, 886, 711 } val={ 27.944777, 18.651058, 16.96343, 16.762897, 14.101175 } rank_used=0 chosen=496
+info:   top5 @ gen=16 : idx={ 5232, 13818, 22238, 20825, 7274 } val={ 24.520239, 18.421911, 17.971323, 17.138023, 17.02386 } rank_used=0 chosen=5232
+info:   top5 @ gen=17 : idx={ 529, 5284, 5402, 59308, 9655 } val={ 27.798397, 20.373507, 19.229286, 17.549522, 17.268656 } rank_used=0 chosen=529
+info:   top5 @ gen=18 : idx={ 52201, 137630, 203928, 7274, 8047 } val={ 19.883757, 19.33543, 16.81372, 16.753397, 16.670359 } rank_used=0 chosen=52201
+info:   top5 @ gen=19 : idx={ 236761, 236764, 532, 237028, 236793 } val={ 27.90876, 17.314354, 16.200073, 15.352412, 13.177916 } rank_used=0 chosen=236761
+info:   top5 @ gen=20 : idx={ 108, 236743, 1030, 138, 45941 } val={ 28.020252, 26.668457, 22.739809, 19.11278, 16.685165 } rank_used=0 chosen=108
+info:   top5 @ gen=21 : idx={ 1509, 63549, 52790, 154050, 119865 } val={ 26.252153, 22.326674, 20.418962, 20.160042, 20.087845 } rank_used=0 chosen=1509
+info:   top5 @ gen=22 : idx={ 563, 11979, 23378, 64260, 258883 } val={ 23.09256, 22.044844, 21.306252, 16.17121, 13.054671 } rank_used=0 chosen=563
+info:   top5 @ gen=23 : idx={ 496, 1603, 7274, 59308, 1076 } val={ 20.715927, 18.388224, 18.340904, 18.04669, 15.812195 } rank_used=0 chosen=496
+info:   top5 @ gen=24 : idx={ 12566, 7274, 47686, 258883, 7497 } val={ 21.852924, 21.338556, 15.399492, 15.309513, 15.000241 } rank_used=0 chosen=12566
+info:   top5 @ gen=25 : idx={ 236764, 47686, 3210, 6347, 10988 } val={ 24.557169, 22.913227, 19.210085, 16.709894, 16.694658 } rank_used=0 chosen=236764
+info:   top5 @ gen=26 : idx={ 7274, 138915, 3972, 43389, 47686 } val={ 20.670671, 19.123774, 17.307497, 16.763067, 16.358677 } rank_used=0 chosen=7274
+info:   top5 @ gen=27 : idx={ 47686, 3210, 152990, 234769, 36608 } val={ 24.545147, 21.322977, 19.8718, 18.37147, 17.904741 } rank_used=0 chosen=47686
+info:   top5 @ gen=28 : idx={ 529, 73587, 236772, 236800, 3463 } val={ 26.655596, 13.271808, 12.534315, 12.456082, 12.275934 } rank_used=0 chosen=529
+info:   top5 @ gen=29 : idx={ 8603, 93991, 172138, 174954, 56677 } val={ 18.307817, 17.388178, 15.823157, 15.747451, 15.64729 } rank_used=0 chosen=8603
+info:   top5 @ gen=30 : idx={ 236772, 5168, 10633, 236779, 1662 } val={ 25.690916, 22.156122, 18.138842, 14.94519, 14.621464 } rank_used=0 chosen=236772
+info:   top5 @ gen=31 : idx={ 10633, 30497, 1179, 164848, 47505 } val={ 19.954506, 16.50952, 16.077305, 15.9149475, 15.2595625 } rank_used=0 chosen=10633
+info: GENCFG: suppress a mordu 0 fois sur 32 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=1064
+info: ALLOC-TOTAL: alloc=762 free=721 bytes=954801352 shards=0
+info: PERF-RESUME : reprise @step=1004, 32 tokens générés en 6.332s (5.1 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=3992536 t200=null)
+info: --out-ids : 32 ids générés + ctx_ids 1033 écrits -> /data/gemma4-zml-probe/k5/pf3_outB.safetensors
+info: mode libre : 32 tokens générés (EOT_ID=106, max_tokens=32)
+info: generated = { 818, 5232, 531, 822, 2033, 563, 711, 496, 5232, 529, 33599, 41945, 236793, 625, 563, 496, 5232, 529, 52201, 236761, 108, 1509, 563, 496, 12566, 236764, 7274, 47686, 529, 8603, 236772, 10633 }
+info: arrêt : max-tokens (32)
+fa2284faba2f78a0aa59339ead04f5fd  ./bazel-bin/examples/rqz/gemma4_g12auto

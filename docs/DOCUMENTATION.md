@@ -249,7 +249,11 @@ vivaient jusqu'ici **et mouraient** avec le process. Depuis le 10 août, elles s
 gemma4_g12auto <ckpt> <tok.json> --prompt "..." --max-tokens 16 --dump-cache etat.kvdump
 # le reprendre — dans N'IMPORTE QUEL process ultérieur, sans re-prefill
 gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --max-tokens 32
-gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --oracle <fixture>   # teacher-forcé
+# décodage LIBRE comparé à une fixture APRÈS COUP (`fed = tok`, verdict A1 post-boucle) —
+# ce N'EST PAS du teacher-forcing : rien n'impose le token feedé, la 1re divergence avorte le run.
+gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --oracle <fixture>
+# K5 — PREFILL PARTIEL : reprendre le contexte ET feeder un prompt neuf (tour suivant)
+gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --prompt "tour 2" --max-tokens 32
 ```
 
 **Le format** : UN safetensors auto-décrivant — `sl_k`/`sl_v`/`fl_k`/`fl_v` (F32) + `ids_fed`

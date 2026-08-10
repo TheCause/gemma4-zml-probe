@@ -16,6 +16,9 @@ Sous-commandes :
                                   VALIDE : c'est le MORDANT qu'on teste, pas le checksum)
   set-meta <f> <out> <k> <v>      réécrit UNE clé de metadata (instruments DC5 b/d/f)
   mutate-shape <f> <out> <t>      +1 sur la 1re dim du tenseur t dans le header, data intacte
+  shift-fwd <src> <dst>           K5/PF2 : le dump MENT d'une position (step_next+1, ids_fed
+                                  étendu d'un id fantôme, caches INTACTS) — le manifest reste
+                                  cohérent, mais déclare un token que le cache ne porte pas
   make-fixture <n> <p0> <out>     fixture oracle de n ids (tuilage de u9_ids.safetensors) avec
                                   positions[0] == p0 (la garde du runner l'exige) ; écrit les
                                   DEUX clés lues par --oracle : `positions` et `fed`
@@ -185,6 +188,81 @@ def cmd_make_zeroed(a):
     return 0
 
 
+def cmd_shift_fwd(a):
+    """K5/PF2 — forge un dump qui MENT d'UNE position.
+
+    step_next+1, `ids_fed` étendu d'un id fantôme (fed_next recopié — un id valide par
+    construction), fed_next inchangé, checksum `ids_fed_xxh64` RECALCULÉ, les 4 caches
+    intacts avec leurs checksums d'origine. Le manifest reste donc COHÉRENT (l'invariant
+    ids_fed.len == step_next tient, tous les xxh64 concordent) : ce qu'il déclare, en
+    revanche, est un token que le cache ne porte PAS — la position step_next du cache est
+    restée aux zéros de l'allocation. C'est le mécanisme DC4 (cache zéroté) localisé à UNE
+    seule position, donc la corruption la plus fine qu'un bug de position produirait.
+
+    ⚠ shift-BACK (tronquer d'une position) a été analysé et REJETÉ à la spec (C-K5-B) :
+    l'état tronqué est AUTO-COHÉRENT — le run forgé réécrirait ce slot à l'identique, et son
+    mordant nul serait sain, donc ininterprétable comme gate.
+
+    `--n N` (défaut 1) : mentir de N positions. Ajouté APRÈS mesure — à N=1 la corruption
+    déplace bel et bien les 19 logits comparés (|Δ| jusqu'à 1,07) mais ne fait basculer AUCUN
+    argmax, les marges du scénario valant 3,70 en médiane. Le paramètre sert à établir la
+    SENSIBILITÉ du gate (à partir de combien de positions le mensonge devient visible en
+    argmax), pas à forcer un vert."""
+    _, hdr, base = read_header(a.src)
+    meta = hdr["__metadata__"]
+    ent = dict(entries(hdr))
+    if "ids_fed" not in ent:
+        raise SystemExit("ids_fed absent du dump — ce n'est pas un g12-kvdump-v1")
+    off0, off1 = ent["ids_fed"]["data_offsets"]
+    n_old = (off1 - off0) // 4
+    if n_old != int(meta["step_next"]):
+        raise SystemExit(f"invariant rompu AVANT mutation : ids_fed={n_old} != step_next={meta['step_next']}")
+    with open(a.src, "rb") as f:
+        f.seek(base + off0)
+        ids = np.frombuffer(f.read(off1 - off0), dtype=np.int32)
+    n_shift = getattr(a, "n", 1)
+    if n_shift < 1:
+        raise SystemExit("--n doit valoir au moins 1")
+    phantom = np.int32(int(meta["fed_next"]))
+    new_ids = np.append(ids, np.full(n_shift, phantom, dtype=np.int32))
+    new_blob = new_ids.tobytes()
+
+    # Offsets RECALCULÉS séquentiellement dans l'ordre du fichier : ids_fed est le dernier
+    # tenseur du format v1, mais un recalcul générique survit à un changement d'ordre.
+    cursor = 0
+    order = [k for k, _ in entries(hdr)]
+    for k in order:
+        length = len(new_blob) if k == "ids_fed" else (
+            hdr[k]["data_offsets"][1] - hdr[k]["data_offsets"][0])
+        hdr[k]["data_offsets"] = [cursor, cursor + length]
+        cursor += length
+    hdr["ids_fed"]["shape"] = [len(new_ids)]
+    meta["step_next"] = str(int(meta["step_next"]) + n_shift)
+    meta["ids_fed_xxh64"] = f"{xxhash.xxh64(new_blob).intdigest():x}"
+
+    def writer(fo):
+        with open(a.src, "rb") as fi:
+            for k in order:
+                if k == "ids_fed":
+                    fo.write(new_blob)
+                    continue
+                o0, o1 = ent[k]["data_offsets"]  # offsets d'ORIGINE pour la lecture
+                fi.seek(base + o0)
+                left = o1 - o0
+                while left:
+                    chunk = fi.read(min(BLOCK, left))
+                    if not chunk:
+                        raise SystemExit("lecture courte pendant la copie")
+                    fo.write(chunk)
+                    left -= len(chunk)
+
+    write_file(a.dst, hdr, writer)
+    print(f"shift-fwd : {a.src} -> {a.dst} step_next={meta['step_next']} "
+          f"ids_fed {n_old}->{len(new_ids)} phantom={int(phantom)} "
+          f"(caches INTACTS : la position {n_old} du cache reste aux zéros)")
+    return 0
+
+
 def cmd_set_meta(a):
     _, hdr, base = read_header(a.file)
     old = hdr["__metadata__"].get(a.key)
@@ -321,6 +399,12 @@ def main():
     s.add_argument("out")
     s.add_argument("tensor")
     s.set_defaults(fn=cmd_mutate_shape)
+
+    s = sub.add_parser("shift-fwd")
+    s.add_argument("src")
+    s.add_argument("dst")
+    s.add_argument("--n", type=int, default=1, help="mentir de N positions (défaut 1)")
+    s.set_defaults(fn=cmd_shift_fwd)
 
     s = sub.add_parser("verdict")
     s.add_argument("--log", required=True)

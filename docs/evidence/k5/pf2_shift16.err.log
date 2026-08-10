@@ -1,0 +1,55 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: K5: tour 1 clos par { 106, 107 } (fed_next=531 n'est PAS un EOS)
+info: K5: prefill partiel — contexte 65 ids + fed_next + clôture 2 + tour2 17 ids = 85 total
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2632828 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.537s
+info: [mem] post-compile (go/no-go): RSS=3310768 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: KVLOAD: /data/gemma4-zml-probe/k5/pf2_shift16.kvdump l_max=1280 step_next=65 fed_next=531 ids=65 (reprise sans prefill)
+info: KVLOAD: contexte de 65 tokens (non réaffiché)
+info: Boucle autonome : 85 steps de prefill, puis génération (limite 32 = max_tokens)
+info:   top5 @ ctx=65 : idx={ 611, 5181, 506, 577, 1724 } val={ 27.33165, 22.466597, 22.353498, 21.910105, 21.52287 }
+info:   top5 @ ctx=66 : idx={ 611, 506, 5181, 2246, 618 } val={ 26.912415, 23.835167, 23.565971, 23.15314, 22.696842 }
+info:   top5 @ ctx=67 : idx={ 818, 100, 7624, 1390, 1437 } val={ 24.910654, 24.311958, 24.28602, 24.11148, 23.386953 }
+info:   top5 @ ctx=68 : idx={ 45518, 236761, 236829, 611, 818 } val={ 21.254478, 17.467863, 17.093042, 15.90063, 15.6561165 }
+info:   top5 @ ctx=69 : idx={ 107, 236761, 108, 236768, 236787 } val={ 22.892872, 19.320055, 18.545452, 17.526014, 15.123972 }
+info:   top5 @ ctx=70 : idx={ 100, 101, 818, 236829, 2021 } val={ 28.091532, 21.20607, 20.650137, 19.843706, 19.28906 }
+info:   top5 @ ctx=71 : idx={ 563, 236789, 776, 691, 9439 } val={ 26.488312, 24.074312, 23.950544, 23.80524, 23.266962 }
+info:   top5 @ ctx=72 : idx={ 506, 625, 822, 1041, 496 } val={ 28.127851, 26.376755, 26.356396, 26.326843, 23.875607 }
+info:   top5 @ ctx=73 : idx={ 1463, 2033, 3155, 3925, 3195 } val={ 27.797827, 23.957478, 23.783222, 21.898447, 21.848627 }
+info:   top5 @ ctx=74 : idx={ 236881, 532, 1570, 236764, 563 } val={ 27.963097, 24.154434, 23.795444, 22.481483, 20.96388 }
+info:   top5 @ ctx=75 : idx={ 107, 106, 236743, 108, 100 } val={ 26.345142, 24.293718, 21.601107, 20.99428, 20.898052 }
+info:   top5 @ ctx=76 : idx={ 236829, 45518, 107, 106, 101 } val={ 18.933668, 18.020775, 17.85851, 14.964851, 14.8825655 }
+info:   top5 @ ctx=77 : idx={ 100, 236829, 45518, 106, 107 } val={ 18.72784, 17.208656, 16.963564, 15.137478, 13.905947 }
+info:   top5 @ ctx=78 : idx={ 45518, 107, 108, 236829, 44027 } val={ 22.468628, 16.617233, 15.021292, 14.430555, 13.153877 }
+info:   top5 @ ctx=79 : idx={ 45518, 100, 107, 101, 611 } val={ 19.529432, 16.576553, 16.279898, 13.25135, 12.831032 }
+info:   top5 @ ctx=80 : idx={ 100, 11069, 236813, 236783, 17993 } val={ 27.981169, 16.308413, 14.197705, 13.087838, 12.943741 }
+info:   top5 @ ctx=81 : idx={ 45518, 44027, 3305, 235950, 63405 } val={ 26.211082, 16.076149, 15.071544, 12.858417, 11.540413 }
+info:   top5 @ ctx=82 : idx={ 107, 236743, 236761, 236793, 236787 } val={ 27.234184, 14.480604, 14.010914, 13.372895, 12.445872 }
+info:   top5 @ ctx=83 : idx={ 101, 123979, 239102, 12498, 7216 } val={ 27.367523, 13.437461, 13.063579, 13.052312, 13.022233 }
+info:   top5 @ gen=0 : idx={ 11069, 100, 22515, 236770, 5180 } val={ 25.679632, 16.165457, 13.9229145, 13.6826515, 13.161858 } rank_used=0 chosen=11069
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 2.853s
+info:   top5 @ gen=1 : idx={ 1463, 73132, 8885, 237518, 7343 } val={ 25.099426, 10.260438, 9.792541, 9.400671, 9.371714 } rank_used=0 chosen=1463
+info:   top5 @ gen=2 : idx={ 563, 237026, 820, 2375, 4478 } val={ 26.264723, 15.345699, 15.107106, 12.8728485, 12.529114 } rank_used=0 chosen=563
+info:   top5 @ gen=3 : idx={ 26509, 5213, 69073, 52808, 22929 } val={ 27.699825, 18.925598, 17.701279, 15.135275, 14.345687 } rank_used=0 chosen=26509
+info:   top5 @ gen=4 : idx={ 1641, 2743, 952, 116550, 1073 } val={ 25.996044, 15.791735, 15.049377, 13.959482, 13.773002 } rank_used=0 chosen=1641
+info:   top5 @ gen=5 : idx={ 7867, 40630, 8111, 516, 112424 } val={ 24.288269, 16.366207, 15.346396, 13.873344, 12.963225 } rank_used=0 chosen=7867
+info:   top5 @ gen=6 : idx={ 236761, 236764, 532, 236779, 236793 } val={ 27.943617, 19.274319, 16.571224, 15.119701, 13.64827 } rank_used=0 chosen=236761
+info:   top5 @ gen=7 : idx={ 106, 236779, 1599, 8945, 236771 } val={ 28.012838, 17.641417, 16.82054, 15.229361, 15.028911 } rank_used=0 chosen=106
+info: GENCFG: suppress a mordu 0 fois sur 8 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=92
+info: ALLOC-TOTAL: alloc=762 free=721 bytes=954788128 shards=0
+info: PERF-RESUME : reprise @step=65, 8 tokens générés en 2.867s (2.8 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 8 tokens générés (EOT_ID=106, max_tokens=32)
+info: generated = { 11069, 1463, 563, 26509, 1641, 7867, 236761, 106 }
+info: arrêt : early-stop EOS id=106 (eos={ 1, 106, 50 }, any-of sans priorité)
+info: A3 : stop early-EOS après 8 tokens (dernier = 106 ; EOT_ID mesuré = 106)
+fa2284faba2f78a0aa59339ead04f5fd  ./bazel-bin/examples/rqz/gemma4_g12auto

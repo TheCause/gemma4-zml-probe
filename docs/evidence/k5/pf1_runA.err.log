@@ -1,0 +1,39 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2632980 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.334s
+info: [mem] post-compile (go/no-go): RSS=3310732 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 34 steps de prefill, puis génération (limite 16 = max_tokens)
+info:   top5 @ gen=0 : idx={ 818, 2021, 902, 13238, 7634 } val={ 26.090399, 24.331154, 22.47184, 20.822248, 19.571438 } rank_used=0 chosen=818
+info:   top5 @ gen=1 : idx={ 30992, 62998, 9744, 10465, 63937 } val={ 26.10504, 22.397799, 20.563831, 20.304827, 19.822046 } rank_used=0 chosen=30992
+info:   top5 @ gen=2 : idx={ 580, 528, 2246, 529, 9139 } val={ 24.55818, 21.935863, 18.1593, 16.811756, 14.158984 } rank_used=0 chosen=580
+info:   top5 @ gen=3 : idx={ 506, 53685, 2601, 161686, 20015 } val={ 23.29052, 12.859248, 12.551654, 12.396719, 11.958498 } rank_used=0 chosen=506
+info:   top5 @ gen=4 : idx={ 53685, 9383, 82103, 44451, 26550 } val={ 24.409063, 17.632547, 14.5817175, 14.392776, 13.9874735 } rank_used=0 chosen=53685
+info:   top5 @ gen=5 : idx={ 2246, 1537, 8988, 4029, 2760 } val={ 22.534576, 18.463697, 17.021215, 16.700806, 15.842144 } rank_used=0 chosen=2246
+info:   top5 @ gen=6 : idx={ 625, 822, 611, 506, 1091 } val={ 27.654345, 22.426153, 21.860088, 21.715004, 17.524889 } rank_used=0 chosen=625
+info:   top5 @ gen=7 : idx={ 808, 623, 5213, 506, 999 } val={ 25.511412, 24.292389, 22.65255, 21.174479, 18.458046 } rank_used=0 chosen=808
+info:   top5 @ gen=8 : idx={ 818, 1437, 21221, 3258, 669 } val={ 25.50309, 17.248476, 16.115337, 15.56431, 15.449789 } rank_used=0 chosen=818
+info:   top5 @ gen=9 : idx={ 154649, 208557, 111666, 2177, 34466 } val={ 22.322882, 19.346153, 19.341286, 18.766039, 17.973837 } rank_used=0 chosen=154649
+info:   top5 @ gen=10 : idx={ 529, 236858, 30237, 236789, 528 } val={ 24.630102, 24.58684, 23.799578, 19.976112, 18.856241 } rank_used=0 chosen=529
+info:   top5 @ gen=11 : idx={ 506, 5718, 562, 25171, 28501 } val={ 22.821302, 20.288446, 20.215355, 18.497936, 17.857733 } rank_used=0 chosen=506
+info:   top5 @ gen=12 : idx={ 4695, 61177, 32709, 76217, 25393 } val={ 19.470104, 18.996925, 18.497044, 17.041922, 16.951393 } rank_used=0 chosen=4695
+info:   top5 @ gen=13 : idx={ 30237, 76030, 22429, 236829, 9603 } val={ 25.983835, 19.164202, 19.0873, 17.725842, 16.938478 } rank_used=0 chosen=30237
+info:   top5 @ gen=14 : idx={ 840, 496, 3635, 532, 653 } val={ 27.690125, 22.503489, 20.100605, 18.461294, 15.662043 } rank_used=0 chosen=840
+info:   top5 @ gen=15 : idx={ 531, 611, 573, 528, 1056 } val={ 27.884254, 25.747643, 22.084127, 20.803179, 20.379395 } rank_used=0 chosen=531
+info: KVDUMP: /data/gemma4-zml-probe/k5/pf1.kvdump l_max=1280 step_next=49 fed_next=531 ids=49 octets=880804036 xxh64_ok
+info: GENCFG: suppress a mordu 0 fois sur 16 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=49
+info: ALLOC-TOTAL: alloc=801 free=765 bytes=954771617 shards=1
+info: PERF : prefill 34 steps en 3.626s (9.4 tok/s) ; génération 16 tokens en 1.549s (10.3 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 16 tokens générés (EOT_ID=106, max_tokens=16)
+info: generated = { 818, 30992, 580, 506, 53685, 2246, 625, 808, 818, 154649, 529, 506, 4695, 30237, 840, 531 }
+info: arrêt : max-tokens (16)
+8086120c88d951088a135a5761d4a2fa  ./bazel-bin/examples/rqz/gemma4_g12auto

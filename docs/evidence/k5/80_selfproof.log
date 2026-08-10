@@ -1,0 +1,34 @@
+=== 80_selfproof — le juge PF1 doit être VU condamner ===
+--- (0) nominal : PASS attendu ---
+step_next=49 C=69 n_ctx=19 (oracle 19) gen=8
+PF1 : PASS — aucun mismatch
+exit=0 -> ATTENDU
+--- (a) idx de tête d'une ligne ctx altéré (563 -> 999999) : MISMATCH ctx attendu ---
+step_next=49 C=69 n_ctx=19 (oracle 19) gen=8
+MISMATCH: ctx[6] p_run=55 p_hf=55 zml=999999 hf=563 margin=1.798599
+PF1 : FAIL
+exit=1 -> ATTENDU
+--- (b) une ligne ctx supprimée : n_ctx FAIL attendu ---
+step_next=49 C=69 n_ctx=18 (oracle 19) gen=8
+MISMATCH: n_ctx runner=18 != oracle=19 margin=999.0
+MISMATCH: ctx[11] p_run=61 p_hf=60 zml=100 hf=107 margin=1.557350
+MISMATCH: ctx[12] p_run=62 p_hf=61 zml=45518 hf=100 margin=3.700659
+MISMATCH: ctx[14] p_run=64 p_hf=63 zml=100 hf=45518 margin=1.771475
+MISMATCH: ctx[15] p_run=65 p_hf=64 zml=45518 hf=100 margin=10.105213
+MISMATCH: ctx[16] p_run=66 p_hf=65 zml=107 hf=45518 margin=9.990007
+MISMATCH: ctx[17] p_run=67 p_hf=66 zml=101 hf=107 margin=13.932848
+PF1 : FAIL
+exit=1 -> ATTENDU
+--- (c) 1er id de generated altéré : MISMATCH gen[0] attendu ---
+step_next=49 C=69 n_ctx=19 (oracle 19) gen=8
+MISMATCH: gen[0] zml=999999 hf=11069 margin=7.511715
+PF1 : FAIL
+exit=1 -> ATTENDU
+--- (d) toutes les lignes ctx retirées : refus bruyant attendu ---
+DEPOUILLEMENT IMPOSSIBLE : aucune ligne 'top5 @ ctx=' — le prefill de reprise n'a rien émis (--dump-top5 oublié ?), un PASS ici serait VIDE
+exit=1 -> ATTENDU
+--- (e) bannière BUILD retirée : INEXECUTABLE attendu ---
+DEPOUILLEMENT IMPOSSIBLE : BUILD: mode= absent du log — jamais un zéro, jamais un PASS
+exit=1 -> ATTENDU
+
+BILAN : 6/6 cas conformes

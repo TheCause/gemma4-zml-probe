@@ -1,0 +1,18 @@
+=== 82_selfproof — le vérificateur d'ensemble doit être VU condamner ===
+
+--- (a) md5 HLO d'après altéré : PF0 doit FAIL ---
+❌ FAIL  PF0  graphe intact               AssertionError: md5 APRÈS deadbeefdeadbeefdeadbeefdeadbeef != témoin de référence 297679847aa04b719942d75d093adf2b
+VERDICT : ÉCHEC — au moins un gate ne tient plus
+
+--- (b) une preuve SUPPRIMÉE : refus bruyant, jamais un gate sauté ---
+❌ FAIL  PF4  refus bruyants              FileNotFoundError: preuve absente : docs/evidence/k5/pf4_refus.log
+VERDICT : ÉCHEC — au moins un gate ne tient plus
+
+--- (c) une ligne K5: injectée dans la reprise SIMPLE : PF5 doit FAIL ---
+❌ FAIL  PF5  non-régression              AssertionError: reprise simple : 1 ligne(s) K5: — le chemin s'arme sans prompt !
+VERDICT : ÉCHEC — au moins un gate ne tient plus
+
+--- (0) restauration : tout doit repasser au vert ---
+==============================================================================
+VERDICT : les 7 gates tiennent sur les preuves versionnées
+Rejouer les runs eux-mêmes (GPU + M4) : docs/K5_RESULTS.md §9

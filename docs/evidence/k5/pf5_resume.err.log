@@ -1,0 +1,26 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2633092 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.507s
+info: [mem] post-compile (go/no-go): RSS=3310300 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: KVLOAD: /data/gemma4-zml-probe/k5/pf5_eq_1280.kvdump l_max=1280 step_next=35 fed_next=16283 ids=35 (reprise sans prefill)
+info: KVLOAD: contexte de 35 tokens (non réaffiché)
+info: Boucle autonome : 35 steps de prefill, puis génération (limite 8 = max_tokens)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 1.005s
+info: GENCFG: suppress a mordu 0 fois sur 8 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=43
+info: ALLOC-TOTAL: alloc=757 free=716 bytes=954784912 shards=0
+info: PERF-RESUME : reprise @step=35, 8 tokens générés en 0.901s (8.9 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: --out-ids : 8 ids écrits -> /data/gemma4-zml-probe/k5/pf5_resume_ids.safetensors
+info: mode libre : 8 tokens générés (EOT_ID=106, max_tokens=8)
+info: generated = { 3223, 9637, 125546, 5213, 219274, 19389, 125546, 532 }
+info: arrêt : max-tokens (8)
+fa2284faba2f78a0aa59339ead04f5fd  ./bazel-bin/examples/rqz/gemma4_g12auto
