@@ -1,0 +1,15 @@
+=== 79_selfproof — le juge PF6 doit être VU condamner (feedback_invariant_tue_le_controle) ===
+--- (0) nominal : PASS attendu ---
+PF6 PASS — 17 ids identiques
+  (frontière : closure_tail_ids=[106, 107] appartient à l'injection D-K5-5)
+exit=0
+--- (a) un id du milieu altéré (1463 -> 1464) : FAIL attendu ---
+PF6 FAIL — 1er écart à l'index 6 : zig=[1464, 236881, 106, 107] hf=[1463, 236881, 106, 107] (len 17 vs 17)
+exit=1
+--- (b) id de tête 107 ajouté (le piège du gabarit planifié) : FAIL + DIAGNOSTIC attendu ---
+PF6 FAIL — 1er écart à l'index 0 : zig=[107, 105, 2364, 107] hf=[105, 2364, 107, 3689] (len 18 vs 17)
+  DIAGNOSTIC : l'id de tête 107 appartient à closure_tail_ids=[106, 107] — c'est l'INJECTION de clôture qui est mal placée, PAS le littéral du tour 2. Ne pas retrancher l'id du littéral.
+exit=1
+--- (c) bannière de build retirée : INEXECUTABLE attendu, jamais un PASS ---
+DEPOUILLEMENT IMPOSSIBLE : 'BUILD: mode=' absent du log — jamais un PASS
+exit=1
