@@ -21,7 +21,7 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 text→text engine with long-context generation, bf16 fidelity, static batching, **4-bit weights** —
 and now running **Gemma 4 12B** (official QAT w4a16 checkpoint) on a single RTX 3090.
 
-> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights + 12B on a 24 GB GPU + resumable KV-cache.**
+> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights + 12B on a 24 GB GPU + resumable KV-cache + partial prefill (multi-turn).**
 > Prefill, logits, single-token decode and **1020-token** generation all reproduce HuggingFace
 > (token-exact in fp32; within the measured HF-bf16 envelope in bf16). The engine now runs
 > **standalone on GPU** (native tokenizer, chat template, EOS early-stop), carries a modular
@@ -233,8 +233,43 @@ What it costs: at 4k, reaching a 3 927-position state **by computing it** takes 
 restoring it takes **0.898 s** (2.62 GiB read included) — **×500**. What it proves: the
 continuation is **bit-identical (32/32)** to a reference within a process, and **32/32 with zero
 divergence** across processes. Deliberately *not* covered: PRNG state (so `--dump-cache` with an
-armed seed is refused), `--repl`, a fresh prompt on a restored cache, E2B. Figures, the 5
-pre-registered claims and the 8 debts: [`docs/KVDUMP_RESULTS.md`](docs/KVDUMP_RESULTS.md).
+armed seed is refused), `--repl`, E2B. Figures, the 5 pre-registered claims and the 8 debts:
+[`docs/KVDUMP_RESULTS.md`](docs/KVDUMP_RESULTS.md).
+*(“A fresh prompt on a restored cache” was listed here as out of scope until 10 Aug 2026 — it is
+now the partial-prefill capability below.)*
+
+**Partial prefill (K5, 10 Aug 2026)** — resume a dumped cache **and feed a fresh prompt**: the
+conversation brick. The new prompt is absorbed as the **next turn** at positions `step_next…`,
+and generation continues:
+
+```bash
+# 1. turn 1: generate and dump
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tok.json> \
+  --prompt "My name is Aldebaran and I live in a lighthouse. Tell me a story about my home." \
+  --max-tokens 16 --dump-cache state.kvdump
+
+# 2. ANOTHER process: resume that context AND ask something new
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tok.json> \
+  --load-cache state.kvdump --prompt "What is my name?" --max-tokens 32
+#    K5: prefill partiel — contexte 49 ids + fed_next + clôture 2 + tour2 17 ids = 69 total
+#    réponse : "Your name is Aldebaran."          <- the name exists only in the restored cache
+
+--ids-only-turn2               # gate PF6: render turn 2 to ids, host-only, no GPU, no dump
+python3 scripts/82_k5_verify.py  # replay all 7 gates from the versioned evidence, no GPU
+```
+
+The whole thing is **host-side**: the graph never distinguished prefill from generation (position
+≡ `ctrl.step`, in-graph masks, RoPE table covering `L_MAX`), so the HLO is byte-identical — the
+same md5 as six chantiers ago. Correctness is proven **teacher-forced against HF fp32**, never in
+free decoding: **19/19** then **28/28** context positions match argmax-for-argmax, the latter with
+the **sliding window actually biting** (T = 1064 > 1024).
+
+What it costs: resuming a 1004-position context takes **9.9 s against 112 s of recompute (×11.3)**
+— and **3.5 s of that is re-reading the dump**, a fixed cost the ×35.6 *position* ratio hides.
+Both numbers are published together on purpose. What the gate does **not** catch, measured rather
+than assumed: a cache lying about its length by **one** position moves every compared logit yet
+flips no argmax — detection starts at **two**. Figures, the 6 pre-registered claims (one refuted
+then requalified) and the 5 debts: [`docs/K5_RESULTS.md`](docs/K5_RESULTS.md).
 
 **4-bit weights (W4)** — quantize E2B to w4a16, then decode it on GPU:
 

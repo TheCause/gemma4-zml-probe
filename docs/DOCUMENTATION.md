@@ -840,8 +840,10 @@ Verdicts, 5 claims jugées et 8 dettes : [`KVDUMP_RESULTS.md`](KVDUMP_RESULTS.md
   plus rapide que le re-calcul du préfixe.
   ⚠ **Ce qui n'est PAS couvert** (dettes K1-K8) : l'**état du PRNG n'est pas sérialisé** — dumper
   avec une seed armée est **refusé** plutôt qu'approximé (décision Régis) ; la variante **8k
-  compile le même code mais aucun gate ne l'exerce** (décision Régis) ; **E2B**, **`--repl`** et
-  la **reprise avec un prompt neuf** sont hors périmètre v1 ; le dump n'est **pas compressé**
+  compile le même code mais aucun gate ne l'exerce** (décision Régis) ; **E2B** et **`--repl`**
+  sont hors périmètre v1 — la **reprise avec un prompt neuf**, listée ici comme non couverte,
+  **l'est depuis le 10 août 2026** (K5, prefill partiel, `docs/K5_RESULTS.md`) ; le dump n'est
+  **pas compressé**
   (on ne dégrade pas un état exact pour du disque) ; et le **×500 a été mesuré sur une lecture à
   CHAUD** — à froid le gain resterait ≥ ×130, mais la mesure n'a pas été faite (`drop_caches`
   exige root sur la VM) : c'est une **dette de mesure déclarée**, pas un résultat.
