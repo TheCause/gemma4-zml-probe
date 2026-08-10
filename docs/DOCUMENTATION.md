@@ -363,7 +363,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `30`–`33`, `45`, `spike_hadq`, `measure_k_distribution`, `test_kv_quant_generation` | Piste **TurboQuant** (quantization V, Hadamard) |
 | `71` | **Politique de décodage** : producteur de la fixture du gate GC1 — calcule `expect_tok` avec le **vrai** `SuppressTokensLogitsProcessor` de transformers sur le vecteur complet (262 144 logits), plus le sidecar des cas de validation et de découverte. C'est ce qui rend la claim C2 falsifiable au lieu de postulée |
 | `74` | **Dump/restore du KV-cache** : inspection et **fabrication de mutants** d'un fichier `.kvdump` (`inspect`, `mutate-flip`, `make-zeroed`, `set-meta`, `mutate-shape`, `make-fixture`, `verdict`). Tout à **bas niveau** (struct + json + copie par blocs) : l'API haut niveau `safetensors` réordonne les clés et recalcule les offsets, ce qui détruirait précisément ce qu'un mutant doit conserver — un **manifest intact sur des données altérées**. C'est ce script qui rend DC4 (mordant) et DC5 (refus) exécutables |
-| `gc11_claim_scope.sh` | **Gate GC11** : vérifie que tout document vivant énonçant « == HF » porte la portée « argmax sur les logits bruts ». `--self-test` fournit la contre-preuve (un document nu, examiné seul, doit faire échouer le gate) |
+| `75` | **Couverture GPU des warpers (dettes D1/D2)** : dépouilleur des gates `G-D0`/`G-D1`/`G-D2` à partir des logs de run. Le binaire publie des compteurs **bruts** et ne rend aucun verdict — le juge est ici, avec les seuils **pré-enregistrés** de la spec. Ses propres contre-preuves (5 mutants injectés dans les logs réels) sont archivées dans `docs/evidence/d1d2/` |
+| `gc11_claim_scope.sh` | **Gate GC11** : vérifie que tout document vivant énonçant « == HF » porte la portée « argmax sur les logits bruts » **ou** son équivalent anglais « same argmax on the raw logits » (alternative bilingue du 10 août 2026, portée strictement constante — le README est passé à l'anglais intégral). `--self-test` fournit **3** contre-preuves : un document nu FR et un document nu EN doivent faire échouer le gate, un document EN correctement qualifié doit le faire passer (la question dans les deux sens) |
 | `smoke.sh` | Build-only des runners clés (toolchain OK sans weights ni RAM) |
 | `regen_fixtures.sh`, `sweep_perf.sh`, `g2_3_sweep.sh` | Régénération des fixtures ; sweep de perf (CHUNK) ; orchestration du sweep G2.3 (one-hot par famille) |
 
@@ -396,6 +397,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `g12.zig` | **Géométrie 12B** (`Geom.g12` : 48 couches, GQA/MQA hétérogène, p-RoPE, layer_scalar) — le moteur E2B reste le défaut, preuve HLO U1 |
 | `gemma4_g12gate.zig` | Gates unitaires 12B (U2→U7 : embed, sliding, full K=V, chaîne, prefill+softcap) |
 | `gemma4_g12auto.zig` | **Décode 12B autonome** deux-slices (48+40 v_proj), cache linéaire L_MAX=1280, fenêtre par masque ; flags `--dump-top5 --out-ids --window-vacuity --no-prealloc --oracle` |
+| `sampling_ref.zig` | **Référence indépendante des warpers** (gates G-D1/G-D2) — jamais appelée par le chemin qui décide un token. `applyTopP` y est confrontée à une implémentation écrite **autrement** : tri **descendant** + cumsum exclusive `< p` en **f64**, contre tri ascendant + `cum <= 1-p` en f32. Le f64 n'est pas un luxe : sommer dans l'autre sens ne donne pas le même f32, et une référence f32 aurait produit du bruit indistinguable d'un vrai désaccord |
 | `gemma4_bench.zig`, `mem_probe.zig` | Bench débit ; instrumentation mémoire (`VmRSS`/`VmSwap` — véhicule du gate `AL-RSS`) |
 | `build_3090.sh`, `deploy_to_3090.sh` | **Build canonique** (les DEUX flags de mode — cf. `MODE_BUILD_AUDIT.md`) ; déploiement rsync |
 
@@ -425,6 +427,9 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `U_12B_RESULTS.md` | **W4-J2 (12B sur la 3090)** : 11 gates, l'histoire épistémique de l'oracle fp32, findings |
 | `SESSION_2026-06-27_RAPPORT.md` | Rapport de la session « écrite sans compiler » + audit |
 | `KVDUMP_RESULTS.md` | **Dump/restore du KV-cache (12B)** : 8 gates, les 5 claims pré-enregistrées jugées, les 11 refus, le périmètre, 8 dettes, et ce que l'exécution a appris |
+| `SAMPLING_RESULTS.md` §7 | **Couverture GPU de `applyTopP`/`applyTemperature`** (10 août 2026) : gates G-D0/G-D1/G-D2, contre-preuves du dépouilleur, et **deux mutants « évidents » démontrés VACUS** avant codage (monotonie de la division) |
+| `evidence/d1d2/` | Preuves versionnées des gates D1/D2 : logs de run, md5 HLO témoin, verdict du dépouilleur, contre-preuves |
+| `evidence/gc11/` | AVANT/APRÈS du gate GC11 lors du passage du README à l'anglais (le FAIL est l'état attendu, archivé comme tel) |
 | `evidence/kvdump/` | **Preuves versionnées** du chantier kvdump (logs de gates, `dc2_ref.json`, md5 HLO) — `logs/` étant gitignoré, précédent D10 |
 
 ### 5.4 Checklist de clôture de chantier (à faire quand un chantier est mergé)

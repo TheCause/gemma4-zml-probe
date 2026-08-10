@@ -63,11 +63,28 @@ prouvé (`feedback_invariant_tue_le_controle`).
 | `ALLOC-LOOP` avec dump ou load | identique au run nu | identique aux trois runs | **0** |
 
 **⚠ Nuance honnête sur le 0,898 s de DC7(ii)** : le dump venait d'être écrit ~1 min plus tôt, donc
-la lecture des 2,62 GiB a très probablement bénéficié du **cache de pages** du système. Un restore
-« à froid » serait borné par le NVMe. Même dans une hypothèse pessimiste à 1 GiB/s (≈ 2,6 s de
-lecture, soit ~3,5 s au total), le gain resterait **≥ ×130** — la claim C-D (≥ ×30) tient très
-largement dans les deux régimes. La mesure à froid n'a pas été faite (elle exige `drop_caches`,
-donc root sur la VM) : c'est une **dette de mesure**, pas un résultat.
+la lecture des 2,62 GiB a bénéficié du **cache de pages** du système. Un restore « à froid » est
+borné par le disque.
+
+**MESURÉ le 10 août 2026 (dette K8 soldée) — et une requalification.** Prédiction pré-enregistrée
+puis mesure : `sync && drop_caches`, puis restore immédiat.
+
+| Régime | Restore | Gain sur les 448,527 s de re-calcul |
+|---|---|---|
+| **à froid** (cache vidé) | **10,823 s** | **×41,4** |
+| à chaud (contrôle du même run) | **0,892 s** | ×502,8 |
+
+- La claim **C-D (gain ≥ ×30) TIENT à froid** : ×41,4. Le ×500 reste vrai, mais **en régime
+  chaud** — les deux chiffres sont publiés côte à côte, aucun ne remplace l'autre.
+- ⚠ **Le « ≥ ×130 » qui figurait ici est REQUALIFIÉ.** Il reposait sur une hypothèse de 1 GiB/s ;
+  le disque de la VM lit à **~0,264 GiB/s**, soit ~4× moins. La prédiction pré-enregistrée
+  annonçait explicitement cette requalification si le restore dépassait 3,457 s
+  (`docs/evidence/kvdump/k8_prediction.md`) : elle est exécutée, pas défendue.
+- **Le contrôle à chaud a validé l'instrument** avant toute conclusion : 0,892 s contre 0,898 s à
+  DC7, soit **−0,67 %**. Sans lui, un chiffre à froid surprenant aurait pu venir d'une dérive de
+  l'instrument plutôt que du cache.
+
+Détail, limites et trace intégrale : `docs/evidence/kvdump/k8_cold_read.txt`.
 
 ## 4. Les 11 refus bruyants, tous VUS échouer
 
@@ -112,7 +129,7 @@ mais l'écart doit être visible.
 | K5 | **Reprise avec prompt neuf** hors périmètre v1 | C'est un prefill partiel : son propre chantier |
 | K6 | **Pas de compression** (f32 ; ~×2 possible en bf16) | On ne dégrade pas un état exact pour du disque |
 | K7 | Le refus « fichier tronqué » n'a **pas de message `log.err` propre** avant `KvDumpTruncated` | L'erreur reste nommée et sans crash (critère spec rempli) ; cosmétique |
-| K8 | **Le `0,898 s` de DC7(ii) est une lecture À CHAUD** (cache de pages) | La mesure à froid exige `drop_caches` (root sur la VM). Le gain resterait ≥ ×130 dans l'hypothèse pessimiste — la claim ne dépend pas de cette dette |
+| K8 | ~~Le `0,898 s` de DC7(ii) est une lecture À CHAUD~~ **SOLDÉE (10 août 2026)** | Mesuré : **10,823 s à froid ⇒ ×41,4**, contrôle à chaud 0,892 s (−0,67 % vs DC7 : instrument stable). La claim **C-D (≥ ×30) tient à froid**. ⚠ Le « ≥ ×130 » annoncé ici a été **requalifié** — la prédiction pré-enregistrée l'avait prévu. §3 et `evidence/kvdump/k8_cold_read.txt` |
 
 ## 7. Écarts au plan, assumés et déclarés
 
