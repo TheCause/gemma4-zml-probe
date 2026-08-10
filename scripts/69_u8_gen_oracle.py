@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import statistics
+import sys
 import time
 
 if os.path.isdir("/data"):
@@ -567,18 +568,174 @@ def mode_teacher_force(args, model, tok, tpl_sha, t_load, versions):
     print(f"rapport écrit : {args.out} ({n_match}/{N})", flush=True)
 
 
+def mode_context(args, model, tok, tpl_sha, t_load, versions):
+    """K5/PF1 — teacher-forcé À TRAVERS LA FRONTIÈRE d'une reprise de cache.
+
+    Différence unique avec --teacher-force : le contexte n'est PAS un prompt templaté mais la
+    séquence d'ids `ctx_ids` que le runner a réellement feedée (sous reprise, aucun --prompt ne
+    peut l'exprimer — elle contient le prompt du run A, ses tokens générés, fed_next, la clôture
+    injectée et le tour 2). Tout le reste est le mode teacher-force : UN prefill, tête manuelle
+    par chunks, self-check, témoin fenêtre, marges consignées AVANT tout verdict.
+
+    L'oracle PUBLIE, il ne juge pas : les DEUX canaux sont écrits pour chaque position, et c'est
+    le dépouilleur 80 qui choisit lequel confronter à quoi. Raison mesurée (dc4.err.log:16) : le
+    top-5 du runner est BRUT (in-graph), tandis que `generated` est POST-politique — à gen=0
+    d'une reprise réelle, l'argmax brut 258882 était supprimé et le choisi valait 4509. Un canal
+    unique produirait un FAIL gras purement spurieux."""
+    proc, gen_policy = build_gen_policy(model, args.no_gen_policy)
+    print(f"GENPOLICY: {gen_policy}", flush=True)
+    with safe_open(args.context_ids, framework="pt") as f:
+        keys = set(f.keys())
+        assert {"ids", "ctx_ids"} <= keys, \
+            f"--context-ids : clés {sorted(keys)} — 'ids' ET 'ctx_ids' requises (runner K5 --out-ids sous reprise AVEC prompt)"
+        ctx = f.get_tensor("ctx_ids").to(torch.long)
+        gen = f.get_tensor("ids").to(torch.long)
+    C, m = int(ctx.shape[0]), int(gen.shape[0])
+    assert m >= 2, f"ids fixture suspecte : m={m}"
+    assert args.ctx_from is not None and 0 < args.ctx_from < C, \
+        f"--ctx-from (step_next) requis et < len(ctx_ids)={C} (reçu {args.ctx_from})"
+
+    # position p prédit full[p+1] ; la dernière (p = T-1) prédit gen[-1], qui n'est pas dans full.
+    full = torch.cat([ctx, gen[:-1]]).unsqueeze(0)
+    T = int(full.shape[1])
+    print(f"context : C={C} ids de contexte, m={m} générés, prefill de T={T} positions ; "
+          f"rapport à partir de p={args.ctx_from}", flush=True)
+
+    compute_dtype = "bfloat16"
+    if args.compute_fp32:
+        n_hooked = install_fp32_hooks(model.model, extra=(model.lm_head,))
+        compute_dtype = "float32"
+        print(f"calcul fp32 armé : {n_hooked} sous-modules hookés dont lm_head", flush=True)
+
+    # --- témoin fenêtre (identique au mode teacher-force) : à T > sliding_window le masque
+    # sliding doit DIFFÉRER du causal, sinon PF3 serait INEXÉCUTABLE (pas PASS).
+    cfg_t = model.config.get_text_config()
+    sw = int(cfg_t.sliding_window)
+    window_bites = None
+    if T > sw:
+        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+        import copy
+        cfg_mask = copy.deepcopy(cfg_t)
+        cfg_mask._attn_implementation = "eager"
+        dummy = torch.zeros(1, T, cfg_t.hidden_size, dtype=torch.float32)
+        pos = torch.arange(T, dtype=torch.long).unsqueeze(0)
+        mask_kw = dict(config=cfg_mask, inputs_embeds=dummy, attention_mask=None,
+                       past_key_values=None, position_ids=pos)
+        window_bites = not torch.equal(create_sliding_window_causal_mask(**mask_kw),
+                                       create_causal_mask(**mask_kw))
+        assert window_bites, f"T={T} > fenêtre {sw} mais masque sliding == causal"
+        print(f"témoin fenêtre : masque sliding != causal à T={T} (fenêtre {sw} mordante)", flush=True)
+
+    t1 = time.monotonic()
+    with torch.no_grad():
+        hs = model.model(input_ids=full, use_cache=False).last_hidden_state
+    t_fwd = time.monotonic() - t1
+    print(f"prefill backbone T={T} en {t_fwd:.1f} s", flush=True)
+
+    cap = float(cfg_t.final_logit_softcapping)
+
+    def head(h):  # miroir EXACT modeling_gemma4.py : lm_head -> /cap -> tanh -> ×cap
+        lg = model.lm_head(h)
+        return torch.tanh(lg / cap) * cap
+
+    with torch.no_grad():
+        want = model(input_ids=full[:, :8], logits_to_keep=1).logits[0, -1, :]
+        got = head(model.model(input_ids=full[:, :8], use_cache=False).last_hidden_state)[0, -1, :]
+    if args.compute_fp32:
+        d = float((got.float() - want.float()).abs().max())
+        assert d <= 1e-3, f"self-check tête manuelle != forward HF (max|d|={d} > 1e-3)"
+        print(f"self-check tête : manuelle == forward HF (fp32, max|d|={d:.2e}, préfixe 8)", flush=True)
+    else:
+        assert torch.equal(got, want), "self-check tête manuelle != forward HF (bf16)"
+        print("self-check tête : manuelle == forward HF (bit-égal, préfixe 8)", flush=True)
+
+    t2 = time.monotonic()
+    positions = []
+    for lo in range(args.ctx_from, T, HEAD_CHUNK):
+        hi = min(lo + HEAD_CHUNK, T)
+        with torch.no_grad():
+            lg = head(hs[:, lo:hi, :]).float()[0]  # [c, V]
+        vals, idxs = torch.topk(lg, TOPK, dim=-1)
+        lg_p = apply_policy(lg, proc)
+        pvals, pidxs = (None, None)
+        if lg_p is not None:
+            pvals, pidxs = torch.topk(lg_p, TOPK, dim=-1)
+            assert torch.isfinite(pvals).all(), "top-5 POST-politique contient un -inf"
+        for j in range(hi - lo):
+            p = lo + j
+            e = {"p": p,
+                 "argmax_raw": int(idxs[j, 0]),
+                 "margin_raw": round(float(vals[j, 0] - vals[j, 1]), 6),
+                 "top5_raw_ids": idxs[j].tolist(),
+                 "top5_raw_vals": [round(float(v), 4) for v in vals[j]],
+                 # `fed_at_next` : le token que le runner a REELLEMENT feedé/produit en p+1.
+                 # Publié pour le diagnostic seulement — en prefill il est IMPOSÉ, l'exiger
+                 # égal à l'argmax serait exiger que le modèle prédise le prompt.
+                 "fed_at_next": int(full[0, p + 1]) if p + 1 < T else int(gen[-1])}
+            if lg_p is not None:
+                e["argmax_policy"] = int(pidxs[j, 0])
+                e["margin_policy"] = round(float(pvals[j, 0] - pvals[j, 1]), 6)
+            else:
+                e["argmax_policy"] = e["argmax_raw"]
+                e["margin_policy"] = e["margin_raw"]
+            positions.append(e)
+    t_head = time.monotonic() - t2
+
+    raw_ctx = [e["margin_raw"] for e in positions if e["p"] <= C - 2]
+    pol_gen = [e["margin_policy"] for e in positions if e["p"] >= C - 1]
+    # Marges AVANT tout verdict (piège 17) — et ce script n'en rend aucun.
+    if raw_ctx:
+        print(f"marges ctx (raw)    : min={min(raw_ctx):.6f} médiane={statistics.median(raw_ctx):.6f} "
+              f"sur {len(raw_ctx)} positions", flush=True)
+    if pol_gen:
+        print(f"marges gen (policy) : min={min(pol_gen):.6f} médiane={statistics.median(pol_gen):.6f} "
+              f"sur {len(pol_gen)} positions", flush=True)
+
+    report = {
+        "source": "69_u8_gen_oracle.py (mode --context-ids — K5/PF1, spec 2026-08-10 §4.5)",
+        "oracle": "UN prefill HF CPU de [ctx_ids ++ ids[:-1]] ; tête lm_head+softcap par chunks ; "
+                  "DEUX canaux publiés par position (brut in-graph / post-politique) — le juge "
+                  "est le script 80, pas celui-ci",
+        "mode": "context", "compute_dtype": compute_dtype,
+        "ctx_from": args.ctx_from, "C": C, "m": m, "prefill_len": T,
+        "context_fixture": anon_path(args.context_ids),
+        "window": {"sliding_window": sw, "bites_in_prefill": window_bites},
+        "positions": positions,
+        "gen_policy": gen_policy,
+        "script_md5": script_md5(),
+        "chrono_s": {"load": round(t_load, 1), "prefill_backbone": round(t_fwd, 1),
+                     "head_sweep": round(t_head, 1), "host": args.host_label},
+        "chat_template_sha256": tpl_sha, "weights": anon_path(args.weights),
+        "versions": versions,
+    }
+    with open(args.out, "w") as fh:
+        json.dump(report, fh, indent=2, ensure_ascii=False)
+    print(f"rapport écrit : {args.out} ({len(positions)} positions, aucun verdict)", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--weights", default=os.path.join(ROOT, "weights_12b_dq"),
                     help="export dq (D9 : oracles Python = export, jamais le packé)")
-    ap.add_argument("--prompt", required=True,
-                    help="prompt user (REQUIS aussi en --teacher-force : contexte du prefill)")
+    # K5 : `required=True` est LEVÉ — le mode --context-ids tire son contexte des ids du runner,
+    # pas d'un prompt templaté (sous reprise, aucun --prompt ne peut exprimer ce contexte).
+    # La garde est déplacée après le parse : les DEUX autres modes l'exigent toujours.
+    ap.add_argument("--prompt", default=None,
+                    help="prompt user (REQUIS en mode décode et en --teacher-force : contexte du "
+                         "prefill ; INTERDIT en --context-ids, où le contexte EST ctx_ids)")
     ap.add_argument("--n-tokens", type=int, default=48, help="mode décode : tokens greedy (48 = U8)")
     ap.add_argument("--out", required=True,
                     help="décode : fixture .safetensors (+ .manifest.json) ; teacher-force : rapport .json")
     ap.add_argument("--teacher-force", default=None, metavar="IDS_SAFETENSORS",
                     help="U9-iv : safetensors clé 'ids' (i32, --out-ids du runner) — UN prefill, "
                          "argmax+top-5 par position au fil de l'eau")
+    ap.add_argument("--context-ids", default=None, metavar="OUT_IDS_SAFETENSORS",
+                    help="K5/PF1 : safetensors du runner à DEUX clés (ids = générés, ctx_ids = "
+                         "séquence complète feedée) — teacher-forcé à travers la frontière d'une "
+                         "reprise ; exclusif de --prompt/--teacher-force")
+    ap.add_argument("--ctx-from", type=int, default=None,
+                    help="K5 : step_next — première position ABSOLUE à rapporter ; requis avec "
+                         "--context-ids")
     ap.add_argument("--compute-fp32", action="store_true",
                     help="teacher-force uniquement : calcul fp32 sur stockage bf16 (hooks "
                          "par-couche) — restaure la parité d'instrument avec les oracles J1 "
@@ -614,8 +771,20 @@ def main() -> None:
               "décodage autonome. Consigné au manifest ; NE reproduit PAS `u8_gen48` (bf16).",
               flush=True)
 
+    # K5 : exclusivité et prérequis des modes, refusés AVANT le chargement du modèle (2 minutes
+    # de mmap et 24 Gio de RAM ne doivent pas être dépensés pour découvrir un flag manquant).
+    if args.context_ids and args.teacher_force:
+        sys.exit("--context-ids et --teacher-force sont exclusifs (deux définitions du contexte)")
+    if args.context_ids and args.prompt is not None:
+        sys.exit("--context-ids : --prompt est INTERDIT — le contexte EST ctx_ids ; un prompt "
+                 "templaté ne peut pas exprimer une reprise de cache")
+    if not args.context_ids and args.prompt is None:
+        sys.exit("--prompt est requis (modes décode et --teacher-force)")
+
     model, tok, tpl_sha, t_load, versions = load_model_and_tok(args.weights)
-    if args.teacher_force:
+    if args.context_ids:
+        mode_context(args, model, tok, tpl_sha, t_load, versions)
+    elif args.teacher_force:
         mode_teacher_force(args, model, tok, tpl_sha, t_load, versions)
     else:
         mode_decode(args, model, tok, tpl_sha, t_load, versions)
