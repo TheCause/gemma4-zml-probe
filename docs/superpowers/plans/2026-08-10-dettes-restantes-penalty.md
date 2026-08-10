@@ -384,7 +384,7 @@ git tag gate/rp1-pass
 - Modify : `zml_runner/gemma4_g12auto.zig` — insertion `:2892-2894`, alimentation de `hist`
   dans la boucle, compteur fin de run (près de `:3144`)
 
-- [ ] **Step 1 : Seeder puis alimenter `hist` — le contrat exact**
+- [x] **Step 1 : Seeder puis alimenter `hist` — le contrat exact**
 
 Contrainte de cohérence qui ANCRE l'implémentation : **au moment de sélectionner le token
 de génération k, `hist[0..hist_len]` == prompt ++ tokens générés avant k** — exactement
@@ -414,7 +414,7 @@ Pendant le prefill, `hist` reste le seed complet : les sélections intermédiair
 jetées (`:2864-2867`), seule celle du dernier step de prefill (s0) compte — et à ce step
 HF a vu exactement le prompt complet. Cohérent par construction.
 
-- [ ] **Step 2 : Insérer la penalty en tête de chaîne** (`:2893`, avant `applySuppression`)
+- [x] **Step 2 : Insérer la penalty en tête de chaîne** (`:2893`, avant `applySuppression`)
 
 ```zig
 if (scfg.repetition_penalty != 1.0) {
@@ -449,19 +449,38 @@ sous penalty armée, rétrogradé en compteur silencieux (sinon 40+ lignes d'err
 le code exige lui-même qu'un écart de warpers au restore soit VISIBLE (spec kvdump §4.1) —
 sans cette extension, la penalty serait le seul réglage invisible du manifest.
 
-- [ ] **Step 3 : RP0 — le graphe n'a pas bougé**
+- [x] **Step 3 : RP0 — le graphe n'a pas bougé**
 
 Rebuild (`build_3090.sh`), re-dump HLO (mêmes flags que Task 1 Step 2), md5 identique au
 témoin. + `ALLOC-LOOP: alloc=0` au log d'un run avec penalty armée (l'interdit D10 se
 re-vérifie gratuitement — c'est LE point qui tuerait une implémentation qui alloue).
+→ **RP0 PASS** le 10 août 2026. md5 `before_optimizations` = `297679847aa04b719942d75d093adf2b`
+**dans les deux régimes** — sans penalty ET avec `--repetition-penalty 1.15` armée. Le dump
+sous penalty est le plus probant : il montre que le chemin host ne touche pas le graphe.
+`ALLOC-LOOP: alloc=0 … steps=17` sous penalty armée, et `alloc=0 … steps=52` au run de 24
+tokens du Step 5 : l'interdit D10 tient avec l'historique et le bitset en place.
 
-- [ ] **Step 4 : RP2 — non-régression penalty neutre**
+- [x] **Step 4 : RP2 — non-régression penalty neutre** ⚠ **RÉFÉRENCE REQUALIFIÉE**
 
 Re-run des RUN_ARGS de la Task 1 Step 3 (sans `--repetition-penalty`) → ids bit-identiques
 au témoin long. Puis un run AVEC `--repetition-penalty 1.0` explicite → également identique
 (le chemin à 1.0 est un no-op par construction, on le VOIT).
+→ **Le témoin de la Task 1 s'est révélé NON REPRODUCTIBLE** (148/200 ids différents), et la
+cause n'est pas le chantier : `main` **recompilé, sans une ligne de ce code**, produit
+exactement les mêmes ids que le code pénalisé. Trois binaires distincts (`59cf380a`,
+`158646ca` = main pur, `ba51d21b`) s'accordent sur `06a5953f…` et diffèrent tous du témoin
+`bb74f916…`, à md5 HLO identique. La divergence démarre au token **47** — les gates oracle
+historiques du repo font 48 tokens, d'où le fait que ce phénomène n'ait jamais été exposé.
+→ **RP2 PASS sous référence reconstruite** : `rp2_a` (sans flag) == `rp2_b` (`--repetition-penalty 1.0`
+explicite) == `rp2_main2` (**main pur recompilé**) == `rp2_c` (contrôle, 3ᵉ binaire), tous
+`06a5953f…`. C'est une preuve plus forte que la comparaison au témoin : elle contrôle la
+variable « fenêtre » que le témoin subissait.
+→ Finding complet, mesures et règle d'instrumentation qui en découle :
+`docs/evidence/penalty/FINDING_temoin_ids_non_reproductible.md`. **1ʳᵉ requalification
+d'instrument de ce chantier, déclarée** (règle : une 2ᵉ du même type ⇒ STOP et diff de
+l'instrument).
 
-- [ ] **Step 5 : Round-trip dump/restore sous penalty** (écart 9 — on vérifie la
+- [x] **Step 5 : Round-trip dump/restore sous penalty** (écart 9 — on vérifie la
   compatibilité au lieu de la supposer)
 
 Run `--repetition-penalty 1.15 --dump-cache <f> --max-tokens 24`, puis
@@ -475,8 +494,18 @@ avec le prompt de référence) : la vérification discrimine sans ambiguïté.
 Puis **exercer le refus neuf** (règle 2 : un refus se VOIT échouer) :
 `--load-cache <f> --ignore-prompt --repetition-penalty 1.15` → exit non-zéro,
 `error.IgnorePromptWithLoadCache`, message archivé dans `docs/evidence/penalty/`.
+→ Mesuré le 10 août 2026, **le seed de reprise est PROUVÉ** :
+- dump (24 tokens) : `PENALTY: hist_len=53 prompt_len=29 générés=24` → 29 + 24 = 53 ✅,
+  `n_penalty_touched=52/52`.
+- restore (8 tokens) : `PENALTY: hist_len=60 prompt_len=52 générés=8` → 52 + 8 = 60 ✅,
+  `n_penalty_touched=8/8`. **`step_next` lu INDÉPENDAMMENT au manifest = 52**, égal au
+  `prompt_len` publié : l'historique a bien été seedé depuis `ids_fed`. Le bug de l'écart 9
+  aurait rendu `hist_len = 8` — l'écart entre 8 et 60 ne laisse aucune ambiguïté.
+- manifest étendu, vérifié : `sampling = T=1,top_k=0,top_p=1,rp=1.15,ignore_prompt=false`.
+- refus neuf exercé : `exit=1`, `error.IgnorePromptWithLoadCache` avec son message.
+Archivé : `docs/evidence/penalty/rp0_rp2_roundtrip.log`.
 
-- [ ] **Step 6 : Commit + tags**
+- [x] **Step 6 : Commit + tags**
 
 ```bash
 git add zml_runner/gemma4_g12auto.zig zml_runner/sampling.zig docs/evidence/penalty/

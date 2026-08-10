@@ -1,0 +1,82 @@
+=== RP0-a : dump HLO SANS penalty (mêmes flags que le témoin de la Task 1) ===
+exit=0
+297679847aa04b719942d75d093adf2b  /data/gemma4-zml-probe/rp0_hlo_a/module_0001.zml.before_optimizations.txt
+=== RP0-b : dump HLO AVEC penalty armée 1.15 (le graphe ne doit pas bouger) ===
+exit=0
+297679847aa04b719942d75d093adf2b  /data/gemma4-zml-probe/rp0_hlo_b/module_0001.zml.before_optimizations.txt
+info: BUILD: mode=ReleaseFast
+info: PENALTY: armée rp=1.15 ignore_prompt=false (hist 1280 ids max, seen 32 Kio)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=17
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=18 prompt_len=14 générés=4 n_penalty_touched=17 n_penalty_empty_hist=0
+=== RP2-a : RUN_ARGS de référence, SANS --repetition-penalty ===
+exit=0
+info: BUILD: mode=ReleaseFast
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=228
+info: --out-ids : 200 ids écrits -> /data/gemma4-zml-probe/rp2_a.safetensors
+=== RP2-b : mêmes RUN_ARGS AVEC --repetition-penalty 1.0 explicite (no-op par construction) ===
+exit=0
+info: BUILD: mode=ReleaseFast
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=228
+info: --out-ids : 200 ids écrits -> /data/gemma4-zml-probe/rp2_b.safetensors
+=== RP2 : comparaison BINAIRE des ids contre le témoin figé en Task 1 ===
+bb74f91654ac70b59aeed4a19a4bfc1f  /data/gemma4-zml-probe/rp_witness_long.safetensors
+06a5953fe2a59b7bfec8212db04b8344  /data/gemma4-zml-probe/rp2_a.safetensors
+06a5953fe2a59b7bfec8212db04b8344  /data/gemma4-zml-probe/rp2_b.safetensors
+RP2-a : DIFFÈRE du témoin
+RP2-b : DIFFÈRE du témoin
+ALL DONE
+
+########## SUITE (contrôle + round-trip) ##########
+
+=== CONTRÔLE RP2 : 4e échantillon, 3e binaire distinct, même code que rp2_a ===
+ba51d21bb660de302b723a6fd531f715  ./bazel-bin/examples/rqz/gemma4_g12auto
+exit=0
+info: BUILD: mode=ReleaseFast
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=228
+bb74f91654ac70b59aeed4a19a4bfc1f  /data/gemma4-zml-probe/rp_witness_long.safetensors
+06a5953fe2a59b7bfec8212db04b8344  /data/gemma4-zml-probe/rp2_a.safetensors
+06a5953fe2a59b7bfec8212db04b8344  /data/gemma4-zml-probe/rp2_main2.safetensors
+06a5953fe2a59b7bfec8212db04b8344  /data/gemma4-zml-probe/rp2_c.safetensors
+
+=== Step 5a : dump sous penalty 1.15, 24 tokens ===
+exit=0
+info: PENALTY: armée rp=1.15 ignore_prompt=false (hist 1280 ids max, seen 32 Kio)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=52
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=53 prompt_len=29 générés=24 n_penalty_touched=52 n_penalty_empty_hist=0
+info: S2-PONT: steps_comparés=52 désaccords=7 égalités_exactes=0 (chemin B armé)
+info: S2-PONT: les désaccords ci-dessus sont ATTENDUS sous penalty armée (chemin A = topK in-graph sur logits NUS) — ce n'est pas un FAIL
+
+=== step_next lu au MANIFEST (référence indépendante de la ligne PENALTY) ===
+
+=== Step 5b : restore + penalty 1.15, 8 tokens — hist_len doit valoir step_next + 8 ===
+exit=0
+info: PENALTY: armée rp=1.15 ignore_prompt=false (hist 1280 ids max, seen 32 Kio)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.676s
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=60
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=60 prompt_len=52 générés=8 n_penalty_touched=8 n_penalty_empty_hist=0
+
+=== Step 5c : le refus NEUF doit se VOIR échouer ===
+exit=1 (attendu non-zéro)
+error: --ignore-prompt + --load-cache non supporté v1 : sous reprise, ids = ids_fed complet (prompt + tokens générés du run dumpé) — la frontière du prompt n'existe plus
+error: IgnorePromptWithLoadCache
+ALL DONE
+
+########## MANIFEST DU DUMP ##########
+{
+ "format": "g12-kvdump-v1",
+ "l_max": "1280",
+ "step_next": "52",
+ "fed_next": "625",
+ "stop_reason": "max_tokens",
+ "ckpt_bytes": "10264229896",
+ "ckpt_hdr_xxh64": "d4b64c2527f7eda4",
+ "gencfg_path": "/data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json",
+ "build_mode": "ReleaseFast",
+ "sampling": "T=1,top_k=0,top_p=1,rp=1.15,ignore_prompt=false",
+ "sl_k_xxh64": "b92033c960ba7c4b",
+ "sl_v_xxh64": "28c6c9c9f24e52d1",
+ "fl_k_xxh64": "46f643f36d3be57e",
+ "fl_v_xxh64": "6fb3efa3b69fa35d",
+ "ids_fed_xxh64": "43b817bdadaaad7e"
+}

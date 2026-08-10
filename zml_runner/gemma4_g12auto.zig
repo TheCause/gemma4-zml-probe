@@ -2137,6 +2137,8 @@ pub fn run(init: std.process.Init) !void {
         .top_p = args.top_p,
         .min_keep = args.min_tokens_to_keep,
         .seed = args.seed,
+        .repetition_penalty = args.repetition_penalty,
+        .ignore_prompt = args.ignore_prompt,
     };
     // D10 (C7) : `work` n'est plus alloué ICI — il déménage APRÈS la création de la Platform
     // (DmaAllocator exige un Device vivant), avec son defer. Le scratch et le reste restent.
@@ -2148,6 +2150,27 @@ pub fn run(init: std.process.Init) !void {
         log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
     }
     defer if (scfg.pathArmed()) scfg.scratch.deinit(allocator);
+
+    // === Phase 1 (penalty) : historique et bitset alloués UNE FOIS, ici — jamais dans la boucle
+    // (interdit D10, `ALLOC-LOOP: alloc=0`). Alloués SEULEMENT si la penalty est armée : à 1.0 le
+    // runner ne paie ni les L_MAX×4 octets ni les 32 Kio, et n'écrit rien de plus par step — c'est
+    // ce qui rend RP2 (non-régression bit-identique) vrai par construction et non par chance.
+    // La borne L_MAX est celle que la garde de lancement de `generateOnce` fait déjà respecter
+    // (`ids.len + limit <= L_MAX`) : l'historique ne peut donc pas déborder, et une garde de borne
+    // explicite reste posée à l'append (une borne « impossible » non gardée est une UB en attente).
+    const penalty_armed = scfg.repetition_penalty != 1.0;
+    if (penalty_armed) {
+        scfg.hist = try allocator.alloc(u32, @intCast(L_MAX));
+        scfg.seen = try allocator.alloc(u64, (VOCAB_CONTRACT + 63) / 64);
+        log.info("PENALTY: armée rp={d} ignore_prompt={} (hist {d} ids max, seen {d} Kio)", .{ scfg.repetition_penalty, scfg.ignore_prompt, L_MAX, (scfg.seen.len * @sizeOf(u64)) / 1024 });
+    } else if (scfg.ignore_prompt) {
+        // Un flag inopérant est un mensonge : le dire au lieu de le laisser passer en silence.
+        log.warn("--ignore-prompt sans --repetition-penalty : SANS EFFET (il n'y a pas de penalty à restreindre)", .{});
+    }
+    defer if (penalty_armed) {
+        allocator.free(scfg.hist);
+        allocator.free(scfg.seen);
+    };
 
     // === Gates G-D1/G-D2 (dettes D1/D2) — pont in-process contre une référence indépendante.
     // Spec : docs/superpowers/specs/2026-08-10-d1d2-gpu-coverage.md
@@ -2901,8 +2924,11 @@ fn dumpCacheFile(allocator: std.mem.Allocator, io: std.Io, ds: DumpSpec, host: a
     // `sampling` est une trace INFORMATIVE : un restore avec d'autres warpers diverge
     // légitimement, mais l'écart doit être VISIBLE (spec §4.1). Le dump avec sampling ARMÉ +
     // seed est refusé en amont (DumpWithSamplingArmed) — ici on trace ce qui était demandé.
+    // ⚠ `rp` est DANS cette trace : le code exige lui-même qu'un écart de warpers au restore soit
+    // VISIBLE (spec kvdump §4.1), et la penalty change les ids produits autant qu'un top_p. Sans
+    // cette extension, elle serait le SEUL réglage de la chaîne invisible au manifest.
     const sampling_str = if (scfg.pathArmed())
-        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d}", .{ scfg.temperature, scfg.top_k, scfg.top_p })
+        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d},rp={d},ignore_prompt={}", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.repetition_penalty, scfg.ignore_prompt })
     else
         "off";
     const meta = [_]kvdump.MetaKV{
@@ -2952,6 +2978,34 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     if (resume_state == null and ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.len, SLIDING_WINDOW });
         return error.PromptTooLong;
+    }
+
+    // === Phase 1 (penalty) : SEED de l'historique, ici et pas ailleurs ===
+    // Contrat que ce seed établit : au moment de sélectionner le token de génération k,
+    // `hist[0..hist_len]` vaut prompt ++ tokens générés avant k — exactement l'`input_ids` que
+    // HF passe à son processor au même point.
+    //
+    // ⚠ POURQUOI EN TÊTE DE CETTE FONCTION, et pas au site d'allocation. Le site d'allocation ne
+    // s'exécute qu'UNE FOIS par process, alors que `generateOnce` a SIX sites d'appel : one-shot,
+    // les deux entrées de la boucle `--repl` (un appel PAR prompt), et les trois de kvdump-eq.
+    // Seul un seed en tête de fonction les couvre structurellement — c'est aussi ce qui donne
+    // gratuitement le RE-SEED par prompt du repl (RP5) et la reprise `--load-cache`, où `ids`
+    // vaut `ids_fed` complet et où la boucle entre DIRECTEMENT en phase de génération : les
+    // tokens repris n'y sont jamais re-feedés, un historique reparti de zéro ignorerait tout le
+    // contexte de la reprise.
+    if (scfg.hist.len > 0) {
+        if (ids.len > scfg.hist.len) {
+            log.err("penalty : prompt {d} ids > capacité de l'historique {d} (L_MAX)", .{ ids.len, scfg.hist.len });
+            return error.SequenceTooLong;
+        }
+        @memcpy(scfg.hist[0..ids.len], ids);
+        scfg.hist_len = ids.len;
+        scfg.prompt_len = ids.len;
+        // Compteurs de non-vacuité remis à zéro PAR PROMPT : en `--repl`, un `n_penalty_touched`
+        // cumulé depuis le prompt précédent ferait passer l'exigence de la passe courante sans
+        // qu'elle ait rien touché.
+        scfg.n_penalty_touched = 0;
+        scfg.n_penalty_empty_hist = 0;
     }
     // Cache ZÉROS par génération (les slices host vivent dans run pour toute la session).
     var cache_buf = zml.Bufferized(engine.Cache){
@@ -3103,7 +3157,22 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             const t_w0: std.Io.Timestamp = .now(io, .awake);
 
             // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
-            // TopK(19) → TopP(20). La penalty appartient à la PHASE 1 : absente ici.
+            // TopK(19) → TopP(20). La penalty (PHASE 1) est donc EN TÊTE, avant la suppression.
+            if (scfg.repetition_penalty != 1.0) {
+                // Sous --ignore-prompt, `h` est VIDE pendant tout le prefill (hist_len ==
+                // prompt_len) : la garde `h.len == 0` est OBLIGATOIRE — en ReleaseFast, `h[0]`
+                // sur une slice vide est une UB SILENCIEUSE, pas un panic. (`@min` borne le bas
+                // par défense, au cas où prompt_len dépasserait hist_len.)
+                const lo = if (scfg.ignore_prompt) @min(scfg.prompt_len, scfg.hist_len) else 0;
+                const h = scfg.hist[lo..scfg.hist_len];
+                if (h.len > 0) {
+                    @memset(scfg.seen, 0); // dans le `if` : 32 Kio de memset inutiles quand h est vide
+                    if (sampling.applyRepetitionPenalty(scfg.work, h, scfg.repetition_penalty, scfg.seen))
+                        scfg.n_penalty_touched += 1;
+                } else {
+                    scfg.n_penalty_empty_hist += 1; // cf exemption de PenaltyInert, fin de run
+                }
+            }
             sampling.applySuppression(scfg.work, policy);
             // Gate D1/D2 : `pre_temp` est l'entrée COMMUNE de la chaîne nominale et de la chaîne
             // mutée — les deux doivent partir du même vecteur, sinon le mutant ne compare rien.
@@ -3169,7 +3238,15 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
                     scfg.n_exact_top_ties += 1;
                 } else {
                     scfg.n_disagree += 1;
-                    log.err("S2-PONT désaccord @step {d} : A={d} (val {d:.6}) B={d} (val {d:.6})", .{ step, sel.tok, scfg.work[sel.tok], tok_b, scfg.work[tok_b] });
+                    // ⚠ Sous penalty ARMÉE, le désaccord est ATTENDU et non un défaut : le chemin A
+                    // est un topK in-graph sur les logits NUS, le chemin B décide après penalty.
+                    // Les deux DOIVENT diverger dès que la penalty mord — c'est même la preuve
+                    // qu'elle mord. Le compteur reste publié (ligne S2-PONT), mais l'`err` par
+                    // step est rétrogradé : sinon un run sain crache 40+ lignes d'erreur et le
+                    // lecteur apprend à les ignorer, y compris le jour où elles disent vrai.
+                    if (scfg.repetition_penalty == 1.0) {
+                        log.err("S2-PONT désaccord @step {d} : A={d} (val {d:.6}) B={d} (val {d:.6})", .{ step, sel.tok, scfg.work[sel.tok], tok_b, scfg.work[tok_b] });
+                    }
                 }
             }
             tok = @intCast(tok_b);
@@ -3234,6 +3311,20 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.appendBounded(tok); // D10 (C5) : idem — error.OutOfMemory si la borne était fausse, jamais une UB
+        // Phase 1 (penalty) : l'historique suit le token ICI, où il est ACTÉ — et surtout PAS en
+        // fin d'itération (`fed = tok`), qui vient APRÈS les trois `break` (borne oracle, EOT,
+        // max_tokens) et perdrait donc le DERNIER token généré. Écriture directe, zéro allocation.
+        // ⚠ Ne PAS appender `fed` en tête d'itération : avec le seed, le prompt y serait compté
+        // deux fois. (Le piège off-by-one de la spec rév. 4-1 visait le câblage SANS seed —
+        // avec seed, c'est l'append de `fed` qui devient le bug.)
+        if (scfg.hist.len > 0) {
+            if (scfg.hist_len >= scfg.hist.len) {
+                log.err("penalty : historique plein ({d} ids, capacité {d}) au step {d}", .{ scfg.hist_len, scfg.hist.len, step });
+                return error.SequenceTooLong;
+            }
+            scfg.hist[scfg.hist_len] = @intCast(tok);
+            scfg.hist_len += 1;
+        }
         // kvdump / C-D : l'instrument du gain. Fenêtre = du DÉBUT de la lecture des tenseurs
         // (phase 2, post-compile) au PREMIER token produit — les GiB relus sont DEDANS.
         if (resume_state) |rs| {
@@ -3353,8 +3444,33 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     log.info("ALLOC-TOTAL: alloc={d} free={d} bytes={d} shards={d}", .{
         counter.n_alloc, counter.n_free, counter.bytes_alloc, scfg.n_shards,
     });
+    // === Phase 1 (penalty) : publication + non-vacuité ===
+    // L'invariant `hist_len == prompt_len + generated` est ce qui prouve, à l'exécution, que le
+    // seed de reprise a bien eu lieu (écart 9 du plan) : sous `--load-cache`, `prompt_len` vaut
+    // `step_next` — un historique reparti de zéro rendrait `hist_len == generated` seul.
+    if (scfg.repetition_penalty != 1.0) {
+        log.info("PENALTY: rp={d} ignore_prompt={} hist_len={d} prompt_len={d} générés={d} n_penalty_touched={d} n_penalty_empty_hist={d}", .{
+            scfg.repetition_penalty, scfg.ignore_prompt, scfg.hist_len, scfg.prompt_len, generated.items.len, scfg.n_penalty_touched, scfg.n_penalty_empty_hist,
+        });
+        if (scfg.hist_len != scfg.prompt_len + generated.items.len) {
+            log.err("PENALTY: invariant rompu — hist_len={d} != prompt_len={d} + générés={d}", .{ scfg.hist_len, scfg.prompt_len, generated.items.len });
+            return error.PenaltyHistoryInvariant;
+        }
+        if (scfg.n_penalty_touched == 0) {
+            // Exemption : si l'historique était vide à CHAQUE step, HF n'aurait rien touché non
+            // plus (cas légitime `--ignore-prompt --max-tokens 1`). Ailleurs, une penalty armée
+            // qui ne change JAMAIS un logit est un paramètre non propagé, pas un run réussi.
+            if (scfg.n_penalty_empty_hist == scfg.n_steps_compared and scfg.n_penalty_empty_hist > 0) {
+                log.warn("PENALTY: inerte mais LÉGITIME — historique vide aux {d} steps (--ignore-prompt sans token généré avant la sélection)", .{scfg.n_penalty_empty_hist});
+            } else {
+                log.err("PENALTY: INERTE — rp={d} armée mais aucun logit changé sur {d} steps : paramètre non propagé", .{ scfg.repetition_penalty, scfg.n_steps_compared });
+                return error.PenaltyInert;
+            }
+        }
+    }
     if (scfg.pathArmed()) {
         log.info("S2-PONT: steps_comparés={d} désaccords={d} égalités_exactes={d} (chemin B armé)", .{ scfg.n_steps_compared, scfg.n_disagree, scfg.n_exact_top_ties });
+        if (scfg.repetition_penalty != 1.0) log.info("S2-PONT: les désaccords ci-dessus sont ATTENDUS sous penalty armée (chemin A = topK in-graph sur logits NUS) — ce n'est pas un FAIL", .{});
         if (scfg.n_cout_samples > 0) {
             const moy_us = @as(f64, @floatFromInt(scfg.cout_ns_total)) / @as(f64, @floatFromInt(scfg.n_cout_samples)) / 1000.0;
             const max_us = @as(f64, @floatFromInt(scfg.cout_ns_max)) / 1000.0;

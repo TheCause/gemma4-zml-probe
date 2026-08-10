@@ -41,5 +41,13 @@ plan, `n < 50` → changer de prompt, n'est pas approché). `ALLOC-LOOP: alloc=0
 (28 de prefill + 200 de génération). Témoin conservé hors arbre : `logs/rp_witness_long.safetensors`
 sur M1, `/data/gemma4-zml-probe/rp_witness_long.safetensors` sur la VM (868 octets).
 
+> ⚠ **Ce témoin n'est PAS une référence inter-fenêtre.** Mesuré le même jour : trois binaires
+> distincts — dont `main` recompilé sans une ligne du chantier — s'accordent sur des ids
+> DIFFÉRENTS de ce témoin, à graphe (md5 HLO identique), poids et prompt identiques.
+> Ce qui reste valable ici, ce sont les **RUN_ARGS** (prompt + `--max-tokens 200`) ;
+> ce qui est retiré, c'est la valeur du témoin comme référence d'un run ultérieur.
+> RP2 se juge donc contre un run de `main` recompilé **dans la même fenêtre**.
+> Détail et mesures : `FINDING_temoin_ids_non_reproductible.md`.
+
 Pourquoi ce prompt et pas le prompt canonique du repo : ce dernier fait EOT au 2ᵉ token —
 deux ids n'exercent aucune répétition, RP2 y passerait à vide (leçon « vacuité de l'antécédent »).
