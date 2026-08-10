@@ -1,0 +1,19 @@
+===== 1. CODE SAIN sur la fixture banana : doit PASS =====
+exit=0
+info: --oracle : prompt vérifié LITTÉRALEMENT (21 ids identiques à la fixture)
+info: --oracle : 48 steps de génération attendus (fed.len), prompt vérifié (ids.len=21 == positions[0])
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=69 prompt_len=21 générés=48 n_penalty_touched=68 n_penalty_empty_hist=0
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+
+===== 2. CORRUPTION (c) ignore_prompt inverse : doit FAIL =====
+corruption (c) appliquee
+build rc=0
+run rc=1 (attendu NON-ZERO)
+error: A1 FAIL — 0/48 match, 1er mismatch au step gen=0
+
+===== 3. RESTAURATION =====
+worktree retire
+rebuild sain rc=0
+run sain rc=0 (attendu 0)
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+ALL DONE
