@@ -20,7 +20,7 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
 | K8 (restore à froid) | **SOLDÉE** (10 août) — 10,823 s à froid ⇒ **×41,4** ; claim C-D tient, le « ≥ ×130 » **requalifié** comme la prédiction l'annonçait |
 | K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
-| **Phase 1 repetition penalty** | **EXÉCUTÉE le 10 août** — RP0/RP1/RP2/RP5/RP6 verts + round-trip ; RP3/RP4/M1 en attente d'une fenêtre GPU. Source de vérité : `SAMPLING_RESULTS.md` **§8** |
+| **Phase 1 repetition penalty** | **SOLDÉE le 10 août** — **7 gates verts** (RP0-RP6) + round-trip, mergée sur `main` (PR #22 `86a46c9`, PR #23 `38a0888`). RP7 et M1 : mesures publiées sans verdict. Source de vérité : `SAMPLING_RESULTS.md` **§8** |
 | K3 · K4 · K5 · Triton paged attention | **CADRÉS** (10 août) — fiches dans `docs/superpowers/specs/2026-08-10-cadrage-dettes-restantes.md` ; ordre reco : K5 → K4, K3 et Triton indépendants |
 
 ## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
@@ -164,8 +164,13 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       `penalty-phase1`), ré-instruite contre l'état réel de `main` par
       `docs/superpowers/plans/2026-08-10-dettes-restantes-penalty.md` : le plan du 27 juil
       prédatait 5 chantiers mergés. Les gates `SM0…SM3` de sa spec restent **SUPERSÉDÉS** par
-      les `S2-`. Verdicts : `SAMPLING_RESULTS.md` **§8**. RP3/RP4/M1 restent à passer (GPU
-      occupé par un autre travail au moment de la clôture).
+      les `S2-`. Verdicts : `SAMPLING_RESULTS.md` **§8**. **7 gates verts, mergés sur `main`**
+      (PR #22 `86a46c9` puis PR #23 `38a0888`) : RP1 **0 ULP** vs le processor HF, RP0 (md5 HLO
+      identique **penalty armée**), RP2 (référence requalifiée — cf finding), RP3 **48/48 à 1,15
+      ET 0,8**, RP4 **3 corruptions sur 3 mordent**, RP5/RP6 (repl). RP7 et M1 sont des mesures
+      publiées **sans verdict** (D4) : répétition divisée par deux à 200 tokens, coût **+1,6 %**.
+      Restent écrites : **D4 aggravée** et le **critère RSS non tenu** (dérive du repl antérieure
+      au chantier, +72 KiB imputables à la penalty sur +1 268 mesurés).
 - [x] ~~⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a aucune couverture GPU~~ —
       **SOLDÉE (10 août, GO Régis)**, avec **D2** : gates **G-D0/G-D1/G-D2** verts. 386 steps GPU
       armés, **0 désaccord** contre une référence écrite autrement (tri descendant, f64),
