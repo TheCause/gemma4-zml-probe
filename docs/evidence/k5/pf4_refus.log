@@ -1,0 +1,42 @@
+### (a) tour 2 >= SLIDING_WINDOW : PromptTooLong attendu
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: K5: tour 1 clos par { 106, 107 } (fed_next=531 n'est PAS un EOS)
+error: K5 : tour 2 de 1113 ids >= SLIDING_WINDOW(1024)
+error: PromptTooLong
+rc(a)=1
+### (b) place insuffisante (ids_full + limit > L_MAX) : SequenceTooLong attendu
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: K5: tour 1 clos par { 106, 107 } (fed_next=531 n'est PAS un EOS)
+info: K5: prefill partiel — contexte 49 ids + fed_next + clôture 2 + tour2 17 ids = 69 total
+error: garde-fou : ids.len(69) + limit(1300) > L_MAX(1280)
+error: SequenceTooLong
+rc(b)=1
+### (c) --ignore-prompt + --load-cache : IgnorePromptWithLoadCache attendu (garde CONSERVÉE par K5)
+info: BUILD: mode=ReleaseFast
+error: --ignore-prompt + --load-cache non supporté v1 : sous reprise, ids = ids_fed complet (prompt + tokens générés du run dumpé) — la frontière du prompt n'existe plus
+error: IgnorePromptWithLoadCache
+rc(c)=1
+### (d) --prompt VIDE sous reprise : PromptTooLong attendu (garde AVANT le rendu)
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+error: K5 : --prompt vide sous reprise — un tour 2 sans contenu n'est pas un prefill partiel
+error: PromptTooLong
+rc(d)=1
+### (e) --oracle à p0 faux sous reprise+prompt : OraclePromptMismatch attendu
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=oracle)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info: K5: tour 1 clos par { 106, 107 } (fed_next=531 n'est PAS un EOS)
+info: K5: prefill partiel — contexte 49 ids + fed_next + clôture 2 + tour2 17 ids = 69 total
+error: --oracle : positions[0]=7 (seq_len fixture) != ids.len=69 (prompt rendu) — mismatch prompt/fixture
+error: OraclePromptMismatch
+rc(e)=1
