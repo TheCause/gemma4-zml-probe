@@ -44,6 +44,7 @@ const g12 = @import("g12.zig"); // Geom g12 + G12Model/G12LayerW (w4.W4Lin vit d
 const gencfg = @import("gencfg.zig");
 // Warpers de sampling (spec 2026-07-29 phase 2) — fonctions pures, host-side, hors du graphe.
 const sampling = @import("sampling.zig");
+const sampling_ref = @import("sampling_ref.zig");
 // D10 : compteur d'allocations (spec 2026-07-30 zero-alloc, C1) — wrapper std-only de init.gpa,
 // toujours actif ; porteur des gates AL-0/AL-VAC/AL-BASE. `builtin.mode` : bannière BUILD (§8).
 const alloc_count = @import("alloc_count.zig");
@@ -169,6 +170,7 @@ const Args = struct {
     top_p: f32 = 1.0,
     min_tokens_to_keep: u32 = 1,
     seed: ?u64 = null, // null, PAS 0 : 0 est une graine légitime, pas un sentinel
+    gate_d1d2: bool = false, // gates G-D1/G-D2 : pont in-process contre une référence indépendante
     // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
     // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
     // (sans snapshot ni symlink) : sans ce flag, la découverte échouerait et un gate historique
@@ -206,6 +208,8 @@ const usage =
     "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
+    "[--gate-d1d2 (G-D1/G-D2 : applyTopP comparé à une référence descendante f64 + mutants " ++
+    "température ; exige un régime ARMÉ ; invalide la mesure M-COUT du même run)] " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
     "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
@@ -377,6 +381,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.seed = std.fmt.parseInt(u64, process_args[i], 10) catch return error.InvalidSeed;
+        } else if (std.mem.eql(u8, a, "--gate-d1d2")) {
+            args.gate_d1d2 = true;
         } else if (std.mem.eql(u8, a, "--gen-config")) {
             i += 1;
             if (i >= process_args.len) {
@@ -1667,7 +1673,7 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     // (1) relecture : header + meta + shapes + données, dans des buffers NEUFS.
     var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
     defer f.close(io);
-    var h = try kvdump.readHeader(allocator, io, f);
+    var h = try kvdump.readHeader(allocator, io, f, path);
     defer h.deinit();
     const fmt_got = h.metaGet("format") orelse return error.KvDumpBadFormat;
     if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
@@ -1687,8 +1693,8 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     defer allocator.free(got_a);
     const got_b = try allocator.alloc(u8, b_bytes.len);
     defer allocator.free(got_b);
-    try kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
-    try kvdump.readTensorInto(io, f, &h, "b", got_b, b_h);
+    try kvdump.readTensorInto(io, f, path, &h, "a", got_a, a_h);
+    try kvdump.readTensorInto(io, f, path, &h, "b", got_b, b_h);
     if (!std.mem.eql(u8, got_a, a_bytes) or !std.mem.eql(u8, got_b, b_bytes)) {
         log.err("KVIO: round-trip NON bit-identique (a_ok={} b_ok={})", .{ std.mem.eql(u8, got_a, a_bytes), std.mem.eql(u8, got_b, b_bytes) });
         return error.KvIoRoundTrip;
@@ -1701,7 +1707,7 @@ fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !
     if (try f.readPositionalAll(io, &one, mut_off) != 1) return error.KvIoMutantSetup;
     one[0] ^= 0xFF;
     try f.writePositionalAll(io, &one, mut_off);
-    const mut_res = kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    const mut_res = kvdump.readTensorInto(io, f, path, &h, "a", got_a, a_h);
     if (mut_res) |_| {
         log.err("KVIO: MUTANT NON VU — un octet flippé a passé le checksum : le contrôle est VACUEUX", .{});
         return error.KvIoMutantNotSeen;
@@ -1929,6 +1935,22 @@ pub fn run(init: std.process.Init) !void {
         log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
     }
     defer if (scfg.pathArmed()) scfg.scratch.deinit(allocator);
+
+    // === Gates G-D1/G-D2 (dettes D1/D2) — pont in-process contre une référence indépendante.
+    // Spec : docs/superpowers/specs/2026-08-10-d1d2-gpu-coverage.md
+    var gate_storage: sampling.GateD1D2 = undefined;
+    if (args.gate_d1d2) {
+        // Refus BRUYANT plutôt qu'un gate qui compterait 0 step : sans warper armé, le chemin B
+        // n'est pas pris et la comparaison n'aurait JAMAIS lieu — un PASS vide, le pire cas.
+        if (!scfg.pathArmed()) {
+            log.err("--gate-d1d2 exige un régime ARMÉ (--top-k / --top-p / --temperature / --seed) : sans warper, le chemin B n'est pas pris et le gate passerait À VIDE", .{});
+            return error.GateD1D2NotArmed;
+        }
+        gate_storage = try sampling.GateD1D2.init(allocator, VOCAB_CONTRACT);
+        scfg.gate = &gate_storage;
+        log.info("GATE-D1D2: armé — applyTopP comparé à une référence descendante f64, mutants température (division, ordre de chaîne) actifs", .{});
+    }
+    defer if (args.gate_d1d2) gate_storage.deinit(allocator);
 
     if (args.force_vram) {
         log.warn("--force-vram : garde VRAM sautée (OOM possible en aval, assumé)", .{});
@@ -2549,7 +2571,7 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         return e;
     };
     errdefer file.close(io);
-    var header = kvdump.readHeader(allocator, io, file) catch |e| {
+    var header = kvdump.readHeader(allocator, io, file, path) catch |e| {
         log.err("--load-cache : header illisible ({s}) : {s}", .{ path, @errorName(e) });
         return e;
     };
@@ -2618,7 +2640,7 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // dépendent (la garde oracle compare positions[0] à ids.len). Checksum vérifié.
     const raw = try allocator.alloc(i32, step_next);
     defer allocator.free(raw);
-    try kvdump.readTensorInto(io, file, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
+    try kvdump.readTensorInto(io, file, path, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
     const ids_fed = try allocator.alloc(u32, step_next);
     errdefer allocator.free(ids_fed);
     for (raw, 0..) |t, k| {
@@ -2647,10 +2669,10 @@ fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 /// dehors, des deux côtés de la comparaison.
 fn loadCacheTensors(io: std.Io, mc: *const ManifestCheck, host: anytype) !Resume {
     const t_load0: std.Io.Timestamp = .now(io, .awake);
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
-    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, mc.path, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
     log.info("KVLOAD: {s} l_max={d} step_next={d} fed_next={d} ids={d} (reprise sans prefill)", .{ mc.path, L_MAX, mc.step_next, mc.fed_next, mc.ids_fed.len });
     log.info("KVLOAD: contexte de {d} tokens (non réaffiché)", .{mc.ids_fed.len});
     return .{ .step_next = mc.step_next, .fed_next = mc.fed_next, .t_load0 = t_load0 };
@@ -2870,9 +2892,46 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
             // TopK(19) → TopP(20). La penalty appartient à la PHASE 1 : absente ici.
             sampling.applySuppression(scfg.work, policy);
-            if (scfg.temperature != 1.0) sampling.applyTemperature(scfg.work, scfg.temperature);
+            // Gate D1/D2 : `pre_temp` est l'entrée COMMUNE de la chaîne nominale et de la chaîne
+            // mutée — les deux doivent partir du même vecteur, sinon le mutant ne compare rien.
+            if (scfg.gate) |g| @memcpy(g.pre_temp, scfg.work);
+            if (scfg.temperature != 1.0) {
+                sampling.applyTemperature(scfg.work, scfg.temperature);
+                if (scfg.gate) |g| {
+                    g.n_temp_applied += 1; // G-D2 (i) : la ligne s'exécute enfin sur GPU
+                    g.n_temp_mul_diffs += sampling_ref.tempDivVsMulDiffs(g.pre_temp, scfg.work, scfg.temperature);
+                }
+            }
             sampling.applyTopK(scfg.work, scfg.top_k, scfg.min_keep, &scfg.scratch);
+            // G-D1 : la référence est calculée sur l'entrée EXACTE de `applyTopP`, AVANT que
+            // celle-ci ne mute `work` en place. `refTopPKeep` ne mute pas son entrée.
+            if (scfg.gate) |g| {
+                const v = sampling_ref.refTopPKeep(scfg.work, scfg.top_p, scfg.min_keep, g);
+                g.n_cut_total += v.n_cut;
+                if (v.n_cut > 0) g.n_steps_with_cut += 1; // ANTÉCÉDENT du gate
+                g.n_boundary_tight += v.n_boundary_tight;
+                g.n_boundary_ties += v.n_boundary_ties;
+            }
             sampling.applyTopP(scfg.work, scfg.top_p, scfg.min_keep, &scfg.scratch);
+            if (scfg.gate) |g| {
+                g.n_steps += 1;
+                var first_bad: i64 = -1;
+                const bad = sampling_ref.compareKeep(scfg.work, g, &first_bad);
+                if (bad > 0) {
+                    g.n_topp_disagree += bad;
+                    if (g.first_bad_id < 0) g.first_bad_id = first_bad;
+                    log.err("G-D1 désaccord @step {d} : {d} id(s) ; 1er id={d} — impl {s}, réf {s}", .{
+                        step, bad, first_bad,
+                        if (g.keep_impl[@intCast(first_bad)]) "GARDE" else "retire",
+                        if (g.keep[@intCast(first_bad)]) "GARDE" else "retire",
+                    });
+                }
+                // Mutant (b) — l'ORDRE de la chaîne HF. Réutilise `scfg.scratch` séquentiellement
+                // (la chaîne nominale en a fini) : aucune allocation.
+                const od = sampling_ref.orderMutantDiffs(g.pre_temp, scfg.work, scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, g, &scfg.scratch);
+                g.n_order_diffs += od;
+                if (od > 0) g.n_steps_with_order_diff += 1;
+            }
 
             const tok_b: u32 = if (scfg.drawArmed())
                 sampling.sample(scfg.work, scfg.prng.random())
@@ -3090,7 +3149,22 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             const d2h_us = @as(f64, @floatFromInt(scfg.d2h_ns_total)) / n_f / 1000.0;
             const warp_us = @as(f64, @floatFromInt(scfg.warp_ns_total)) / n_f / 1000.0;
             log.info("M-COUT: bloc chemin B — moyenne {d:.1} µs/step (D2H seul {d:.1} µs, warpers {d:.1} µs), max {d:.1} µs, sur {d} steps (MESURE PUBLIÉE, pas un gate)", .{ moy_us, d2h_us, warp_us, max_us, scfg.n_cout_samples });
+            // L'instrument mesure aussi celui qui le vérifie : le pont D1/D2 travaille DANS la
+            // fenêtre chronométrée (2 memcpy de vocab + une référence f64 + une chaîne mutée).
+            // Le chiffre ci-dessus est donc INVALIDE sous --gate-d1d2, et le dire ici vaut mieux
+            // que le laisser recopier ailleurs comme s'il était comparable aux mesures M-COUT.
+            if (scfg.gate != null) log.warn("M-COUT ci-dessus : NON COMPARABLE aux mesures M-COUT publiées — le pont --gate-d1d2 travaille dans la fenêtre chronométrée. Ne pas le citer comme coût des warpers.", .{});
         }
+    }
+    if (scfg.gate) |g| {
+        // Publication BRUTE des compteurs : le verdict PASS/FAIL est rendu par le dépouilleur
+        // (scripts/75_d1d2_gpu_bridge.py), pas par le binaire qui produit les chiffres.
+        log.info("G-D1: steps={d} désaccords={d} 1er_id_en_désaccord={d} | ANTÉCÉDENT steps_avec_coupe={d} ids_coupés={d} | frontière_serrée={d} ex_æquo_frontière={d}", .{
+            g.n_steps, g.n_topp_disagree, g.first_bad_id, g.n_steps_with_cut, g.n_cut_total, g.n_boundary_tight, g.n_boundary_ties,
+        });
+        log.info("G-D2: temp_appliquée={d} steps | mutant_a_division_vs_mul={d} logits | mutant_b_ordre={d} ids sur {d} steps", .{
+            g.n_temp_applied, g.n_temp_mul_diffs, g.n_order_diffs, g.n_steps_with_order_diff,
+        });
     }
 
     const elapsed_ns = elapsed.toNanoseconds();

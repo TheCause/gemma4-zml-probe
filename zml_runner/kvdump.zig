@@ -10,6 +10,7 @@
 // I/O par `writePositionalAll`/`readPositionalAll`/`length` (signatures confirmées Task 0.5
 // contre lib/std/Io/File.zig:400,656,687 du SDK Zig 0.16.0-dev.2722).
 const std = @import("std");
+const log = std.log;
 
 pub const FORMAT = "g12-kvdump-v1";
 
@@ -47,6 +48,30 @@ pub const Header = struct {
 };
 
 pub const ReadError = error{ KvDumpBadFormat, KvDumpTruncated };
+
+// --- Refus BRUYANT de la troncature (dette K7, 10 août 2026) -------------------------------
+// Avant : les 7 sites retournaient `KvDumpTruncated` NUE. Les appelants qui `catch` nomment le
+// fichier (`loadCacheManifest`), mais ceux qui `try` (lecture des 4 caches, gemma4_g12auto.zig
+// ~2650) laissaient l'erreur remonter sans un mot : l'utilisateur voyait `error:
+// KvDumpTruncated` et rien d'autre — contraire au standard « refus bruyant » du repo (spec §4.5,
+// 11 refus DC5 tous nommés). Le chemin est passé en paramètre parce que ni `readHeader` ni
+// `readTensorInto` ne le connaissaient : c'est le prix d'un message autonome.
+// Contrainte : AUCUNE allocation (pas d'`allocPrint`) — ces chemins sont hors boucle de step,
+// donc sans risque D10, mais le repo ne s'autorise pas d'allouer pour un message d'erreur.
+
+/// Lecture COURTE : on sait combien on attendait et combien on a lu.
+/// `detail` précise `what` (nom de tenseur) ou vaut "" — concaténation par le formateur.
+fn failTruncated(path: []const u8, what: []const u8, detail: []const u8, want: u64, got: u64) ReadError {
+    log.err("kvdump: fichier tronqué '{s}' — {s}{s} : attendu {d} octets, lu {d}", .{ path, what, detail, want, got });
+    return ReadError.KvDumpTruncated;
+}
+
+/// Lecture qui ÉCHOUE au lieu d'être courte : le nombre d'octets lus est inconnu, l'erreur
+/// sous-jacente est nommée (ne jamais la faire passer pour un décompte).
+fn failTruncatedIo(path: []const u8, what: []const u8, detail: []const u8, want: u64, cause: anyerror) ReadError {
+    log.err("kvdump: lecture impossible '{s}' — {s}{s} : {d} octets attendus, échec I/O ({s})", .{ path, what, detail, want, @errorName(cause) });
+    return ReadError.KvDumpTruncated;
+}
 
 /// Écrit un safetensors : __metadata__ d'abord, puis les tenseurs dans l'ordre donné,
 /// data_offsets contigus. String-building par allocPrint/appendSlice — jamais {any}, jamais
@@ -95,18 +120,18 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, path: []const u8, tensors
 /// Lit et parse le header. Ne lit AUCUN tenseur. `file` reste ouvert, possédé par l'appelant.
 /// Le `Header` retourné possède l'arena : toutes les slices qu'il expose (clés, strings de
 /// manifest, shapes) y vivent et restent valides jusqu'à `deinit`.
-pub fn readHeader(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File) !Header {
+pub fn readHeader(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File, path: []const u8) !Header {
     var len_le: [8]u8 = undefined;
     const n0 = try file.readPositionalAll(io, &len_le, 0);
-    if (n0 != 8) return ReadError.KvDumpTruncated;
+    if (n0 != 8) return failTruncated(path, "préfixe de longueur du header", "", 8, n0);
     const hlen = std.mem.readInt(u64, &len_le, .little);
     if (hlen == 0 or hlen > 1 << 20) return ReadError.KvDumpBadFormat;
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
     const hbuf = try a.alloc(u8, hlen);
-    const n1 = file.readPositionalAll(io, hbuf, 8) catch return ReadError.KvDumpTruncated;
-    if (n1 != hlen) return ReadError.KvDumpTruncated;
+    const n1 = file.readPositionalAll(io, hbuf, 8) catch |cause| return failTruncatedIo(path, "header JSON", "", hlen, cause);
+    if (n1 != hlen) return failTruncated(path, "header JSON", "", hlen, n1);
     // ⚠ `parseFromSliceLeaky` — PAS `parseFromSlice` (le patron gencfg.zig:239, qui garde un
     // `Parsed`). Un `Parsed` retenu dans ce struct est un PIÈGE MORTEL ici : `Parsed.deinit()`
     // lit `self.arena.child_allocator`, or ce child_allocator est `arena.allocator()` — il
@@ -172,11 +197,11 @@ pub fn expectShape(h: *const Header, name: []const u8, dtype: []const u8, shape:
 
 /// Lit un tenseur ENTIER dans `dest` (taille exacte exigée), puis vérifie son checksum
 /// contre `expected_xxh64` (ordre : lecture → hash → comparaison, spec §4.3).
-pub fn readTensorInto(io: std.Io, file: std.Io.File, h: *const Header, name: []const u8, dest: []u8, expected_xxh64: u64) !void {
+pub fn readTensorInto(io: std.Io, file: std.Io.File, path: []const u8, h: *const Header, name: []const u8, dest: []u8, expected_xxh64: u64) !void {
     const e = h.entries.get(name) orelse return error.KvDumpBadFormat;
     if (e.off1 - e.off0 != dest.len) return error.KvDumpShapeMismatch;
-    const n = file.readPositionalAll(io, dest, h.data_base + e.off0) catch return ReadError.KvDumpTruncated;
-    if (n != dest.len) return ReadError.KvDumpTruncated;
+    const n = file.readPositionalAll(io, dest, h.data_base + e.off0) catch |cause| return failTruncatedIo(path, "tenseur ", name, dest.len, cause);
+    if (n != dest.len) return failTruncated(path, "tenseur ", name, dest.len, n);
     if (xxh64(dest) != expected_xxh64) return error.KvDumpChecksumMismatch;
 }
 
@@ -196,13 +221,15 @@ pub fn ckptFingerprint(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Ck
     const f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer f.close(io);
     var len_le: [8]u8 = undefined;
-    if (try f.readPositionalAll(io, &len_le, 0) != 8) return ReadError.KvDumpTruncated;
+    const n0 = try f.readPositionalAll(io, &len_le, 0);
+    if (n0 != 8) return failTruncated(path, "préfixe de longueur du checkpoint", "", 8, n0);
     const hlen = std.mem.readInt(u64, &len_le, .little);
     if (hlen == 0 or hlen > 1 << 30) return ReadError.KvDumpBadFormat;
     const buf = try gpa.alloc(u8, 8 + hlen);
     defer gpa.free(buf);
     @memcpy(buf[0..8], &len_le);
-    if (try f.readPositionalAll(io, buf[8..], 8) != hlen) return ReadError.KvDumpTruncated;
+    const n1 = try f.readPositionalAll(io, buf[8..], 8);
+    if (n1 != hlen) return failTruncated(path, "header du checkpoint", "", hlen, n1);
     const size = try f.length(io);
     return .{ .bytes = size, .hdr_xxh64 = xxh64(buf) };
 }

@@ -2,6 +2,26 @@
 
 > Sonde PLE puis portage ZML de `google/gemma-4-E2B-it`. Roadmap P-1 → P7 (section 10 procédure d'origine).
 
+## 📇 Dettes ouvertes — source de vérité unique (10 août 2026)
+
+L'inventaire complet des dettes du repo, avec pour chacune *pourquoi* elle est ouverte, vit dans
+**`docs/superpowers/plans/2026-08-10-dettes-techniques.md`** (3 tables : A traitées par le plan,
+B sur GO Régis, C hors périmètre écrites). Ne pas re-lister les dettes ailleurs dans ce fichier :
+les doublons épars sont précisément ce qui a laissé D11 et les 2 fronts du 30 juil traîner en
+« ouvert » alors qu'ils étaient soldés.
+
+Chantier « dettes » en cours (branche `dettes-techniques-aout`, 3 décisions Régis du 10 août :
+README **anglais**, **GO** D1/D2, **GO** K8) :
+
+| Dette | État |
+|---|---|
+| PLANNING périmé (2 fronts 🔴 du 30 juil) · D11 | **SOLDÉES** — voir ci-dessous |
+| K7 (refus « tronqué » muet) · README bilingue | **SOLDÉES** (10 août) |
+| D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
+| K8 (restore à froid) | **SOLDÉE** (10 août) — 10,823 s à froid ⇒ **×41,4** ; claim C-D tient, le « ≥ ×130 » **requalifié** comme la prédiction l'annonçait |
+| K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
+| Phase 1 repetition penalty (SUSPENDUE) · Triton paged attention | plans dédiés, hors chantier dettes |
+
 ## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
 
 **Demande Régis (9 août)** : sauvegarder le contenu d'un KV-cache et le réimplanter à la
@@ -124,25 +144,41 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       **3 796 → 908,7 µs** (0,86 % d'un step). P6 (pinned) **RÉFUTÉE par A/B**. Compteur
       `CountingAllocator` **toujours actif** : chaque run futur re-vérifie gratuitement.
       Résultats : `docs/D10_RESULTS.md`. Dettes DA-3/DA-5 soldées, DA-1/DA-6 ouvertes.
-- [ ] 🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — mesures passées en mode ambigu** : inventorier
-      les claims de PERFORMANCE du repo (les claims d'équivalence sont insensibles), marquer
-      « mode non prouvé », re-mesurer celles qui portent une décision. Inventaire lancé
-      (workflow), triage A/B/C attendu.
-- [ ] 🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — dettes DA-1/DA-6** : un run unique sous
-      `LD_PRELOAD` d'un malloc compteur sur la VM pour chiffrer les allocations C/PJRT par step,
-      invisibles au compteur Zig. La 8k (DA-4 résiduelle) : re-run d'un gate sur `gemma4_g12a8k`
-      à l'occasion.
+- [x] ~~🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — mesures passées en mode ambigu**~~ —
+      **SOLDÉ (30 juil)** : audit complet `docs/MODE_BUILD_AUDIT.md`. Inventaire de tout le repo
+      (docs, PLANNING, README, specs, plans, 90+ tags, messages de merge) — **174 claims relevées,
+      80 à mode non prouvé, 76 après déduplication** — triées par SENSIBILITÉ au mode, pas par
+      ancienneté : **panier A** (chronos host purs) re-mesuré par D10, **panier B** (chiffres
+      d'archive) marqué sans re-mesure (décision documentée §5), **panier C** insensible par
+      construction. Prévention §6 : le mode est désormais **publié par le binaire** (bannière
+      `BUILD: mode=…`), jamais déduit de la commande qu'on croit avoir lancée.
+- [x] ~~🔴 **NOUVEAU FRONT (décision Régis, 30 juil) — dette DA-1**~~ — **BORNÉE (30 juil,
+      `docs/D10_RESULTS.md` §6)** : deux runs différentiels sous `LD_PRELOAD` (88 vs 828 steps) —
+      le run 10× plus long fait *moins* de mallocs (215,28 M vs 215,62 M, jitter inter-compiles
+      ±335 K) ⇒ **< ~450 mallocs C/step**, indiscernable de zéro par méthode différentielle.
+      **DA-6 reste ouverte** (structurelle, contrepartie documentée : compteurs mono-thread
+      corrects, dérive nette bornée par AL-RSS). La 8k (DA-4 résiduelle, == dette K2) reste une
+      **dette assumée** : décision Régis du 9 août, gates 1280+4k seulement.
 - [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
       Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
-- [ ] ⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a **aucune couverture GPU** — sa
-      seule couverture est la fixture `S2-U`. Déclarée, pas tue.
+- [x] ~~⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a aucune couverture GPU~~ —
+      **SOLDÉE (10 août, GO Régis)**, avec **D2** : gates **G-D0/G-D1/G-D2** verts. 386 steps GPU
+      armés, **0 désaccord** contre une référence écrite autrement (tri descendant, f64),
+      antécédent **plein** (coupe à 386/386 steps, 23 267 ids), **0 cas frontière**. G-D2 : la
+      température s'exécute enfin sur GPU et **ses 2 mutants mordent**. Graphe **intouché**
+      (md5 HLO identique). ⚠ 2 mutants « évidents » se sont révélés VACUS et ont été remplacés
+      avant codage (monotonie de la division) — `docs/SAMPLING_RESULTS.md` §7.
 - [ ] **Dette assumée — périmètre E2B non couvert** : les runners E2B ne sortent pas les logits de
       leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a **pas** de `suppress_tokens` — y
       coder `258882` en dur serait faux. La claim « reproduit `generate()` » reste **fausse** pour
       eux, et doit rester écrite comme telle.
-- [ ] **⚠ D11 impacté** : `70_u8_corrupt.py` écrit son checkpoint à plat (sans snapshot ni
-      symlink) → la découverte automatique y échoue. Il doit passer
-      `--gen-config <dq>/generation_config.json` — un chemin de **fichier**, pas un répertoire.
+- [x] ~~**⚠ D11 impacté**~~ — **SOLDÉE (29 juil, doublon périmé retiré le 10 août)** : cette case
+      décrivait le problème que le « Correctif D11 (29 juil) » coché plus haut a réglé.
+      `70_u8_corrupt.py:112-137` dépose la politique du checkpoint SOURCE à côté du checkpoint
+      corrompu à plat, et imprime la commande de contre-test avec un `--gen-config` **explicite**
+      (chemin de FICHIER, jamais un répertoire). Vérifié à l'exécution sur la VM le 10 août : la
+      découverte rend le `generation_config.json` réel du snapshot (9 clés dont `suppress_tokens`),
+      elle ne rend pas `None`.
 - [ ] **Puis** le chantier repetition penalty (spec + plan déjà écrits et revus, ci-dessous)
 
 ## 🔴 29 juillet 2026 — FINDING : la trajectoire libre du 12B est BISTABLE

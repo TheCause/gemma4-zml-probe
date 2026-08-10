@@ -16,7 +16,13 @@
 # échouer n'est pas un gate (leçon feedback_invariant_tue_le_controle).
 set -u
 
-MARQUEUR="argmax sur les logits bruts"
+# Le marqueur de portée est accepté dans l'UNE OU L'AUTRE langue (OU logique) — extension du
+# 10 août 2026, quand le README est passé à l'anglais intégral (dette « README bilingue »,
+# décision Régis). La PORTÉE du gate est strictement CONSTANTE : un document de catégorie (i)
+# qui énonce « == HF » doit toujours porter le qualificatif ; seule la langue dans laquelle il
+# peut l'écrire s'élargit. Ni marqueur FR ni marqueur EN ⇒ toujours NU, toujours FAIL.
+MARQUEUR_FR="argmax sur les logits bruts"
+MARQUEUR_EN="same argmax on the raw logits"
 CIBLES=(
   README.md
   PLANNING.md
@@ -43,11 +49,13 @@ check() {
     [ -f "$f" ] || continue
     if grep -q "== HF" "$f"; then
       n_avec=$((n_avec + 1))
-      if ! grep -qF "$MARQUEUR" "$f"; then
-        echo "  NU  $f : $(grep -c '== HF' "$f") occurrence(s) de « == HF », marqueur de portée ABSENT"
-        fail=1
+      if grep -qF "$MARQUEUR_FR" "$f"; then
+        echo "  OK  $f : $(grep -c '== HF' "$f") occurrence(s), marqueur présent (FR)"
+      elif grep -qF "$MARQUEUR_EN" "$f"; then
+        echo "  OK  $f : $(grep -c '== HF' "$f") occurrence(s), marqueur présent (EN)"
       else
-        echo "  OK  $f : $(grep -c '== HF' "$f") occurrence(s), marqueur présent"
+        echo "  NU  $f : $(grep -c '== HF' "$f") occurrence(s) de « == HF », marqueur de portée ABSENT (ni FR ni EN)"
+        fail=1
       fi
     fi
   done
@@ -57,15 +65,44 @@ check() {
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp="$(mktemp -d)"
-  canary="$tmp/CANARY_claim.md"
-  printf 'Le portage 12B est == HF sur 1150 positions.\n' > "$canary"
-  echo "CONTRE-PREUVE — un document nu, EXAMINÉ SEUL, doit faire ÉCHOUER le gate :"
-  if check "$canary"; then
-    echo "GC11 SELF-TEST FAIL — le gate a ACCEPTÉ une formulation nue : il ne peut pas échouer."
-    rm -rf "$tmp"; exit 1
+  rc=0
+
+  # (a) canary NU en français — le cas historique.
+  canary_fr="$tmp/CANARY_claim_fr.md"
+  printf 'Le portage 12B est == HF sur 1150 positions.\n' > "$canary_fr"
+  echo "CONTRE-PREUVE (a) — un document nu FR, EXAMINÉ SEUL, doit faire ÉCHOUER le gate :"
+  if check "$canary_fr"; then
+    echo "  ✗ le gate a ACCEPTÉ une formulation nue française."
+    rc=1
   fi
+
+  # (b) canary NU en anglais — ajouté le 10 août 2026 avec l'alternative bilingue : sans lui, le
+  # gate ne serait jamais vu mordre dans la langue où le README est désormais écrit.
+  canary_en="$tmp/CANARY_claim_en.md"
+  printf 'The 12B port is == HF over 1150 positions.\n' > "$canary_en"
+  echo "CONTRE-PREUVE (b) — un document nu EN, EXAMINÉ SEUL, doit faire ÉCHOUER le gate :"
+  if check "$canary_en"; then
+    echo "  ✗ le gate a ACCEPTÉ une formulation nue anglaise."
+    rc=1
+  fi
+
+  # (c) La question dans l'AUTRE SENS (leçon feedback_controle_qui_ne_peut_pas_reussir) : la
+  # branche EN du OU doit pouvoir RÉUSSIR. Un marqueur anglais mal orthographié ici rendrait la
+  # branche morte — le gate resterait « vert » en n'acceptant jamais que le français.
+  canary_ok="$tmp/CANARY_claim_en_ok.md"
+  printf 'The 12B port is == HF, i.e. same argmax on the raw logits.\n' > "$canary_ok"
+  echo "CONTRE-ÉPREUVE (c) — un document EN PORTANT le marqueur anglais doit PASSER :"
+  if ! check "$canary_ok"; then
+    echo "  ✗ le gate a REFUSÉ un document anglais correctement qualifié : la branche EN est MORTE."
+    rc=1
+  fi
+
   rm -rf "$tmp"
-  echo "GC11 SELF-TEST PASS — le gate détecte bien une formulation nue."
+  if [ "$rc" -ne 0 ]; then
+    echo "GC11 SELF-TEST FAIL — voir les ✗ ci-dessus."
+    exit 1
+  fi
+  echo "GC11 SELF-TEST PASS — le gate mord dans les DEUX langues, et accepte les DEUX langues."
   exit 0
 fi
 

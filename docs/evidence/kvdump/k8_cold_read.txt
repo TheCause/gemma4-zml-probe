@@ -1,0 +1,62 @@
+K8 — le restore 4k mesuré À FROID (10 août 2026)
+================================================
+
+Prédiction pré-enregistrée AVANT la mesure : docs/evidence/kvdump/k8_prediction.md
+(committée en 78ec640, avant le premier drop_caches)
+
+Binaire : gemma4_g12a4k, BUILD: mode=ReleaseFast (vérifié aux 3 runs).
+Écart au plan consigné : le venv du plan (/data/venvs/gemma4-probe) ne porte PAS xxhash ;
+la fixture a été produite avec /data/venvs/g12b (celui que documente le script 71).
+
+----- trace intégrale du run -----
+=== df /data AVANT (leçon : supprimer n'est pas libérer -> df avant/après) ===
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sdb        984G  799G  135G  86% /data
+=== (a) fixture oracle 3900 ids, positions[0]=28 (npt MESURÉ) ===
+make-fixture : 3900 ids (tuilage de u9_ids.safetensors), positions[0]=28 -> /tmp/fx3900.safetensors
+fixture rc=0
+=== (b) DC7(i) : atteindre l'état par le CALCUL + dump 4k (~8 min, 2,62 GiB) ===
+calc rc=1 (un mismatch A1 final est ATTENDU : la fixture est factice ; PERF/KVDUMP sont émis avant)
+-rw-rw-r-- 1 ia ia 2818588965 Aug 10 07:37 /data/gemma4-zml-probe/kvdump/k8_4k.kvdump
+info: KVDUMP: /data/gemma4-zml-probe/kvdump/k8_4k.kvdump l_max=4096 step_next=3927 fed_next=569 ids=3927 octets=2818587996 xxh64_ok
+info: PERF : prefill 28 steps en 3.248s (8.6 tok/s) ; génération 3900 tokens en 445.279s (8.8 tok/s)
+=== (c) DROP_CACHES puis restore À FROID ===
+drop_caches rc=0
+froid rc=0
+info: BUILD: mode=ReleaseFast
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 10.823s
+=== (d) CONTRÔLE À CHAUD (doit retrouver ~0,9 s ; sinon l'instrument a changé) ===
+chaud rc=0
+info: BUILD: mode=ReleaseFast
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.892s
+=== FIN K8 ===
+
+----- dépouillement -----
+temps de calcul (ce run)   : 448,527 s  (prefill 3,248 s + génération 3900 tokens 445,279 s)
+restore À FROID            : 10,823 s   <- drop_caches immédiatement avant
+restore à chaud (contrôle) : 0,892 s    <- à comparer aux 0,898 s de DC7 : -0,67 %
+
+  => GAIN À FROID  = 448,527 / 10,823 = x41,4
+  => gain à chaud  = 448,527 / 0,892  = x502,8   (cohérent avec le x500,5 publié)
+  => le froid est 12,1x plus lent que le chaud ; débit de lecture ~0,264 GiB/s sur 2,63 GiB
+
+VERDICT CONTRE LA PRÉDICTION (aucun seuil ajusté après coup) :
+  [x] plage prédite 3 s - 14,9 s ............ 10,823 s : DANS LA PLAGE
+  [x] claim C-D (gain >= x30) ............... TIENT à froid (x41,4)
+  [!] le ">= x130" du §6 de KVDUMP_RESULTS.md  REQUALIFIÉ : il exigeait un restore <= 3,457 s,
+      le froid en fait 10,823. Requalification PRÉVUE par la prédiction, et exécutée.
+  [x] kill (restore > 34,6 s) ............... non atteint : la claim vit
+
+CE QUE CETTE MESURE NE DIT PAS :
+  - un seul réplicat à froid (pas de dispersion mesurée) ;
+  - le débit dépend du stockage de CETTE VM (/dev/sdb) : il n'est pas transposable ;
+  - drop_caches vide aussi le cache des poids : le chargement du modèle est plus lent, mais il
+    est HORS de la fenêtre KVLOAD-PERF (chrono post-compile), donc sans effet sur le chiffre.
+
+----- NETTOYAGE (leçon : supprimer n'est pas libérer -> df AVANT/APRÈS, jamais la somme des du) -----
+df /data AVANT suppression : 802G utilisés, 132G libres
+  supprimés : k8_4k.kvdump (2 818 588 965 o) + k7.kvdump (880 804 894 o) + les 3 tronqués K7
+              + /tmp/fx3900.safetensors
+df /data APRÈS suppression : 799G utilisés, 136G libres
+  => -3 Go utilisés / +4 Go libres : l'espace est RÉELLEMENT rendu (aucun snapshot ne séquestre
+     les blocs). Reste dans kvdump/ : 7,3 Mo de témoins HLO et de références, conservés.

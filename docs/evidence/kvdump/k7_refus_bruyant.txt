@@ -1,0 +1,68 @@
+K7 — « le refus "fichier tronqué" est muet » : AVANT / APRÈS (10 août 2026)
+==========================================================================
+
+DETTE (docs/KVDUMP_RESULTS.md §6) : les 7 sites `return ReadError.KvDumpTruncated` de
+zml_runner/kvdump.zig retournaient l'erreur NUE. Les appelants qui `catch` nomment le fichier,
+mais ceux qui `try` (lecture des 4 caches et de ids_fed) laissaient l'erreur remonter sans un
+mot — contraire au standard « refus bruyant » du repo (11 refus DC5 tous nommés).
+
+Binaire : gemma4_g12auto, BUILD: mode=ReleaseFast (bannière vérifiée aux DEUX états).
+Dump de travail : k7.kvdump, 880 804 894 octets (prompt "test K7", --max-tokens 8).
+Tronqué : k7_trunc.kvdump = 100 000 premiers octets.
+
+===== ÉTAT AVANT (binaire du 9 août, code non modifié) =====
+$ gemma4_g12auto <ckpt> <tok> --load-cache k7_trunc.kvdump --max-tokens 8   # rc=1
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+error: KvDumpTruncated
+
+  ^^^ « error: KvDumpTruncated » et RIEN d'autre : ni le fichier, ni le champ, ni les octets.
+
+===== ÉTAT APRÈS (helpers failTruncated/failTruncatedIo aux 7 sites) =====
+--- site readTensorInto (lecture courte d'un tenseur) — le site qui remontait en `try` nu ---
+$ gemma4_g12auto <ckpt> <tok> --load-cache k7_trunc.kvdump --max-tokens 8   # rc=1
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+error: kvdump: fichier tronqué '/data/gemma4-zml-probe/kvdump/k7_trunc.kvdump' — tenseur ids_fed : attendu 92 octets, lu 0
+error: KvDumpTruncated
+
+--- site readHeader:101 (préfixe de longueur incomplet) : fichier tronqué à 4 octets ---
+$ gemma4_g12auto <ckpt> <tok> --load-cache k7_pfx.kvdump --max-tokens 4   # rc=1
+error: kvdump: fichier tronqué '/data/gemma4-zml-probe/kvdump/k7_pfx.kvdump' — préfixe de longueur du header : attendu 8 octets, lu 4
+error: --load-cache : header illisible (/data/gemma4-zml-probe/kvdump/k7_pfx.kvdump) : KvDumpTruncated
+error: KvDumpTruncated
+
+--- site readHeader:109 (header JSON incomplet) : fichier tronqué à 40 octets ---
+$ gemma4_g12auto <ckpt> <tok> --load-cache k7_hdr.kvdump --max-tokens 4   # rc=1
+error: kvdump: fichier tronqué '/data/gemma4-zml-probe/kvdump/k7_hdr.kvdump' — header JSON : attendu 954 octets, lu 32
+error: --load-cache : header illisible (/data/gemma4-zml-probe/kvdump/k7_hdr.kvdump) : KvDumpTruncated
+error: KvDumpTruncated
+
+===== NON-RÉGRESSION : le cas SAIN passe encore =====
+$ gemma4_g12auto <ckpt> <tok> --load-cache k7.kvdump --max-tokens 8   # rc=0
+info: BUILD: mode=ReleaseFast
+info: KVLOAD: /data/gemma4-zml-probe/kvdump/k7.kvdump l_max=1280 step_next=23 fed_next=236761 ids=23 (reprise sans prefill)
+info: KVLOAD: contexte de 23 tokens (non réaffiché)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 1.868s
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=31
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+
+  ^^^ ALLOC-LOOP: alloc=0 — l'interdit D10 se re-vérifie gratuitement, inchangé.
+  (RSS-DELTA INEXECUTABLE est normal : run de 31 steps, la mesure exige t20/t200.)
+
+===== CE QUI N'EST PAS PROUVÉ ICI (à ne pas laisser croire) =====
+3 des 7 sites ont été VUS produire leur message : readHeader:101 (préfixe),
+readHeader:109 (header JSON), readTensorInto:179 (tenseur, lecture courte).
+
+Les 4 autres n'ont PAS été exercés :
+  - readHeader:108 et readTensorInto:178 — branches `catch` d'une ERREUR d'I/O (et non d'une
+    lecture courte) : les provoquer demanderait un descripteur défaillant, pas un fichier
+    tronqué. Leur message emprunte le helper failTruncatedIo, non exercé.
+  - ckptFingerprint:199 et :205 — portent sur le CHECKPOINT (10,3 Go), pas sur le dump : les
+    exercer coûterait une copie tronquée de 10 Go sur la VM. Non fait, sciemment.
+Ces 4 sites sont donc corrects PAR LECTURE, pas par observation. Dette de vérification
+déclarée, pas tue.
