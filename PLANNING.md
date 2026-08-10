@@ -19,9 +19,43 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | K7 (refus « tronqué » muet) · README bilingue | **SOLDÉES** (10 août) |
 | D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
 | K8 (restore à froid) | **SOLDÉE** (10 août) — 10,823 s à froid ⇒ **×41,4** ; claim C-D tient, le « ≥ ×130 » **requalifié** comme la prédiction l'annonçait |
-| K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
+| K1 · K2/DA-4 · K3 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
+| **K5 (prefill partiel)** | **SOLDÉE le 10 août** — **7 gates verts** (PF0-PF6), branche `k5-prefill-partiel`. Source de vérité : `docs/K5_RESULTS.md`. Vérification d'ensemble en une commande : `python3 scripts/82_k5_verify.py` |
+| **K4 (résident multi-tour)** | **DÉBLOQUÉE** par K5 — un 2ᵉ prompt après restore EST un prefill partiel, et il est prouvé. Le chiffre qui la justifie : **3,53 s de relecture du dump à CHAQUE tour** (M-K5-1) |
 | **Phase 1 repetition penalty** | **SOLDÉE le 10 août** — **7 gates verts** (RP0-RP6) + round-trip, mergée sur `main` (PR #22 `86a46c9`, PR #23 `38a0888`). RP7 et M1 : mesures publiées sans verdict. Source de vérité : `SAMPLING_RESULTS.md` **§8** |
 | K3 · K4 · K5 · Triton paged attention | **CADRÉS** (10 août) — fiches dans `docs/superpowers/specs/2026-08-10-cadrage-dettes-restantes.md` ; ordre reco : K5 → K4, K3 et Triton indépendants |
+
+## 🏁 Chantier K5 « prefill partiel » — EXÉCUTÉ, 7 GATES VERTS (10 août 2026)
+
+**La capacité gagnée** : `--load-cache F --prompt "tour 2"` — reprendre un cache dumpé **et
+feeder un prompt neuf**. Un run B, dans un autre process, reprend le contexte d'un run A et
+répond `« Your name is Aldebaran. »` : le nom ne peut venir que du cache. Chantier **100 %
+host-side**, md5 HLO inchangé (7ᵉ chantier consécutif).
+
+Résultats complets : **`docs/K5_RESULTS.md`**. Tags `gate/pf0-pass` … `gate/pf6-pass`.
+Vérification d'ensemble sans GPU : `python3 scripts/82_k5_verify.py`.
+
+**Décisions Régis (Task 0)** : D-K5-1..5 aux défauts de la spec §4.7 · puis, en cours
+d'exécution, **requalification de C-K5-B** (mutant canonique `--n 2`).
+
+**Ce que la mesure a corrigé au plan** :
+- la **clôture du tour 1 vaut DEUX ids** (`<turn|>` + `\n`), pas un — diagnostiqué **avant**
+  le code par le recoupement de frontière, que ni PF6 ni PF1 n'auraient pu voir ;
+- **C-K5-B réfutée à N=1** : un mensonge d'UNE position déplace les 19 logits (jusqu'à 1,07)
+  sans faire basculer un seul argmax (marges médianes 3,70). Le gate mord à **N ≥ 2** ;
+- **M-K5-1** : ×35,6 en positions évitées, mais **×11,3 en temps** — l'écart, c'est la
+  relecture du dump, coût fixe que le comptage de positions ignore.
+
+**Dettes ouvertes par ce chantier** : garde fenêtre transposée non levée (K5-1) · pas de gate
+teacher-forcé 4k (K5-2) · PF1 ne voit pas un mensonge d'1 position (K5-3) · chaînage v1 relit
+880 Mio par tour (K5-4, c'est K4) · le `74` ne tourne pas sur la VM, faute de `numpy`/`xxhash`
+(K5-5).
+
+**⚠ Dette observée hors périmètre K5 (10 août)** : le gate **GC11** travaille sur une liste
+explicite de cibles ; `docs/D10_RESULTS.md` et `docs/SAMPLING_RESULTS.md` énoncent chacun un
+`== HF` **sans être dans cette liste**. Le gate ne les voit pas. Constaté en vérifiant que
+`K5_RESULTS.md` n'y échappait pas (il n'énonce pas la claim sous cette forme) — **non corrigé
+ici** : élargir la liste est un changement de portée du gate, à décider séparément.
 
 ## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
 
