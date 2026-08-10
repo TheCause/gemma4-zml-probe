@@ -1,0 +1,49 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=4574524 KiB (~4 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 28.083s
+info: [mem] post-compile (go/no-go): RSS=5247568 KiB (~5 GiB) swap=0 KiB (~0 GiB)
+info: KVEQ: appel (1) — 16 tokens puis dump -> /data/gemma4-zml-probe/k5/pf5_eq_4k.kvdump
+info: Boucle autonome : 20 steps de prefill, puis génération (limite 16 = max_tokens)
+info: KVDUMP: /data/gemma4-zml-probe/k5/pf5_eq_4k.kvdump l_max=4096 step_next=35 fed_next=16283 ids=35 octets=2818572428 xxh64_ok
+info: GENCFG: suppress a mordu 1 fois sur 16 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=35
+info: ALLOC-TOTAL: alloc=803 free=765 bytes=2925719997 shards=1
+info: PERF : prefill 20 steps en 2.322s (8.6 tok/s) ; génération 16 tokens en 1.689s (9.5 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 16 tokens générés (EOT_ID=106, max_tokens=16)
+info: generated = { 818, 11639, 15569, 573, 3217, 506, 7217, 563, 3730, 13842, 1806, 1689, 14485, 236787, 5213, 16283 }
+info: arrêt : max-tokens (16)
+info: KVEQ: appel (2) — 48 tokens depuis zéro (référence)
+info: Boucle autonome : 20 steps de prefill, puis génération (limite 48 = max_tokens)
+info: GENCFG: suppress a mordu 1 fois sur 48 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=67
+info: ALLOC-TOTAL: alloc=816 free=776 bytes=2926030989 shards=1
+info: PERF : prefill 20 steps en 2.248s (8.9 tok/s) ; génération 48 tokens en 5.295s (9.1 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=5455660 t200=null)
+info: mode libre : 48 tokens générés (EOT_ID=106, max_tokens=48)
+info: generated = { 818, 11639, 15569, 573, 3217, 506, 7217, 563, 3730, 13842, 1806, 1689, 14485, 236787, 5213, 16283, 3223, 9637, 125546, 5213, 219274, 19389, 125546, 532, 5213, 23214, 27052, 99382, 108, 8291, 563, 506, 2918, 236772, 2003, 236772, 9340, 25890, 236787, 108, 10354, 236743, 236770, 236761, 146430, 563, 496, 48645 }
+info: arrêt : max-tokens (48)
+info: KVLOAD: /data/gemma4-zml-probe/k5/pf5_eq_4k.kvdump l_max=4096 step_next=35 fed_next=16283 ids=35 (reprise sans prefill)
+info: KVLOAD: contexte de 35 tokens (non réaffiché)
+info: KVEQ: appel (3) — restore @step=35 puis 32 tokens
+info: Boucle autonome : 35 steps de prefill, puis génération (limite 32 = max_tokens)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.771s
+info: GENCFG: suppress a mordu 0 fois sur 32 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=67
+info: ALLOC-TOTAL: alloc=836 free=789 bytes=2926526761 shards=1
+info: PERF-RESUME : reprise @step=35, 32 tokens générés en 3.604s (8.9 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=5455676 t200=null)
+info: mode libre : 32 tokens générés (EOT_ID=106, max_tokens=32)
+info: generated = { 3223, 9637, 125546, 5213, 219274, 19389, 125546, 532, 5213, 23214, 27052, 99382, 108, 8291, 563, 506, 2918, 236772, 2003, 236772, 9340, 25890, 236787, 108, 10354, 236743, 236770, 236761, 146430, 563, 496, 48645 }
+info: arrêt : max-tokens (32)
+info: KVEQ: 32/32 bit-identiques -> PASS
+info: KVEQ: référence écrite -> /data/gemma4-zml-probe/k5/pf5_eq_4k.kvdump.ref.json (32 ids, 32 marges)
+d652e8f85ebeee6badeb49f8057c8b48  ./bazel-bin/examples/rqz/gemma4_g12a4k

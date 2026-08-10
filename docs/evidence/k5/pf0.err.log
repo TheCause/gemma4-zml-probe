@@ -1,0 +1,22 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2632900 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.882s
+info: [mem] post-compile (go/no-go): RSS=3349108 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 14 steps de prefill, puis génération (limite 4 = max_tokens)
+info: GENCFG: suppress a mordu 0 fois sur 4 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=17
+info: ALLOC-TOTAL: alloc=752 free=716 bytes=954595946 shards=1
+info: PERF : prefill 14 steps en 1.522s (9.2 tok/s) ; génération 4 tokens en 0.309s (12.9 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 4 tokens générés (EOT_ID=106, max_tokens=4)
+info: generated = { 17574, 623, 166488, 236775 }
+info: arrêt : max-tokens (4)
+fa2284faba2f78a0aa59339ead04f5fd  ./bazel-bin/examples/rqz/gemma4_g12auto
