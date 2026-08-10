@@ -260,10 +260,15 @@ token-for-token gates.
 
 **Sampling is no longer a limitation** (12B only): `top_k`/`top_p`/`temperature` + seed-reproducible
 draw are implemented host-side and gated. **Neither is losing a generation's state**: it can be
-dumped and re-implanted (see above). Still open, written down rather than hidden:
-**repetition penalty** (specified, not executed), the **E2B** runners don't expose logits so the
-decoding policy can't apply there, and C/PJRT-side allocations are *bounded* (< ~450 mallocs/step,
-measured) rather than counted. **`applyTopP` is no longer uncovered**: as of 10 Aug 2026 it is
+dumped and re-implanted (see above). **Repetition penalty is implemented too** (10 Aug 2026,
+12B): HF-compatible, host-side, bit-identical to `RepetitionPenaltyLogitsProcessor` at **0 ULP**
+on four penalty values, graph unchanged (same HLO md5 with the penalty armed), zero allocation
+per step, and steerable at runtime from the resident REPL (`:penalty`) — `docs/SAMPLING_RESULTS.md`
+§8. Two of its gates (runner-vs-HF trajectory, and its corruption counter-tests) are **still
+pending a free GPU window** and are listed as such rather than claimed. Still open, written down
+rather than hidden: the **E2B** runners don't expose logits so the decoding policy can't apply
+there, and C/PJRT-side allocations are *bounded* (< ~450 mallocs/step, measured) rather than
+counted. **`applyTopP` is no longer uncovered**: as of 10 Aug 2026 it is
 gated on GPU against an independently written reference (386 armed steps, 0 disagreement, full
 antecedent) — `docs/SAMPLING_RESULTS.md` §7.
 

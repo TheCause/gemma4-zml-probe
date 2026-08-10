@@ -20,7 +20,8 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | D1/D2 (couverture GPU `applyTopP`/`applyTemperature`) | **SOLDÉES** (10 août, 3 gates verts — `SAMPLING_RESULTS.md` §7) |
 | K8 (restore à froid) | **SOLDÉE** (10 août) — 10,823 s à froid ⇒ **×41,4** ; claim C-D tient, le « ≥ ×130 » **requalifié** comme la prédiction l'annonçait |
 | K1 · K2/DA-4 · K3 · K4 · K5 · K6 · DA-6 | **ouvertes assumées** — décisions actées ou chantiers propres, cf table C du plan |
-| Phase 1 repetition penalty (SUSPENDUE) · Triton paged attention | plans dédiés, hors chantier dettes |
+| **Phase 1 repetition penalty** | **EXÉCUTÉE le 10 août** — RP0/RP1/RP2/RP5/RP6 verts + round-trip ; RP3/RP4/M1 en attente d'une fenêtre GPU. Source de vérité : `SAMPLING_RESULTS.md` **§8** |
+| K3 · K4 · K5 · Triton paged attention | **CADRÉS** (10 août) — fiches dans `docs/superpowers/specs/2026-08-10-cadrage-dettes-restantes.md` ; ordre reco : K5 → K4, K3 et Triton indépendants |
 
 ## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
 
@@ -159,8 +160,12 @@ Preuves complètes : **`docs/FINDING_GENERATION_CONFIG.md`**.
       **DA-6 reste ouverte** (structurelle, contrepartie documentée : compteurs mono-thread
       corrects, dérive nette bornée par AL-RSS). La 8k (DA-4 résiduelle, == dette K2) reste une
       **dette assumée** : décision Régis du 9 août, gates 1280+4k seulement.
-- [ ] ⚠ **Phase 1 (repetition penalty) SUSPENDUE** — plan rév. 3 du 27 juil prêt, non exécuté.
-      Les gates `SM0…SM3` de sa spec sont **SUPERSÉDÉS** par les `S2-`.
+- [x] ~~⚠ **Phase 1 (repetition penalty) SUSPENDUE**~~ — **EXÉCUTÉE le 10 août 2026** (branche
+      `penalty-phase1`), ré-instruite contre l'état réel de `main` par
+      `docs/superpowers/plans/2026-08-10-dettes-restantes-penalty.md` : le plan du 27 juil
+      prédatait 5 chantiers mergés. Les gates `SM0…SM3` de sa spec restent **SUPERSÉDÉS** par
+      les `S2-`. Verdicts : `SAMPLING_RESULTS.md` **§8**. RP3/RP4/M1 restent à passer (GPU
+      occupé par un autre travail au moment de la clôture).
 - [x] ~~⚠ **Dette D1 (confirmée à l'exécution)** : `applyTopP` n'a aucune couverture GPU~~ —
       **SOLDÉE (10 août, GO Régis)**, avec **D2** : gates **G-D0/G-D1/G-D2** verts. 386 steps GPU
       armés, **0 désaccord** contre une référence écrite autrement (tri descendant, f64),
@@ -215,12 +220,14 @@ Deux conséquences à retenir :
    diversité plate 0,62-0,76 ; le run de 1150 atteint sa propre conclusion). Le prompt qui récite
    reste à identifier.
 
-**Chantier repetition penalty — cadrage TERMINÉ, exécution suspendue** (branche
-`sampling-penalty`) : spec rév. 4 + plan rév. 3, deux tours de revue chacun.
-Task 0 faite (3 témoins gelés, archivés en durable côté GPU). Prérequis **RP-1** identifié :
-l'oracle de décode 12B est **bf16 par construction** (`69:371` refuse `--compute-fp32` hors
-teacher-force) — l'instrument déclaré corrompu le 25 juil ; à refonder en fp32 avant d'armer la
-penalty.
+**Chantier repetition penalty — EXÉCUTÉ le 10 août 2026** (branche `penalty-phase1`).
+La spec rév. 4 reste la source des critères ; l'exécution a suivi le plan de ré-instruction du
+10 août, le plan rév. 3 du 27 juil n'étant plus applicable (11 écarts relevés contre `main`).
+Le prérequis **RP-1** (oracle de décode en fp32) était **déjà soldé** par le chantier
+`generation_config` : la garde a été levée en GC8 (`69_u8_gen_oracle.py:547-556`) — vérifié,
+pas supposé. Ce qui a coûté du temps n'était pas là : voir la requalification de RP2
+(`SAMPLING_RESULTS.md` §8.4) et le finding
+`docs/evidence/penalty/FINDING_temoin_ids_non_reproductible.md`.
 
 ### Planning courant
 
