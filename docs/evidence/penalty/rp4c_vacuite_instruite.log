@@ -1,0 +1,13 @@
+===== 1. --ignore-prompt sur la fixture 1.15 (equivaut a la corruption c) =====
+exit=0
+info: PENALTY: rp=1.15 ignore_prompt=true hist_len=77 prompt_len=29 générés=48 n_penalty_touched=47 n_penalty_empty_hist=29
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+
+===== 2. Recherche BORNEE (3 essais) d un prompt ou --ignore-prompt change les ids =====
+essai 1 (rc 0/0) : ids DIFFERENTS — le flag MORD sur ce prompt (antecedent trouve)
+    prompt: Banana banana banana. Continue this list.
+essai 2 (rc 0/0) : ids DIFFERENTS — le flag MORD sur ce prompt (antecedent trouve)
+    prompt: Kaleidoscope. Write one sentence about a kaleidoscope.
+essai 3 (rc 0/0) : ids DIFFERENTS — le flag MORD sur ce prompt (antecedent trouve)
+    prompt: Repeat after me: quartz, quartz, quartz. Now continue.
+ALL DONE

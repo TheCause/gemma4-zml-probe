@@ -1,0 +1,86 @@
+=== RP5 / RP6 : sorties des directives et des générations ===
+--- RP5 : 2 passes, même prompt, penalty 1.15 ---
+prompt> :penalty = 1.15 (appliquée au prompt SUIVANT)
+prompt> réponse : "The story of zero is one of the greatest intellectual achievements in human history. It is not just a "nothing"; it is a sophisticated mathematical tool that required thousands"
+prompt> réponse : "The story of zero is one of the greatest intellectual achievements in human history. It is not just a "nothing"; it is a sophisticated mathematical tool that required thousands"
+prompt> 
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=61 prompt_len=29 générés=32 n_penalty_touched=60 n_penalty_empty_hist=0
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=61 prompt_len=29 générés=32 n_penalty_touched=60 n_penalty_empty_hist=0
+
+--- RP6(a) : directives seules, AUCUNE génération ---
+prompt> :penalty = 1.15 (appliquée au prompt SUIVANT)
+prompt> params: rp=1.15 ignore_prompt=false T=1 top_k=0 top_p=1 min_keep=1 seed=null max_tokens=32
+prompt> directives : :penalty <f>  :ignore-prompt on|off  :params  :help
+             (ligne vide ou EOF pour quitter ; une ligne commençant par ':' n'est jamais un prompt)
+prompt> générations=0 lignes_PENALTY=0
+
+--- RP6(b) : la penalty prend effet au prompt SUIVANT ---
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=61 prompt_len=29 générés=32 n_penalty_touched=60 n_penalty_empty_hist=0
+générations=2 (1 seule ligne PENALTY attendue : la 1re passe est neutre)
+
+--- RP6(d) : valeurs invalides, la session CONTINUE ---
+prompt> :penalty : valeur invalide '0' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :penalty : valeur invalide '-1' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :penalty : valeur invalide 'nan' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :penalty : valeur invalide 'inf' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :penalty : valeur invalide 'abc' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :penalty : valeur invalide '' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : 1
+prompt> :ignore-prompt : attendu 'on' ou 'off', reçu 'maybe'. Inchangé : false
+prompt> directive inconnue ':zzz' — :help pour la liste. La ligne n'a PAS été traitée comme un prompt.
+prompt> params: rp=1 ignore_prompt=false T=1 top_k=0 top_p=1 min_keep=1 seed=null max_tokens=8
+prompt> exit du repl=0 attendu
+
+--- RP5 RSS : 20 prompts AVEC penalty ---
+exit=0
+générations = 20 (attendu 20)
+--- t20 de chaque passe ---
+t20=3987932
+t20=3988000
+t20=3988084
+t20=3988160
+t20=3988236
+t20=3988316
+t20=3988380
+t20=3988452
+t20=3988524
+t20=3988596
+t20=3988656
+t20=3988720
+t20=3988788
+t20=3988852
+t20=3988908
+t20=3988968
+t20=3989024
+t20=3989084
+t20=3989140
+t20=3989200
+--- lignes PENALTY (1re et 20e) ---
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=53 prompt_len=29 générés=24 n_penalty_touched=52 n_penalty_empty_hist=0
+info: PENALTY: rp=1.15 ignore_prompt=false hist_len=53 prompt_len=29 générés=24 n_penalty_touched=52 n_penalty_empty_hist=0
+--- textes tous identiques ? ---
+1
+ALL DONE
+
+--- CONTRE-TEST : 20 prompts SANS penalty ---
+exit=0
+générations = 20
+t20=3986268
+t20=3986352
+t20=3986404
+t20=3986456
+t20=3986500
+t20=3986544
+t20=3986588
+t20=3986644
+t20=3986684
+t20=3986728
+t20=3986788
+t20=3986824
+t20=3986872
+t20=3986920
+t20=3986968
+t20=3987016
+t20=3987056
+t20=3987108
+t20=3987420
+t20=3987464

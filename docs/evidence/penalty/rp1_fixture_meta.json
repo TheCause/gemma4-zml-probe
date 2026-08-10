@@ -1,0 +1,14 @@
+{
+  "transformers_version": "5.14.1",
+  "penalties": [
+    0.8,
+    1.0,
+    1.15,
+    1.5
+  ],
+  "ties_expected_argmax": 3,
+  "touched_0.8": 6,
+  "touched_1.0": 0,
+  "touched_1.15": 6,
+  "touched_1.5": 6
+}

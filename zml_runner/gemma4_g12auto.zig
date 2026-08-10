@@ -159,6 +159,7 @@ const Args = struct {
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
+    selftest_penalty: ?[]const u8 = null, // RP1 : penalty comparée 0 ULP au processor HF, host-only
     selftest_alloc_count: bool = false, // S-AC (D10) : le compteur compte, host-only
     selftest_kvdump_io: ?[]const u8 = null, // DC1 : round-trip fichier + mutant, host-only (dir existant)
     selftest_kvdump_eq: ?[]const u8 = null, // DC2 : équivalence intra-process (GPU) ; valeur = fichier de dump de travail
@@ -170,6 +171,10 @@ const Args = struct {
     top_p: f32 = 1.0,
     min_tokens_to_keep: u32 = 1,
     seed: ?u64 = null, // null, PAS 0 : 0 est une graine légitime, pas un sentinel
+    // Phase 1 (repetition penalty) — défauts NEUTRES, même discipline que la phase 2 : à 1.0 le
+    // chemin est un no-op par construction et le code d'avant le chantier est inchangé (gate RP2).
+    repetition_penalty: f32 = 1.0,
+    ignore_prompt: bool = false, // pénaliser les seuls tokens GÉNÉRÉS (HF pénalise aussi le prompt)
     gate_d1d2: bool = false, // gates G-D1/G-D2 : pont in-process contre une référence indépendante
     // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
     // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
@@ -202,12 +207,16 @@ const usage =
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
+    "[--selftest-penalty f (RP1 : penalty vs processor HF, 0 ULP ; host-only)] " ++
     "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
     "[--selftest-kvdump-io DIR (DC1 : round-trip kvdump + mutant ; host-only ; DIR doit exister)] " ++
     "[--selftest-kvdump-eq F (DC2 : équivalence intra-process du restore ; GPU ; requiert --prompt)] " ++
     "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
+    "[--repetition-penalty F (phase 1 ; > 0 fini ; 1.0 = neutre)] " ++
+    "[--ignore-prompt (ne pénaliser que les tokens GÉNÉRÉS ; HF pénalise aussi le prompt ; " ++
+    "exclut --load-cache)] " ++
     "[--gate-d1d2 (G-D1/G-D2 : applyTopP comparé à une référence descendante f64 + mutants " ++
     "température ; exige un régime ARMÉ ; invalide la mesure M-COUT du même run)] " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -222,6 +231,20 @@ const usage =
 // Type EXACT du retour de std.process.Args.toSlice (cf lib/std/process/Args.zig) : une slice
 // d'éléments sentinelle-terminés — chaque élément coerce vers []const u8 mais la slice ENTIÈRE
 // ne coerce PAS vers []const []const u8 (piège de typage, d'où la signature précise ici).
+/// Validation UNIQUE de la repetition penalty — partagée par le flag CLI et la directive `:penalty`
+/// du repl. Deux implémentations dériveraient : la CLI refuserait `nan` et le repl l'accepterait,
+/// et c'est précisément par le repl que l'utilisateur explore les valeurs.
+///
+/// ⚠ Garde en ACCEPTATION, même raison qu'à `--temperature` : la forme « p <= 0 → rejet »
+/// laisserait passer NaN (toute comparaison avec NaN est fausse). Avec p = NaN, `p != 1.0` est
+/// VRAI, la penalty s'armerait, chaque logit pénalisé deviendrait NaN, et l'argmax rendrait un
+/// token arbitraire SANS erreur.
+fn parsePenalty(s: []const u8) ?f32 {
+    const v = std.fmt.parseFloat(f32, s) catch return null;
+    if (!(v > 0 and std.math.isFinite(v))) return null;
+    return v;
+}
+
 fn parseArgs(process_args: []const [:0]const u8) !Args {
     if (process_args.len < 3) {
         log.err("{s}", .{usage});
@@ -314,6 +337,13 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.selftest_draw = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-penalty")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-penalty attend une valeur (fixture .safetensors produite par scripts/76_penalty_vectors.py)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_penalty = process_args[i];
         } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
             args.selftest_alloc_count = true;
         } else if (std.mem.eql(u8, a, "--selftest-kvdump-eq")) {
@@ -381,6 +411,15 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.seed = std.fmt.parseInt(u64, process_args[i], 10) catch return error.InvalidSeed;
+        } else if (std.mem.eql(u8, a, "--repetition-penalty")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            args.repetition_penalty = parsePenalty(process_args[i]) orelse {
+                log.err("--repetition-penalty {s} refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)", .{process_args[i]});
+                return error.InvalidRepetitionPenalty;
+            };
+        } else if (std.mem.eql(u8, a, "--ignore-prompt")) {
+            args.ignore_prompt = true;
         } else if (std.mem.eql(u8, a, "--gate-d1d2")) {
             args.gate_d1d2 = true;
         } else if (std.mem.eql(u8, a, "--gen-config")) {
@@ -1133,6 +1172,173 @@ fn selftestSampling(allocator: std.mem.Allocator, io: std.Io, fixture_path: []co
 }
 
 // ============================================================================================
+// RP1 (repetition penalty) — `applyRepetitionPenalty` comparée **0 ULP** au VRAI processor HF,
+// host-only (même patron que S2-U : aucun GPU, aucun poids, itération en secondes).
+//
+// Fixture produite par `scripts/76_penalty_vectors.py`, qui APPELLE
+// `RepetitionPenaltyLogitsProcessor` — retranscrire sa formule des deux côtés ferait passer une
+// faute commune (spec C5). La fixture n'a pas de sidecar `.manifest.json` : les 4 penalties sont
+// un CONTRAT de la spec (§RP1), portées ici par `RP_CASES` ; un tenseur manquant échoue
+// bruyamment à la lecture.
+//
+// ⚠ Les assertions de non-vacuité ne sont pas décoratives. Sans « ≥ 1 doublon dans hist », la
+// déduplication n'est jamais exercée ; sans « ≥ 1 logit négatif ET ≥ 1 positif », une seule des
+// deux branches de signe l'est — et une implémentation qui les échangerait passerait le gate.
+// ============================================================================================
+const RP_CASES = [_]struct { name: []const u8, p: f32 }{
+    .{ .name = "logits_out_0.8", .p = 0.8 },
+    .{ .name = "logits_out_1.0", .p = 1.0 },
+    .{ .name = "logits_out_1.15", .p = 1.15 },
+    .{ .name = "logits_out_1.5", .p = 1.5 },
+};
+
+fn selftestPenalty(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const logits_in = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "logits_in");
+    defer allocator.free(logits_in);
+    const hist_i32 = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "hist");
+    defer allocator.free(hist_i32);
+    const ties = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "logits_ties");
+    defer allocator.free(ties);
+
+    // `hist` est produit en i32 (convention safetensors du repo) ; la fonction prend des u32 —
+    // ids de tokens, jamais négatifs. Un négatif dans la fixture est une CORRUPTION, pas un cas.
+    const hist = try allocator.alloc(u32, hist_i32.len);
+    defer allocator.free(hist);
+    for (hist_i32, 0..) |v, i| {
+        if (v < 0 or @as(usize, @intCast(v)) >= logits_in.len) {
+            log.err("--selftest-penalty : hist[{d}] = {d} hors du vocab de la fixture (0..{d})", .{ i, v, logits_in.len });
+            return error.CorruptFixture;
+        }
+        hist[i] = @intCast(v);
+    }
+
+    // Buffers de travail — alloués UNE FOIS (le selftest est host-only, mais on exerce la même
+    // discipline que la boucle de génération : c'est ce code-là qui y sera appelé).
+    const work = try allocator.alloc(f32, logits_in.len);
+    defer allocator.free(work);
+    const seen = try allocator.alloc(u64, (logits_in.len + 63) / 64);
+    defer allocator.free(seen);
+
+    // ---- antécédents de la fixture : sans eux le gate passerait à vide ----
+    var n_distinct: usize = 0;
+    var n_neg: usize = 0;
+    var n_pos: usize = 0;
+    {
+        @memset(seen, 0);
+        for (hist) |t| {
+            const w = t >> 6;
+            const mask = @as(u64, 1) << @truncate(t);
+            if ((seen[w] & mask) != 0) continue;
+            seen[w] |= mask;
+            n_distinct += 1;
+            if (logits_in[t] < 0) n_neg += 1 else n_pos += 1;
+        }
+    }
+    var vac_ok = true;
+    if (n_distinct >= hist.len) {
+        log.err("NON-VACUITÉ FAIL — aucun doublon dans hist ({d} ids, {d} distincts) : la déduplication n'est pas exercée", .{ hist.len, n_distinct });
+        vac_ok = false;
+    }
+    if (n_neg == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun logit NÉGATIF parmi les ids de hist : la branche ×penalty n'est pas exercée", .{});
+        vac_ok = false;
+    }
+    if (n_pos == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun logit POSITIF ou nul parmi les ids de hist : la branche ÷penalty n'est pas exercée", .{});
+        vac_ok = false;
+    }
+
+    // ---- comparaison 0 ULP contre HF, penalty par penalty ----
+    var n_ok: usize = 0;
+    for (RP_CASES) |c| {
+        const expected = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, c.name);
+        defer allocator.free(expected);
+        if (expected.len != logits_in.len) {
+            log.err("{s} : {d} valeurs ≠ logits_in {d}", .{ c.name, expected.len, logits_in.len });
+            return error.ShapeMismatch;
+        }
+
+        @memcpy(work, logits_in);
+        @memset(seen, 0);
+        const touched = sampling.applyRepetitionPenalty(work, hist, c.p, seen);
+
+        var n_diff_hf: usize = 0; // logits que HF a changés
+        var n_bad: usize = 0; // logits où NOUS différons de HF (bit à bit)
+        var first_bad: i64 = -1;
+        for (work, 0..) |got, i| {
+            if (@as(u32, @bitCast(expected[i])) != @as(u32, @bitCast(logits_in[i]))) n_diff_hf += 1;
+            if (@as(u32, @bitCast(got)) != @as(u32, @bitCast(expected[i]))) {
+                if (first_bad < 0) first_bad = @intCast(i);
+                n_bad += 1;
+            }
+        }
+
+        var ok = true;
+        if (n_bad != 0) {
+            log.err("RP1 FAIL — penalty {d}: {d} valeurs hors 0 ULP, 1re à l'id {d} (nous={d:.9} HF={d:.9})", .{ c.p, n_bad, first_bad, work[@intCast(first_bad)], expected[@intCast(first_bad)] });
+            ok = false;
+        }
+        // Le retour `touched` est la sonde de non-vacuité du câblage (Task 4) : il doit dire la
+        // VÉRITÉ ici aussi, sinon le compteur `n_penalty_touched` mentirait en production.
+        const expect_touched = (c.p != 1.0);
+        if (touched != expect_touched) {
+            log.err("RP1 FAIL — penalty {d}: touched={} attendu {} (sonde de non-vacuité fausse)", .{ c.p, touched, expect_touched });
+            ok = false;
+        }
+        if (c.p == 1.0) {
+            if (n_diff_hf != 0) {
+                log.err("RP1 FAIL — penalty 1.0 : HF a changé {d} logits, la neutralité de la fixture est fausse", .{n_diff_hf});
+                ok = false;
+            }
+        } else if (n_diff_hf != n_distinct) {
+            // C'est LE fait qui fonde la spec : HF pénalise chaque token distinct AU PLUS UNE FOIS.
+            log.err("RP1 FAIL — penalty {d}: HF a changé {d} logits, attendu {d} (= ids distincts). Si c'est hist.len={d}, HF ne déduplique pas et la spec est à revoir.", .{ c.p, n_diff_hf, n_distinct, hist.len });
+            ok = false;
+        }
+        if (ok) n_ok += 1;
+    }
+
+    // ---- tie-break de l'argmax : PREMIER indice gagnant (critère RP1) ----
+    // La référence n'est pas une constante magique : on dérive « premier indice atteignant le
+    // maximum » indépendamment, et on exige que le max soit atteint ≥ 2 fois — sans quoi le
+    // critère de tie-break serait vérifié sur un vecteur qui n'a pas d'ex æquo.
+    var mx: f32 = ties[0];
+    for (ties) |v| {
+        if (v > mx) mx = v;
+    }
+    var n_ties: usize = 0;
+    var first_max: usize = 0;
+    for (ties, 0..) |v, i| {
+        if (v == mx) {
+            if (n_ties == 0) first_max = i;
+            n_ties += 1;
+        }
+    }
+    if (n_ties < 2) {
+        log.err("NON-VACUITÉ FAIL — logits_ties n'a que {d} occurrence du maximum : le tie-break n'est pas exercé", .{n_ties});
+        vac_ok = false;
+    }
+    const got_argmax = sampling.argmax(ties);
+    var tie_ok = true;
+    if (got_argmax != first_max) {
+        log.err("RP1 FAIL — tie-break : argmax={d}, attendu {d} (PREMIER des {d} ex æquo)", .{ got_argmax, first_max, n_ties });
+        tie_ok = false;
+    }
+
+    if (n_ok == RP_CASES.len and vac_ok and tie_ok) {
+        log.info("RP1 PASS — {d}/{d} penalties bit-identiques au processor HF ({d} valeurs chacune), hist {d} ids dont {d} distincts ({d} logits <0, {d} >=0), tie-break={d} sur {d} ex æquo", .{ n_ok, RP_CASES.len, logits_in.len, hist.len, n_distinct, n_neg, n_pos, got_argmax, n_ties });
+    } else {
+        log.err("RP1 FAIL — {d}/{d} penalties, non-vacuité={}, tie-break={}", .{ n_ok, RP_CASES.len, vac_ok, tie_ok });
+        return error.SelftestPenaltyFailed;
+    }
+}
+
+// ============================================================================================
 // S-AC (D10) — exerce les 4 fonctions vtable du CountingAllocator INSTALLÉ (celui de run()) et
 // vérifie les deltas. On passe par le wrapper déjà en place : c'est l'instrument de production
 // qu'on teste, pas une copie.
@@ -1770,6 +1976,14 @@ pub fn run(init: std.process.Init) !void {
         log.err("--dump-cache + sampling armé non supporté v1 (état PRNG non sérialisé — spec §3, dette)", .{});
         return error.DumpWithSamplingArmed;
     }
+    // Phase 1 (penalty) : sous reprise, `ids` vaut `ids_fed` COMPLET — prompt d'origine ET tokens
+    // déjà générés par le run dumpé. « Le prompt » n'y est plus une notion définie : la frontière
+    // que `--ignore-prompt` doit couper n'est pas reconstructible depuis le dump. Refus bruyant
+    // plutôt qu'une sémantique inventée. Dette écrite v1.
+    if (args.ignore_prompt and args.load_cache != null) {
+        log.err("--ignore-prompt + --load-cache non supporté v1 : sous reprise, ids = ids_fed complet (prompt + tokens générés du run dumpé) — la frontière du prompt n'existe plus", .{});
+        return error.IgnorePromptWithLoadCache;
+    }
 
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
@@ -1796,6 +2010,13 @@ pub fn run(init: std.process.Init) !void {
     // distribution du sampler qu'on teste, pas celle du modèle. ===
     if (args.selftest_draw) |fixture_path| {
         try selftestDraw(allocator, io, fixture_path, args.draws, args.seed);
+        return;
+    }
+
+    // === RP1 (phase 1, penalty) : même patron host-only, AVANT tokenizer/VRAM/Platform/poids.
+    // La fonction testée est celle que la boucle de génération appellera — pas une copie. ===
+    if (args.selftest_penalty) |fixture_path| {
+        try selftestPenalty(allocator, io, fixture_path);
         return;
     }
 
@@ -1924,17 +2145,53 @@ pub fn run(init: std.process.Init) !void {
         .top_p = args.top_p,
         .min_keep = args.min_tokens_to_keep,
         .seed = args.seed,
+        .repetition_penalty = args.repetition_penalty,
+        .ignore_prompt = args.ignore_prompt,
     };
+    // ⚠ `chain_armed` est figé ICI, et c'est ce qui pilote allocations ET `defer` — jamais un
+    // `scfg.pathArmed()` ré-évalué. Deux raisons, toutes deux mordantes depuis que le repl a des
+    // directives : (1) `:penalty` peut armer le chemin B EN COURS de session, sur des buffers qui
+    // n'auraient jamais été alloués (mordu au gate RP5 : « chemin B : logits 1048576 octets !=
+    // work 0 octets ») ; (2) un `defer if (scfg.pathArmed())` ré-évalué à la sortie deviendrait
+    // VRAI après un `:penalty` et libérerait un `scratch` jamais initialisé — un `undefined`
+    // passé à `deinit`. La condition de libération doit être la MÊME EXPRESSION que celle
+    // d'allocation, pas une expression qui lui ressemble.
+    const chain_armed = scfg.pathArmed() or args.repl;
     // D10 (C7) : `work` n'est plus alloué ICI — il déménage APRÈS la création de la Platform
     // (DmaAllocator exige un Device vivant), avec son defer. Le scratch et le reste restent.
-    if (scfg.pathArmed()) {
+    if (chain_armed) {
         scfg.scratch = try sampling.Scratch.init(allocator, VOCAB_CONTRACT);
         scfg.resetPerPrompt();
-        log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet ARMÉ ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
+        log.info("SAMPLING: T={d} top_k={d} top_p={d} min_keep={d} seed={?d} (chemin complet {s} ; tirage {s})", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, if (scfg.pathArmed()) "ARMÉ" else "prêt (repl : armable par directive)", if (scfg.drawArmed()) "ON" else "OFF (argmax)" });
     } else {
         log.info("SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)", .{});
     }
-    defer if (scfg.pathArmed()) scfg.scratch.deinit(allocator);
+    defer if (chain_armed) scfg.scratch.deinit(allocator);
+
+    // === Phase 1 (penalty) : historique et bitset alloués UNE FOIS, ici — jamais dans la boucle
+    // (interdit D10, `ALLOC-LOOP: alloc=0`). Alloués SEULEMENT si la penalty est armée : à 1.0 le
+    // runner ne paie ni les L_MAX×4 octets ni les 32 Kio, et n'écrit rien de plus par step — c'est
+    // ce qui rend RP2 (non-régression bit-identique) vrai par construction et non par chance.
+    // La borne L_MAX est celle que la garde de lancement de `generateOnce` fait déjà respecter
+    // (`ids.len + limit <= L_MAX`) : l'historique ne peut donc pas déborder, et une garde de borne
+    // explicite reste posée à l'append (une borne « impossible » non gardée est une UB en attente).
+    // ⚠ En `--repl`, on alloue MÊME si la penalty est neutre au lancement : la directive
+    // `:penalty` peut l'armer en cours de session, et sans buffers elle serait un flag inopérant
+    // — exactement le mensonge que le repo refuse ailleurs. Coût du cas neutre : L_MAX×4 octets
+    // + 32 Kio, une fois par session résidente, et une écriture d'id par step.
+    const penalty_armed = scfg.repetition_penalty != 1.0 or args.repl;
+    if (penalty_armed) {
+        scfg.hist = try allocator.alloc(u32, @intCast(L_MAX));
+        scfg.seen = try allocator.alloc(u64, (VOCAB_CONTRACT + 63) / 64);
+        log.info("PENALTY: buffers alloués — rp={d} ignore_prompt={} (hist {d} ids max, seen {d} Kio{s})", .{ scfg.repetition_penalty, scfg.ignore_prompt, L_MAX, (scfg.seen.len * @sizeOf(u64)) / 1024, if (scfg.repetition_penalty == 1.0) " ; NEUTRE au lancement, armable par :penalty" else "" });
+    } else if (scfg.ignore_prompt) {
+        // Un flag inopérant est un mensonge : le dire au lieu de le laisser passer en silence.
+        log.warn("--ignore-prompt sans --repetition-penalty : SANS EFFET (il n'y a pas de penalty à restreindre)", .{});
+    }
+    defer if (penalty_armed) {
+        allocator.free(scfg.hist);
+        allocator.free(scfg.seen);
+    };
 
     // === Gates G-D1/G-D2 (dettes D1/D2) — pont in-process contre une référence indépendante.
     // Spec : docs/superpowers/specs/2026-08-10-d1d2-gpu-coverage.md
@@ -1986,12 +2243,33 @@ pub fn run(init: std.process.Init) !void {
             log.err("--oracle : fixture 'positions' vide", .{});
             return error.EmptyFixture;
         }
-        // Déviation assumée (longueur seule) : les prompt_ids complets ne vivent que dans le
-        // manifest sidecar JSON — positions[0]==ids.len est le check le plus fort possible sur la
+        // Déviation historique (longueur seule) : les prompt_ids complets ne vivaient que dans le
+        // manifest sidecar JSON — positions[0]==ids.len était le check le plus fort possible sur la
         // fixture seule ; un prompt FAUX de même longueur échouerait bruyamment au compare step 0.
         if (positions_fx[0] != @as(i32, @intCast(ids.items.len))) {
             log.err("--oracle : positions[0]={d} (seq_len fixture) != ids.len={d} (prompt rendu) — mismatch prompt/fixture", .{ positions_fx[0], ids.items.len });
             return error.OraclePromptMismatch;
+        }
+        // Depuis la phase 1 (penalty), l'oracle exporte AUSSI `prompt_ids` en tenseur : la
+        // comparaison devient LITTÉRALE et la déviation ci-dessus est soldée. Le tenseur reste
+        // OPTIONNEL — les fixtures historiques du repo (u8_gen48 et sa famille) ne le portent pas,
+        // et les casser pour renforcer un check serait un mauvais échange. Absent : on le DIT.
+        if (reg.tensors.get("prompt_ids") != null) {
+            const pids = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "prompt_ids");
+            defer allocator.free(pids);
+            if (pids.len != ids.items.len) {
+                log.err("--oracle : prompt_ids de la fixture = {d} ids != prompt rendu {d}", .{ pids.len, ids.items.len });
+                return error.OraclePromptMismatch;
+            }
+            for (pids, 0..) |p, i| {
+                if (p != @as(i32, @intCast(ids.items[i]))) {
+                    log.err("--oracle : prompt_ids[{d}] = {d} (fixture) != {d} (prompt rendu) — template ou prompt DIFFÉRENT ; un mismatch d'ids qui suivrait serait attribué à tort au sampling", .{ i, p, ids.items[i] });
+                    return error.OraclePromptMismatch;
+                }
+            }
+            log.info("--oracle : prompt vérifié LITTÉRALEMENT ({d} ids identiques à la fixture)", .{pids.len});
+        } else {
+            log.warn("--oracle : fixture sans tenseur 'prompt_ids' (antérieure à la phase 1) — vérification du prompt limitée à sa LONGUEUR", .{});
         }
         const fed_fx = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "fed");
         if (fed_fx.len == 0) {
@@ -2051,7 +2329,7 @@ pub fn run(init: std.process.Init) !void {
     // alloué » est STRUCTUREL, pas puni par un panic (catch unreachable = UB en ReleaseFast). ===
     var dma = zml.mem.DmaAllocator.init(allocator, &platform.devices[0]);
     var pin_on = !args.no_pin;
-    if (scfg.pathArmed()) {
+    if (chain_armed) { // même condition qu'à l'allocation du scratch — cf note sur `chain_armed`
         if (pin_on) {
             scfg.work = dma.allocator().alloc(f32, VOCAB_CONTRACT) catch blk: {
                 pin_on = false;
@@ -2070,7 +2348,7 @@ pub fn run(init: std.process.Init) !void {
     }
     // Ordre LIFO : ce defer est déclaré APRÈS `defer platform.deinit` → il s'exécute AVANT lui
     // (dmaUnmap exige la plateforme vivante).
-    defer if (scfg.pathArmed()) {
+    defer if (chain_armed) {
         if (pin_on) dma.allocator().free(scfg.work) else allocator.free(scfg.work);
     };
 
@@ -2370,6 +2648,44 @@ pub fn run(init: std.process.Init) !void {
         const line_raw = line_opt orelse break;
         const line = std.mem.trim(u8, line_raw, " \t\r");
         if (line.len == 0) break;
+        // === Directives (spec §3.4) : une ligne commençant par ':' n'est JAMAIS un prompt. ===
+        // Une valeur invalide affiche un message et la session CONTINUE — un repl qui meurt sur
+        // une faute de frappe perdrait la compile qu'il est justement là pour amortir.
+        if (line[0] == ':') {
+            const sp = std.mem.indexOfScalar(u8, line, ' ');
+            const cmd = if (sp) |at| line[0..at] else line;
+            const arg = if (sp) |at| std.mem.trim(u8, line[at + 1 ..], " \t") else "";
+            if (std.mem.eql(u8, cmd, ":penalty")) {
+                if (parsePenalty(arg)) |v| {
+                    scfg.repetition_penalty = v;
+                    try stdout_w.interface.print(":penalty = {d} (appliquée au prompt SUIVANT)\n", .{v});
+                } else {
+                    try stdout_w.interface.print(":penalty : valeur invalide '{s}' — attendu un réel fini > 0 (1.0 = neutre). Inchangée : {d}\n", .{ arg, scfg.repetition_penalty });
+                }
+            } else if (std.mem.eql(u8, cmd, ":ignore-prompt")) {
+                if (std.mem.eql(u8, arg, "on")) {
+                    scfg.ignore_prompt = true;
+                    try stdout_w.interface.print(":ignore-prompt = on (seuls les tokens générés sont pénalisés)\n", .{});
+                } else if (std.mem.eql(u8, arg, "off")) {
+                    scfg.ignore_prompt = false;
+                    try stdout_w.interface.print(":ignore-prompt = off (défaut HF : prompt ++ généré)\n", .{});
+                } else {
+                    try stdout_w.interface.print(":ignore-prompt : attendu 'on' ou 'off', reçu '{s}'. Inchangé : {}\n", .{ arg, scfg.ignore_prompt });
+                }
+            } else if (std.mem.eql(u8, cmd, ":params")) {
+                try stdout_w.interface.print("params: rp={d} ignore_prompt={} T={d} top_k={d} top_p={d} min_keep={d} seed={?d} max_tokens={d}\n", .{ scfg.repetition_penalty, scfg.ignore_prompt, scfg.temperature, scfg.top_k, scfg.top_p, scfg.min_keep, scfg.seed, max_tokens });
+            } else if (std.mem.eql(u8, cmd, ":help")) {
+                try stdout_w.interface.print(
+                    "directives : :penalty <f>  :ignore-prompt on|off  :params  :help\n" ++
+                        "             (ligne vide ou EOF pour quitter ; une ligne commençant par ':' n'est jamais un prompt)\n",
+                    .{},
+                );
+            } else {
+                try stdout_w.interface.print("directive inconnue '{s}' — :help pour la liste. La ligne n'a PAS été traitée comme un prompt.\n", .{cmd});
+            }
+            try stdout_w.interface.flush();
+            continue;
+        }
         var pids = promptToIds(allocator, &encoder, line) catch |e| {
             log.err("prompt refusé (tokenisation : {s}) — prompt suivant", .{@errorName(e)});
             continue;
@@ -2688,8 +3004,11 @@ fn dumpCacheFile(allocator: std.mem.Allocator, io: std.Io, ds: DumpSpec, host: a
     // `sampling` est une trace INFORMATIVE : un restore avec d'autres warpers diverge
     // légitimement, mais l'écart doit être VISIBLE (spec §4.1). Le dump avec sampling ARMÉ +
     // seed est refusé en amont (DumpWithSamplingArmed) — ici on trace ce qui était demandé.
+    // ⚠ `rp` est DANS cette trace : le code exige lui-même qu'un écart de warpers au restore soit
+    // VISIBLE (spec kvdump §4.1), et la penalty change les ids produits autant qu'un top_p. Sans
+    // cette extension, elle serait le SEUL réglage de la chaîne invisible au manifest.
     const sampling_str = if (scfg.pathArmed())
-        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d}", .{ scfg.temperature, scfg.top_k, scfg.top_p })
+        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d},rp={d},ignore_prompt={}", .{ scfg.temperature, scfg.top_k, scfg.top_p, scfg.repetition_penalty, scfg.ignore_prompt })
     else
         "off";
     const meta = [_]kvdump.MetaKV{
@@ -2739,6 +3058,34 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     if (resume_state == null and ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.len, SLIDING_WINDOW });
         return error.PromptTooLong;
+    }
+
+    // === Phase 1 (penalty) : SEED de l'historique, ici et pas ailleurs ===
+    // Contrat que ce seed établit : au moment de sélectionner le token de génération k,
+    // `hist[0..hist_len]` vaut prompt ++ tokens générés avant k — exactement l'`input_ids` que
+    // HF passe à son processor au même point.
+    //
+    // ⚠ POURQUOI EN TÊTE DE CETTE FONCTION, et pas au site d'allocation. Le site d'allocation ne
+    // s'exécute qu'UNE FOIS par process, alors que `generateOnce` a SIX sites d'appel : one-shot,
+    // les deux entrées de la boucle `--repl` (un appel PAR prompt), et les trois de kvdump-eq.
+    // Seul un seed en tête de fonction les couvre structurellement — c'est aussi ce qui donne
+    // gratuitement le RE-SEED par prompt du repl (RP5) et la reprise `--load-cache`, où `ids`
+    // vaut `ids_fed` complet et où la boucle entre DIRECTEMENT en phase de génération : les
+    // tokens repris n'y sont jamais re-feedés, un historique reparti de zéro ignorerait tout le
+    // contexte de la reprise.
+    if (scfg.hist.len > 0) {
+        if (ids.len > scfg.hist.len) {
+            log.err("penalty : prompt {d} ids > capacité de l'historique {d} (L_MAX)", .{ ids.len, scfg.hist.len });
+            return error.SequenceTooLong;
+        }
+        @memcpy(scfg.hist[0..ids.len], ids);
+        scfg.hist_len = ids.len;
+        scfg.prompt_len = ids.len;
+        // Compteurs de non-vacuité remis à zéro PAR PROMPT : en `--repl`, un `n_penalty_touched`
+        // cumulé depuis le prompt précédent ferait passer l'exigence de la passe courante sans
+        // qu'elle ait rien touché.
+        scfg.n_penalty_touched = 0;
+        scfg.n_penalty_empty_hist = 0;
     }
     // Cache ZÉROS par génération (les slices host vivent dans run pour toute la session).
     var cache_buf = zml.Bufferized(engine.Cache){
@@ -2890,7 +3237,22 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
             const t_w0: std.Io.Timestamp = .now(io, .awake);
 
             // Ordre de HF, mesuré (F8) : Penalty(4) → Suppress(15) → Temperature(17) →
-            // TopK(19) → TopP(20). La penalty appartient à la PHASE 1 : absente ici.
+            // TopK(19) → TopP(20). La penalty (PHASE 1) est donc EN TÊTE, avant la suppression.
+            if (scfg.repetition_penalty != 1.0) {
+                // Sous --ignore-prompt, `h` est VIDE pendant tout le prefill (hist_len ==
+                // prompt_len) : la garde `h.len == 0` est OBLIGATOIRE — en ReleaseFast, `h[0]`
+                // sur une slice vide est une UB SILENCIEUSE, pas un panic. (`@min` borne le bas
+                // par défense, au cas où prompt_len dépasserait hist_len.)
+                const lo = if (scfg.ignore_prompt) @min(scfg.prompt_len, scfg.hist_len) else 0;
+                const h = scfg.hist[lo..scfg.hist_len];
+                if (h.len > 0) {
+                    @memset(scfg.seen, 0); // dans le `if` : 32 Kio de memset inutiles quand h est vide
+                    if (sampling.applyRepetitionPenalty(scfg.work, h, scfg.repetition_penalty, scfg.seen))
+                        scfg.n_penalty_touched += 1;
+                } else {
+                    scfg.n_penalty_empty_hist += 1; // cf exemption de PenaltyInert, fin de run
+                }
+            }
             sampling.applySuppression(scfg.work, policy);
             // Gate D1/D2 : `pre_temp` est l'entrée COMMUNE de la chaîne nominale et de la chaîne
             // mutée — les deux doivent partir du même vecteur, sinon le mutant ne compare rien.
@@ -2956,7 +3318,15 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
                     scfg.n_exact_top_ties += 1;
                 } else {
                     scfg.n_disagree += 1;
-                    log.err("S2-PONT désaccord @step {d} : A={d} (val {d:.6}) B={d} (val {d:.6})", .{ step, sel.tok, scfg.work[sel.tok], tok_b, scfg.work[tok_b] });
+                    // ⚠ Sous penalty ARMÉE, le désaccord est ATTENDU et non un défaut : le chemin A
+                    // est un topK in-graph sur les logits NUS, le chemin B décide après penalty.
+                    // Les deux DOIVENT diverger dès que la penalty mord — c'est même la preuve
+                    // qu'elle mord. Le compteur reste publié (ligne S2-PONT), mais l'`err` par
+                    // step est rétrogradé : sinon un run sain crache 40+ lignes d'erreur et le
+                    // lecteur apprend à les ignorer, y compris le jour où elles disent vrai.
+                    if (scfg.repetition_penalty == 1.0) {
+                        log.err("S2-PONT désaccord @step {d} : A={d} (val {d:.6}) B={d} (val {d:.6})", .{ step, sel.tok, scfg.work[sel.tok], tok_b, scfg.work[tok_b] });
+                    }
                 }
             }
             tok = @intCast(tok_b);
@@ -3021,6 +3391,20 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.appendBounded(tok); // D10 (C5) : idem — error.OutOfMemory si la borne était fausse, jamais une UB
+        // Phase 1 (penalty) : l'historique suit le token ICI, où il est ACTÉ — et surtout PAS en
+        // fin d'itération (`fed = tok`), qui vient APRÈS les trois `break` (borne oracle, EOT,
+        // max_tokens) et perdrait donc le DERNIER token généré. Écriture directe, zéro allocation.
+        // ⚠ Ne PAS appender `fed` en tête d'itération : avec le seed, le prompt y serait compté
+        // deux fois. (Le piège off-by-one de la spec rév. 4-1 visait le câblage SANS seed —
+        // avec seed, c'est l'append de `fed` qui devient le bug.)
+        if (scfg.hist.len > 0) {
+            if (scfg.hist_len >= scfg.hist.len) {
+                log.err("penalty : historique plein ({d} ids, capacité {d}) au step {d}", .{ scfg.hist_len, scfg.hist.len, step });
+                return error.SequenceTooLong;
+            }
+            scfg.hist[scfg.hist_len] = @intCast(tok);
+            scfg.hist_len += 1;
+        }
         // kvdump / C-D : l'instrument du gain. Fenêtre = du DÉBUT de la lecture des tenseurs
         // (phase 2, post-compile) au PREMIER token produit — les GiB relus sont DEDANS.
         if (resume_state) |rs| {
@@ -3140,8 +3524,33 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     log.info("ALLOC-TOTAL: alloc={d} free={d} bytes={d} shards={d}", .{
         counter.n_alloc, counter.n_free, counter.bytes_alloc, scfg.n_shards,
     });
+    // === Phase 1 (penalty) : publication + non-vacuité ===
+    // L'invariant `hist_len == prompt_len + generated` est ce qui prouve, à l'exécution, que le
+    // seed de reprise a bien eu lieu (écart 9 du plan) : sous `--load-cache`, `prompt_len` vaut
+    // `step_next` — un historique reparti de zéro rendrait `hist_len == generated` seul.
+    if (scfg.repetition_penalty != 1.0) {
+        log.info("PENALTY: rp={d} ignore_prompt={} hist_len={d} prompt_len={d} générés={d} n_penalty_touched={d} n_penalty_empty_hist={d}", .{
+            scfg.repetition_penalty, scfg.ignore_prompt, scfg.hist_len, scfg.prompt_len, generated.items.len, scfg.n_penalty_touched, scfg.n_penalty_empty_hist,
+        });
+        if (scfg.hist_len != scfg.prompt_len + generated.items.len) {
+            log.err("PENALTY: invariant rompu — hist_len={d} != prompt_len={d} + générés={d}", .{ scfg.hist_len, scfg.prompt_len, generated.items.len });
+            return error.PenaltyHistoryInvariant;
+        }
+        if (scfg.n_penalty_touched == 0) {
+            // Exemption : si l'historique était vide à CHAQUE step, HF n'aurait rien touché non
+            // plus (cas légitime `--ignore-prompt --max-tokens 1`). Ailleurs, une penalty armée
+            // qui ne change JAMAIS un logit est un paramètre non propagé, pas un run réussi.
+            if (scfg.n_penalty_empty_hist == scfg.n_steps_compared and scfg.n_penalty_empty_hist > 0) {
+                log.warn("PENALTY: inerte mais LÉGITIME — historique vide aux {d} steps (--ignore-prompt sans token généré avant la sélection)", .{scfg.n_penalty_empty_hist});
+            } else {
+                log.err("PENALTY: INERTE — rp={d} armée mais aucun logit changé sur {d} steps : paramètre non propagé", .{ scfg.repetition_penalty, scfg.n_steps_compared });
+                return error.PenaltyInert;
+            }
+        }
+    }
     if (scfg.pathArmed()) {
         log.info("S2-PONT: steps_comparés={d} désaccords={d} égalités_exactes={d} (chemin B armé)", .{ scfg.n_steps_compared, scfg.n_disagree, scfg.n_exact_top_ties });
+        if (scfg.repetition_penalty != 1.0) log.info("S2-PONT: les désaccords ci-dessus sont ATTENDUS sous penalty armée (chemin A = topK in-graph sur logits NUS) — ce n'est pas un FAIL", .{});
         if (scfg.n_cout_samples > 0) {
             const moy_us = @as(f64, @floatFromInt(scfg.cout_ns_total)) / @as(f64, @floatFromInt(scfg.n_cout_samples)) / 1000.0;
             const max_us = @as(f64, @floatFromInt(scfg.cout_ns_max)) / 1000.0;

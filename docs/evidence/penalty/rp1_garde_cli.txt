@@ -1,0 +1,24 @@
+=== --repetition-penalty nan ===
+exit=1
+error: --repetition-penalty nan refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)
+error: InvalidRepetitionPenalty
+=== --repetition-penalty inf ===
+exit=1
+error: --repetition-penalty inf refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)
+error: InvalidRepetitionPenalty
+=== --repetition-penalty -1 ===
+exit=1
+error: --repetition-penalty -1 refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)
+error: InvalidRepetitionPenalty
+=== --repetition-penalty 0 ===
+exit=1
+error: --repetition-penalty 0 refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)
+error: InvalidRepetitionPenalty
+=== --repetition-penalty abc ===
+exit=1
+info: BUILD: mode=ReleaseFast
+error: InvalidRepetitionPenalty
+=== --repetition-penalty 1.15 ===
+exit=0
+info: BUILD: mode=ReleaseFast
+info: RP1 PASS — 4/4 penalties bit-identiques au processor HF (512 valeurs chacune), hist 9 ids dont 6 distincts (3 logits <0, 3 >=0), tie-break=3 sur 3 ex æquo

@@ -118,6 +118,28 @@ pub const SamplingCfg = struct {
     min_keep: u32 = 1,
     seed: ?u64 = null,
 
+    // --- Phase 1 : repetition penalty (host-side, en TÊTE de la chaîne) ---
+    repetition_penalty: f32 = 1.0,
+    /// Ne pénaliser que les tokens GÉNÉRÉS. HF pénalise prompt + généré : c'est le défaut.
+    ignore_prompt: bool = false,
+    /// Historique des ids vus — capacité L_MAX du binaire, alloué UNE FOIS (interdit D10).
+    /// Contrat, au moment de sélectionner le token de génération k :
+    /// `hist[0..hist_len]` == prompt ++ tokens générés avant k — exactement l'`input_ids` que
+    /// HF passe à son processor au même point.
+    hist: []u32 = &.{},
+    hist_len: usize = 0,
+    /// Longueur du prompt COURANT — la frontière que `ignore_prompt` coupe. Posée au même
+    /// endroit que le seed de `hist`, en tête de `generateOnce` (un re-seed par prompt en
+    /// `--repl` doit la redéfinir, sinon la frontière pointerait sur le prompt précédent).
+    prompt_len: usize = 0,
+    /// Bitset de déduplication — (VOCAB_CONTRACT+63)/64 mots u64. Alloué UNE FOIS, remis à zéro
+    /// par step avec `@memset` : un memset n'est pas une allocation (D10).
+    seen: []u64 = &.{},
+    /// Non-vacuité : steps où la penalty a réellement changé ≥ 1 logit.
+    n_penalty_touched: usize = 0,
+    /// Steps où l'historique était VIDE (exemption légitime de `PenaltyInert`).
+    n_penalty_empty_hist: usize = 0,
+
     scratch: Scratch = undefined,
     work: []f32 = &.{},
     prng: std.Random.DefaultPrng = undefined,
@@ -154,7 +176,8 @@ pub const SamplingCfg = struct {
     /// `--top-k 1` seul — le régime neutre du gate-pont — n'activerait pas le chemin et le gate
     /// n'aurait rien à comparer.
     pub fn pathArmed(self: *const SamplingCfg) bool {
-        return self.top_k != 0 or self.top_p < 1.0 or self.temperature != 1.0 or self.seed != null;
+        return self.top_k != 0 or self.top_p < 1.0 or self.temperature != 1.0 or self.seed != null or
+            self.repetition_penalty != 1.0;
     }
 
     /// Le TIRAGE, lui, est armé **ssi `--seed` est fourni**. Choix explicite : une dérivation du
@@ -169,6 +192,36 @@ pub const SamplingCfg = struct {
         if (self.seed) |s| self.prng = std.Random.DefaultPrng.init(s);
     }
 };
+
+/// Repetition penalty — HF `RepetitionPenaltyLogitsProcessor`, lu à la source : logit
+/// négatif ×penalty, positif ou nul ÷penalty, AU PLUS UNE FOIS par token distinct.
+/// ⚠ La division RESTE une division (jamais ×(1/p)) : bit-exactitude RP1.
+/// `seen` : bitset pré-alloué par run (D10 : zéro allocation ici) ; l'appelant fait
+/// `@memset(seen, 0)` par step (32 Kio memset, pas une allocation).
+/// Retourne `true` si AU MOINS un logit a changé de bits — c'est la sonde de non-vacuité
+/// (une comparaison externe sur un seul id aurait l'angle mort `logit == ±0.0`).
+///
+/// ⚠ Pourquoi la déduplication est structurelle et non une optimisation : HF fait un `gather`
+/// des logits AUX positions de l'historique, applique la formule, puis un `scatter`. Un id
+/// répété 3 fois y est donc pénalisé **une seule fois** (les 3 valeurs écrites sont calculées
+/// depuis le MÊME logit d'origine). Une boucle naïve sans `seen` appliquerait la formule en
+/// cascade — mesuré côté HF par la fixture RP1 : 6 logits touchés pour 9 entrées d'historique.
+pub fn applyRepetitionPenalty(logits: []f32, hist: []const u32, penalty: f32, seen: []u64) bool {
+    if (penalty == 1.0) return false;
+    var touched = false;
+    for (hist) |t| {
+        const i: usize = @intCast(t);
+        const w = i >> 6;
+        const mask = @as(u64, 1) << @truncate(i);
+        if ((seen[w] & mask) != 0) continue;
+        seen[w] |= mask;
+        const v = logits[i];
+        const nv = if (v < 0) v * penalty else v / penalty;
+        if (@as(u32, @bitCast(nv)) != @as(u32, @bitCast(v))) touched = true;
+        logits[i] = nv;
+    }
+    return touched;
+}
 
 /// Température — **DIVISION**, jamais `× (1/T)` : l'équivalence est mathématique, pas binaire,
 /// et casserait la bit-exactitude attendue des gates.

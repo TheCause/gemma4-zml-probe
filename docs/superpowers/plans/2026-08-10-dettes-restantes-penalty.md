@@ -146,13 +146,22 @@ ces corrections. **Ne pas exécuter le plan du 27 juil directement.**
 
 **Files :** aucun (lecture seule).
 
-- [ ] **Step 1 : Vérifier l'état du repo**
+> **✅ TRANCHÉ — 10 août 2026, Régis (session d'exécution).**
+> - **D1** : les 4 décisions de la table A sont **MAINTENUES** (K1, K2/DA-4, K6, DA-6).
+>   Les rouvrir serait un chantier séparé, hors de ce plan.
+> - **D2** : **GO** sur la phase 1 penalty — Tasks 1-7 exécutées.
+> - **D3** : **GO** sur le périmètre `--repl` — Task 6 incluse (directives + RP5/RP6).
+> - **D4** : RP7 **requalifiée en mesure publiée** (métrique n-gramme ON/OFF, sans PASS/FAIL) ;
+>   dette D5 close par requalification datée du 10 août 2026.
+
+- [x] **Step 1 : Vérifier l'état du repo**
 
 Run : `git -C ~/dev/gemma4-zml-probe status --porcelain && git log --oneline -3`
 Expected : arbre propre, HEAD = `0461585` ou plus récent sur `main`.
 Si l'arbre n'est pas propre : STOP, montrer à Régis (un travail non committé est invisible).
+→ Mesuré : arbre propre, `HEAD = 23ebdf7` sur `main` (plus récent que `0461585`). ✅
 
-- [ ] **Step 2 : Poser les décisions à Régis, AVANT tout code**
+- [x] **Step 2 : Poser les décisions à Régis, AVANT tout code**
 
 1. **D1 — Confirmer les 4 décisions de la table A** (K1, K2/DA-4, K6, DA-6). Reco :
    **maintenir les 4**. En rouvrir une = chantier séparé, pas celui-ci.
@@ -165,11 +174,13 @@ Si l'arbre n'est pas propre : STOP, montrer à Régis (un travail non committé 
    sur témoin long, sans PASS/FAIL), le symptôme n'ayant jamais été reproduit. L'alternative
    (chercher un prompt qui récite) est ouverte mais non bornée.
 
-- [ ] **Step 3 : Créer la branche**
+- [x] **Step 3 : Créer la branche**
 
 ```bash
 git -C ~/dev/gemma4-zml-probe switch -c penalty-phase1
 ```
+
+→ Branche `penalty-phase1` créée depuis `23ebdf7`.
 
 ---
 
@@ -177,14 +188,16 @@ git -C ~/dev/gemma4-zml-probe switch -c penalty-phase1
 
 **Files :** aucun fichier modifié — artefacts hors arbre + `docs/evidence/penalty/` (créer).
 
-- [ ] **Step 1 : RP-1 — vérifier que l'oracle décode fp32 est opérationnel** (déjà soldé
+- [x] **Step 1 : RP-1 — vérifier que l'oracle décode fp32 est opérationnel** (déjà soldé
   par GC8, on le VOIT au lieu de le croire)
 
 Run : `sed -n '545,556p' scripts/69_u8_gen_oracle.py`
 Expected : la garde levée + le `print` « --compute-fp32 en mode DÉCODE : instrument fp32 ».
 Si la garde est revenue (régression) : STOP, c'est un finding.
+→ Vu le 10 août 2026 (`:547-556`) : garde levée, `print` d'avertissement présent, aucun
+`raise`. RP-1 confirmée soldée, pas de régression.
 
-- [ ] **Step 2 : Déployer l'état non modifié et capturer le témoin HLO**
+- [x] **Step 2 : Déployer l'état non modifié et capturer le témoin HLO**
 
 ```bash
 # depuis M1 :
@@ -199,8 +212,10 @@ md5sum /data/gemma4-zml-probe/rp_hlo_witness/*before_optimizations.txt
 
 Expected : md5 = **`297679847aa04b719942d75d093adf2b`**. L'archiver dans
 `docs/evidence/penalty/hlo_witness.md5`. Tout autre md5 : STOP (le graphe a bougé avant nous).
+→ Mesuré le 10 août 2026 : **md5 identique**, 512 fichiers dumpés, `BUILD: mode=ReleaseFast`,
+`ALLOC-LOOP: alloc=0` (17 steps). Archivé.
 
-- [ ] **Step 3 : Témoin d'ids LONG, penalty neutre** (le prompt canonique fait EOT au 2ᵉ
+- [x] **Step 3 : Témoin d'ids LONG, penalty neutre** (le prompt canonique fait EOT au 2ᵉ
   token — deux ids n'exercent rien)
 
 ```bash
@@ -214,8 +229,11 @@ l'identique en RP2). Vérifier au log : `BUILD: mode=ReleaseFast`, `ALLOC-LOOP: 
 et **publier le nombre d'ids générés : `n < 50` → changer de prompt** (en mode libre l'EOT
 peut couper tôt — un témoin de 5 ids ferait passer RP2 sur du quasi-vide, leçon vacuité de
 l'antécédent). Rapatrier le témoin sur M1 (hors arbre, `logs/`).
+→ Mesuré le 10 août 2026 : **200 ids générés** (aucun EOT prématuré, très loin du seuil
+`n < 50`), `ALLOC-LOOP: alloc=0` sur 228 steps, `BUILD: mode=ReleaseFast`. RUN_ARGS figés
+dans `docs/evidence/penalty/RUN_ARGS.md` ; témoin rapatrié en `logs/rp_witness_long.safetensors`.
 
-- [ ] **Step 4 : Commit des preuves**
+- [x] **Step 4 : Commit des preuves**
 
 ```bash
 git add docs/evidence/penalty/hlo_witness.md5
@@ -230,20 +248,25 @@ git commit -m "penalty(témoins) : RP-1 vérifié soldé (GC8), md5 HLO témoin 
 - Create : `scripts/76_penalty_vectors.py`
 - Create : `fixtures/penalty_vectors.safetensors` (committée, `git add -f`)
 
-- [ ] **Step 1 : Écrire le producteur** — reprendre le code de la Task 2 du plan du 27 juil
+- [x] **Step 1 : Écrire le producteur** — reprendre le code de la Task 2 du plan du 27 juil
   (`docs/superpowers/plans/2026-07-27-sampling-repetition-penalty.md:283-327`) TEL QUEL, avec
   ces seules corrections : nom de fichier `76_penalty_vectors.py`, et exécution dans le venv
   M4 (`~/ml-venvs/g12b`) où transformers 5.14.1 est installé. Le producteur appelle
   `RepetitionPenaltyLogitsProcessor` — retranscrire la formule est INTERDIT (spec C5).
 
-- [ ] **Step 2 : Exécuter et vérifier la non-vacuité**
+- [x] **Step 2 : Exécuter et vérifier la non-vacuité**
 
 Run : `python3 scripts/76_penalty_vectors.py`
 Expected : `touched_1.0 == 0` et `touched_{0.8,1.15,1.5}` == **6** (tokens DISTINCTS de
 `hist`, pas 9). Si 9 : le processor ne déduplique pas, STOP — toute la spec est à revoir.
 Noter la version transformers affichée.
+→ Mesuré le 10 août 2026 sur M4 (venv `~/ml-venvs/g12b`, le repo n'y est pas cloné :
+exécution dans `/tmp/rp76/`, fixture rapatriée) : `touched_1.0 = 0`,
+`touched_0.8 = touched_1.15 = touched_1.5 = 6`. **La dédup HF est confirmée** (6 distincts
+sur 9 ids). transformers **5.14.1**, torch 2.13.0. Métadonnées archivées dans
+`docs/evidence/penalty/rp1_fixture_meta.json`.
 
-- [ ] **Step 3 : Commit**
+- [x] **Step 3 : Commit**
 
 ```bash
 git add scripts/76_penalty_vectors.py
@@ -263,16 +286,19 @@ git commit -m "test(rp1): vecteurs penalty produits par le VRAI processor HF (d�
 - `zml_runner/BUILD.bazel` : **AUCUN changement** (`sampling.zig` est déjà dans les `srcs`
   des 3 cibles, `:527/:537/:547`)
 
-- [ ] **Step 1 : Écrire le selftest `--selftest-penalty <fixture>` qui échoue** — pattern
+- [x] **Step 1 : Écrire le selftest `--selftest-penalty <fixture>` qui échoue** — pattern
   exact de `--selftest-sampling` (host-only, early-return avant toute init GPU). Critères
   (spec RP1) : comparaison **0 ULP** (`@bitCast` u32, égalité entière) sur les 4 penalties ;
   assertions de non-vacuité de la fixture (≥ 1 doublon dans `hist`, ≥ 1 logit négatif
   pénalisé, ≥ 1 positif) ; tie-break argmax = **premier indice** sur le vecteur à ties.
 
-- [ ] **Step 2 : Builder → échec attendu** (`applyRepetitionPenalty` n'existe pas).
+- [x] **Step 2 : Builder → échec attendu** (`applyRepetitionPenalty` n'existe pas).
   Build local suffit : `ZML_REMOTE=… ./zml_runner/build_3090.sh` doit échouer à la compile.
+  → Rouge VU le 10 août 2026, `rc=1` :
+  `gemma4_g12auto.zig:1260:33: error: root source file struct 'sampling' has no member named
+  'applyRepetitionPenalty'`.
 
-- [ ] **Step 3 : Implémenter dans `sampling.zig`**
+- [x] **Step 3 : Implémenter dans `sampling.zig`**
 
 ```zig
 /// Repetition penalty — HF `RepetitionPenaltyLogitsProcessor`, lu à la source : logit
@@ -321,7 +347,7 @@ laisserait passer `NaN`. `--ignore-prompt` : booléen sans valeur.
 `ids` = `ids_fed` complet (prompt + générés du run dumpé) — « le prompt » n'y est plus une
 notion définie. `error.IgnorePromptWithLoadCache`, dette écrite v1.
 
-- [ ] **Step 4 : Builder + lancer le selftest**
+- [x] **Step 4 : Builder + lancer le selftest**
 
 ```bash
 # Les 2 positionnels ckpt/tokenizer sont OBLIGATOIRES (parseArgs exige >= 3 arguments,
@@ -331,8 +357,18 @@ $B1 /dev/null /dev/null --selftest-penalty /data/gemma4-zml-probe/fixtures/penal
 ```
 
 Expected : `RP1 PASS`, 4×512 valeurs bit-identiques, compteurs non nuls, tie-break conforme.
+→ Mesuré le 10 août 2026, `rc=0`, `BUILD: mode=ReleaseFast` :
+`RP1 PASS — 4/4 penalties bit-identiques au processor HF (512 valeurs chacune), hist 9 ids
+dont 6 distincts (3 logits <0, 3 >=0), tie-break=3 sur 3 ex æquo`.
+La division f32 de Zig et celle de torch coïncident **au bit près** sur les 4 penalties —
+c'était le risque principal du gate (double arrondi possible côté torch), il est levé par
+la mesure et non par un raisonnement.
+**Bonus, gardes CLI exercées** (règle 2 : un refus se VOIT échouer) —
+`nan`, `inf`, `-1`, `0`, `abc` refusés `exit=1` avec `InvalidRepetitionPenalty`, `1.15`
+accepté `exit=0`. `nan` est le cas qui compte : la garde est écrite en ACCEPTATION.
+Archivé : `docs/evidence/penalty/rp1_selftest.err.log`, `rp1_garde_cli.txt`.
 
-- [ ] **Step 5 : Commit + tag**
+- [x] **Step 5 : Commit + tag**
 
 ```bash
 git add zml_runner/sampling.zig zml_runner/gemma4_g12auto.zig
@@ -348,7 +384,7 @@ git tag gate/rp1-pass
 - Modify : `zml_runner/gemma4_g12auto.zig` — insertion `:2892-2894`, alimentation de `hist`
   dans la boucle, compteur fin de run (près de `:3144`)
 
-- [ ] **Step 1 : Seeder puis alimenter `hist` — le contrat exact**
+- [x] **Step 1 : Seeder puis alimenter `hist` — le contrat exact**
 
 Contrainte de cohérence qui ANCRE l'implémentation : **au moment de sélectionner le token
 de génération k, `hist[0..hist_len]` == prompt ++ tokens générés avant k** — exactement
@@ -378,7 +414,7 @@ Pendant le prefill, `hist` reste le seed complet : les sélections intermédiair
 jetées (`:2864-2867`), seule celle du dernier step de prefill (s0) compte — et à ce step
 HF a vu exactement le prompt complet. Cohérent par construction.
 
-- [ ] **Step 2 : Insérer la penalty en tête de chaîne** (`:2893`, avant `applySuppression`)
+- [x] **Step 2 : Insérer la penalty en tête de chaîne** (`:2893`, avant `applySuppression`)
 
 ```zig
 if (scfg.repetition_penalty != 1.0) {
@@ -413,19 +449,38 @@ sous penalty armée, rétrogradé en compteur silencieux (sinon 40+ lignes d'err
 le code exige lui-même qu'un écart de warpers au restore soit VISIBLE (spec kvdump §4.1) —
 sans cette extension, la penalty serait le seul réglage invisible du manifest.
 
-- [ ] **Step 3 : RP0 — le graphe n'a pas bougé**
+- [x] **Step 3 : RP0 — le graphe n'a pas bougé**
 
 Rebuild (`build_3090.sh`), re-dump HLO (mêmes flags que Task 1 Step 2), md5 identique au
 témoin. + `ALLOC-LOOP: alloc=0` au log d'un run avec penalty armée (l'interdit D10 se
 re-vérifie gratuitement — c'est LE point qui tuerait une implémentation qui alloue).
+→ **RP0 PASS** le 10 août 2026. md5 `before_optimizations` = `297679847aa04b719942d75d093adf2b`
+**dans les deux régimes** — sans penalty ET avec `--repetition-penalty 1.15` armée. Le dump
+sous penalty est le plus probant : il montre que le chemin host ne touche pas le graphe.
+`ALLOC-LOOP: alloc=0 … steps=17` sous penalty armée, et `alloc=0 … steps=52` au run de 24
+tokens du Step 5 : l'interdit D10 tient avec l'historique et le bitset en place.
 
-- [ ] **Step 4 : RP2 — non-régression penalty neutre**
+- [x] **Step 4 : RP2 — non-régression penalty neutre** ⚠ **RÉFÉRENCE REQUALIFIÉE**
 
 Re-run des RUN_ARGS de la Task 1 Step 3 (sans `--repetition-penalty`) → ids bit-identiques
 au témoin long. Puis un run AVEC `--repetition-penalty 1.0` explicite → également identique
 (le chemin à 1.0 est un no-op par construction, on le VOIT).
+→ **Le témoin de la Task 1 s'est révélé NON REPRODUCTIBLE** (148/200 ids différents), et la
+cause n'est pas le chantier : `main` **recompilé, sans une ligne de ce code**, produit
+exactement les mêmes ids que le code pénalisé. Trois binaires distincts (`59cf380a`,
+`158646ca` = main pur, `ba51d21b`) s'accordent sur `06a5953f…` et diffèrent tous du témoin
+`bb74f916…`, à md5 HLO identique. La divergence démarre au token **47** — les gates oracle
+historiques du repo font 48 tokens, d'où le fait que ce phénomène n'ait jamais été exposé.
+→ **RP2 PASS sous référence reconstruite** : `rp2_a` (sans flag) == `rp2_b` (`--repetition-penalty 1.0`
+explicite) == `rp2_main2` (**main pur recompilé**) == `rp2_c` (contrôle, 3ᵉ binaire), tous
+`06a5953f…`. C'est une preuve plus forte que la comparaison au témoin : elle contrôle la
+variable « fenêtre » que le témoin subissait.
+→ Finding complet, mesures et règle d'instrumentation qui en découle :
+`docs/evidence/penalty/FINDING_temoin_ids_non_reproductible.md`. **1ʳᵉ requalification
+d'instrument de ce chantier, déclarée** (règle : une 2ᵉ du même type ⇒ STOP et diff de
+l'instrument).
 
-- [ ] **Step 5 : Round-trip dump/restore sous penalty** (écart 9 — on vérifie la
+- [x] **Step 5 : Round-trip dump/restore sous penalty** (écart 9 — on vérifie la
   compatibilité au lieu de la supposer)
 
 Run `--repetition-penalty 1.15 --dump-cache <f> --max-tokens 24`, puis
@@ -439,8 +494,18 @@ avec le prompt de référence) : la vérification discrimine sans ambiguïté.
 Puis **exercer le refus neuf** (règle 2 : un refus se VOIT échouer) :
 `--load-cache <f> --ignore-prompt --repetition-penalty 1.15` → exit non-zéro,
 `error.IgnorePromptWithLoadCache`, message archivé dans `docs/evidence/penalty/`.
+→ Mesuré le 10 août 2026, **le seed de reprise est PROUVÉ** :
+- dump (24 tokens) : `PENALTY: hist_len=53 prompt_len=29 générés=24` → 29 + 24 = 53 ✅,
+  `n_penalty_touched=52/52`.
+- restore (8 tokens) : `PENALTY: hist_len=60 prompt_len=52 générés=8` → 52 + 8 = 60 ✅,
+  `n_penalty_touched=8/8`. **`step_next` lu INDÉPENDAMMENT au manifest = 52**, égal au
+  `prompt_len` publié : l'historique a bien été seedé depuis `ids_fed`. Le bug de l'écart 9
+  aurait rendu `hist_len = 8` — l'écart entre 8 et 60 ne laisse aucune ambiguïté.
+- manifest étendu, vérifié : `sampling = T=1,top_k=0,top_p=1,rp=1.15,ignore_prompt=false`.
+- refus neuf exercé : `exit=1`, `error.IgnorePromptWithLoadCache` avec son message.
+Archivé : `docs/evidence/penalty/rp0_rp2_roundtrip.log`.
 
-- [ ] **Step 6 : Commit + tags**
+- [x] **Step 6 : Commit + tags**
 
 ```bash
 git add zml_runner/gemma4_g12auto.zig zml_runner/sampling.zig docs/evidence/penalty/
@@ -469,16 +534,28 @@ Hamming des `fed` entre 1.0 et chacun des deux autres : attendu **≥ 3 sur 48**
 ~40 par cascade). Publier les valeurs réelles. Si < 3 : changer de prompt, le gate ne
 passe PAS à vide.
 
-- [ ] **Step 3 : RP3 — le gate** : runner `--oracle <fixture pénalisée>` pour 0.8 et 1.15.
+- [x] **Step 3 : RP3 — le gate** : runner `--oracle <fixture pénalisée>` pour 0.8 et 1.15.
   Expected : **ids == HF**, `n_penalty_touched > 0`, marge min publiée. Mismatch → §7-3 de
   la spec (3 conditions, ε = 2e-3, fenêtre attendue VIDE — marge min historique 0,0279).
+→ **RP3 PASS** le 10 août 2026 : **48/48 pour 1,15 ET pour 0,8**, `n_penalty_touched=76/76`,
+`alloc=0`, prompt vérifié **littéralement** (29 ids — le check est passé de « même longueur »
+à l'identité, grâce au tenseur `prompt_ids` neuf). Marges min des runs : 0,026249 (1,15) et
+0,004210 (0,8). **Non-vacuité exercée** : même fixture 1,15 **sans** armer la penalty ⇒
+`A1 FAIL 17/48` au step 17 — la position exacte de 1ʳᵉ divergence du mordant.
 
-- [ ] **Step 4 : RP4 — les trois corruptions**, chacune → RP3 **FAIL vu** :
+- [x] **Step 4 : RP4 — les trois corruptions**, chacune → RP3 **FAIL vu** :
   (a) branches de signe échangées ; (b) dédup retirée (`seen` ignoré) ; (c) `ignore_prompt`
   forcé à l'inverse. Publier le mordant de chacune (plancher 1 ; un mordant faible face à la
   cascade attendue est à instruire). Corruptions dans un worktree jetable, jamais committées.
+→ (a) **FAIL vu** 15/48 (@11), mordant **33** · (b) **FAIL vu** 34/48 (@34), mordant **14** ·
+(c) **A1 PASS 48/48 — mordant 0, VACUE**. Conformément à la consigne du plan, (c) est
+**instruite et non acceptée** : le code sain sous `--ignore-prompt` passe lui aussi 48/48, donc
+la trajectoire est indifférente à cette frontière ; et une recherche **bornée à 3 essais** d'un
+prompt discriminant en a trouvé **3 sur 3**, prouvant que le flag est opérant. Détail complet
+et ce qui reste à prouver : `SAMPLING_RESULTS.md` §8.6. Code sain restauré et re-vérifié PASS ;
+worktree jetable supprimé, aucune corruption committée.
 
-- [ ] **Step 5 : Commit + tags** (`gate/rp3-pass`, `gate/rp4-pass`)
+- [x] **Step 5 : Commit + tags** (`gate/rp3-pass`, `gate/rp4-pass`)
 
 ---
 
@@ -487,7 +564,7 @@ passe PAS à vide.
 **Files :**
 - Modify : `zml_runner/gemma4_g12auto.zig` — boucle stdin `--repl`
 
-- [ ] **Step 1 : Parser les directives** — une ligne commençant par `:` n'est JAMAIS un
+- [x] **Step 1 : Parser les directives** — une ligne commençant par `:` n'est JAMAIS un
   prompt : `:penalty <f>` (même garde en acceptation), `:ignore-prompt on|off`, `:params`,
   `:help`. Valeur invalide → message, la session CONTINUE. ⚠ Pièges std.Io 0.16 du chantier
   repl (`REPL_RESULTS.md`) : `takeDelimiter` (pas `Exclusive`), writer UNIQUE sur stdout.
@@ -496,34 +573,80 @@ passe PAS à vide.
   VÉRIFIER (un `hist_len` repartant à 0 nu serait la sémantique `ignore_prompt`, pas le
   défaut HF — et RP5 ne le verrait pas, deux passes identiquement fausses restant égales).
 
-- [ ] **Step 2 : RP5** — même prompt 2×, penalty active, 32 tokens : texte détokenisé
+- [x] **Step 2 : RP5** — même prompt 2×, penalty active, 32 tokens : texte détokenisé
   identique ET `n_penalty_touched > 0` aux deux passes. Puis 20 prompts : RSS ≤ +1 Mo
   (le compteur AL-RSS le publie déjà).
+→ **RP5 PASS sur le reset par prompt** (10 août 2026) : 2 passes du même prompt sous
+`:penalty 1.15` → **textes détokenisés identiques**, `n_penalty_touched=60` aux deux, et
+surtout **`hist_len=61` aux DEUX passes** (= 29 prompt + 32 générés). C'est le point que le
+gate devait attraper : sans re-seed, la 2ᵉ passe afficherait `hist_len=93` et un texte
+différent. Confirmé sur 20 passes (`hist_len=53` à la 1ʳᵉ comme à la 20ᵉ, 20 textes
+identiques).
+→ ⚠ **Critère RSS NON TENU, et la penalty n'en est pas la cause.** Mesuré au même point de
+chaque run (`t20`, 20 tokens générés), sur 20 prompts : **+1 268 KiB avec** penalty,
+**+1 196 KiB sans** (contre-test, mêmes prompts, même binaire). Pente 66,7 vs 62,9 KiB/prompt.
+**L'écart imputable à la penalty est de +72 KiB sur 20 prompts** ; le seuil « ≤ +1 Mo » est
+dépassé par la **dérive de base du mode résident**, qui préexiste au chantier. → dette écrite,
+pas un FAIL de la penalty. (`RSS-DELTA` intra-run est INEXÉCUTABLE ici : il exige `t200`, or
+les prompts font 24 tokens ; `t20` est la grandeur qui parle d'une dérive INTER-prompts.)
 
-- [ ] **Step 3 : RP6** — (a) `:penalty 1.15` ne génère rien (vérifié par COMPTAGE) ;
+- [x] **Step 3 : RP6** — (a) `:penalty 1.15` ne génère rien (vérifié par COMPTAGE) ;
   (b) s'applique au prompt SUIVANT (sensibilité prouvée par RP3) ; (c) `:params` vérifié
   CONTRE le comportement (référence = `reponse_hf` du manifest oracle 1.15, rapatrié de M4,
   borné aux 48 premiers tokens, comparaison TEXTE) ; (d) valeurs invalides énumérées
   `0, -1, nan, inf, abc, vide` — **`nan` est le cas qui compte**.
+→ **(a) PASS** : `:penalty 1.15` + `:params` + `:help` seuls ⇒ **0 génération et 0 ligne
+`PENALTY:` de fin de run** (comptage, pas impression visuelle).
+→ **(b) PASS** : prompt, puis `:penalty 1.15`, puis le même prompt ⇒ **une seule** ligne
+`PENALTY:` — la 1ʳᵉ passe est restée neutre, la 2ᵉ est pénalisée. La directive n'agit ni
+rétroactivement ni immédiatement, mais au prompt suivant, comme annoncé par son message.
+→ **(d) PASS** : `0`, `-1`, `nan`, `inf`, `abc`, `:penalty` sans valeur, `:ignore-prompt maybe`
+et une directive inconnue ⇒ chacun son message, **valeur inchangée** (confirmée par `:params`
+en fin de séquence) et **session vivante, exit=0**. `nan` est bien refusé : la garde est
+partagée avec la CLI via `parsePenalty` — une seule implémentation, pas deux qui dérivent.
+→ **(c)** : voir Task 5 (exige la fixture oracle 1.15 de M4).
 
-- [ ] **Step 4 : Commit + tags** (`gate/rp5-pass`, `gate/rp6-pass`)
+⚠ **Bug trouvé par ce gate, et c'est son mérite** : `:penalty` armait le chemin B en cours de
+session alors que `work`/`scratch` n'étaient alloués que si `pathArmed()` était vrai **au
+lancement** ⇒ `chemin B : logits 1048576 octets != work 0 octets`. Pire, les `defer` de
+libération ré-évaluaient `scfg.pathArmed()` : devenu vrai après un `:penalty`, un `defer`
+aurait libéré un `scratch` jamais initialisé. Corrigé par un `chain_armed` **figé une fois**
+qui pilote allocation ET libération — la condition de libération doit être la MÊME EXPRESSION
+que celle d'allocation, pas une qui lui ressemble.
+
+- [x] **Step 4 : Commit + tags** (`gate/rp5-pass`, `gate/rp6-pass`)
 
 ---
 
 ### Task 7 : RP7 selon l'arbitrage D4 + M1 (coût)
 
-- [ ] **Step 1 : RP7** — si D4 = requalification (reco) : mesurer la métrique n-gramme
+- [x] **Step 1 : RP7** — si D4 = requalification (reco) : mesurer la métrique n-gramme
   (longueur max de n-gramme répété, 200 derniers tokens) sur le témoin long ET sur un run
   `--repetition-penalty 1.15`, publier les deux SANS verdict, dette D5 close par
   requalification datée. Si D4 = chercher un prompt qui récite : borné à 3 essais, sinon
   vacuité déclarée.
+→ Publié, **sans verdict** (D4 = requalification). Outil : `scripts/77_ngram_repetition.py`.
+À 200 tokens, longueur égale : OFF ⇒ plus long n-gramme répété **4**, bigrammes **13**,
+trigrammes **3**, distincts 123/200 · ON `rp=1,15` ⇒ **2 / 6 / 0**, distincts **135/200**.
+Sur les 3 trajectoires HF de 48 tokens, la métrique bouge **dans les deux sens** : `rp=0,8`
+(qui encourage la répétition) donne **4 / 4 / 34**, contre **1 / 0 / 38** à `rp=1,15`.
+**Dette D5 close par requalification datée du 10 août 2026.**
 
-- [ ] **Step 2 : M1** — le chrono `M-COUT` existant (`d2h_ns`/`warp_ns`) englobe déjà la
+- [x] **Step 2 : M1** — le chrono `M-COUT` existant (`d2h_ns`/`warp_ns`) englobe déjà la
   chaîne : publier warp µs/step penalty ON vs OFF (2 runs, mêmes RUN_ARGS, build prouvé
   `ReleaseFast`). Mesure publiée, PAS un gate. ⚠ Ne pas armer `--gate-d1d2` pendant la
   mesure (il travaille dans la fenêtre chronométrée et l'invalide, `SAMPLING_RESULTS.md` §7).
+→ ⚠ **Correction au plan, nécessaire** : `--repetition-penalty 1.0` **n'arme pas** le chemin B,
+donc `M-COUT` n'aurait pas été publié côté OFF et il n'y aurait rien eu à comparer. Les deux
+runs sont donc armés par `--top-k 1` (le régime neutre du gate-pont), ce qui fait de la penalty
+la **seule** variable. `--gate-d1d2` non armé, `BUILD: mode=ReleaseFast` aux deux.
+→ **699,7 µs/step** (OFF) vs **711,1 µs/step** (ON) ⇒ **+11,4 µs, +1,6 %**. L'écart vit dans le
+**D2H** (436,3 → 453,8 µs) ; les **warpers ne bougent pas** (248,2 → 242,8, en baisse). Le
+surcoût de la penalty est **sous le plancher de résolution** de l'instrument.
 
-- [ ] **Step 3 : Commit** (+ tag `gate/rp7-pass` seulement si D4 a retenu un gate)
+- [x] **Step 3 : Commit** (+ tag `gate/rp7-pass` seulement si D4 a retenu un gate)
+→ Pas de tag `gate/rp7-pass` : D4 a retenu une **mesure publiée**, pas un gate. Un tag `-pass`
+sur une mesure sans critère serait un faux verdict.
 
 ---
 
