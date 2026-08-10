@@ -1,0 +1,11 @@
+Loading weights:   0%|          | 0/678 [00:00<?, ?it/s]Loading weights: 100%|██████████| 678/678 [00:00<00:00, 7667.52it/s]
+modèle chargé (bf16, low_cpu_mem_usage) en 5.6 s
+GENPOLICY: {'applied': True, 'suppress_tokens': [258883, 258882], 'eos_token_id': [1, 106, 50], 'source': 'model.generation_config (from_pretrained)', 'processor': 'transformers.generation.logits_process.SuppressTokensLogitsProcessor', 'note': "SUPPRESSION seulement — l'arrêt EOS n'est PAS appliqué par cet oracle (mode --oracle du runner : suppression ON, arrêt OFF, décision Régis n°3)"}
+context : C=1033 ids de contexte, m=32 générés, prefill de T=1064 positions ; rapport à partir de p=1004
+calcul fp32 armé : 626 sous-modules hookés dont lm_head
+témoin fenêtre : masque sliding != causal à T=1064 (fenêtre 1024 mordante)
+prefill backbone T=1064 en 58.6 s
+self-check tête : manuelle == forward HF (fp32, max|d|=6.29e-05, préfixe 8)
+marges ctx (raw)    : min=0.091156 médiane=2.888663 sur 28 positions
+marges gen (policy) : min=0.021177 médiane=2.634612 sur 32 positions
+rapport écrit : /tmp/pf3.json (60 positions, aucun verdict)

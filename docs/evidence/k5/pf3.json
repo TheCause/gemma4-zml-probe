@@ -1,0 +1,1365 @@
+{
+  "source": "69_u8_gen_oracle.py (mode --context-ids — K5/PF1, spec 2026-08-10 §4.5)",
+  "oracle": "UN prefill HF CPU de [ctx_ids ++ ids[:-1]] ; tête lm_head+softcap par chunks ; DEUX canaux publiés par position (brut in-graph / post-politique) — le juge est le script 80, pas celui-ci",
+  "mode": "context",
+  "compute_dtype": "float32",
+  "ctx_from": 1004,
+  "C": 1033,
+  "m": 32,
+  "prefill_len": 1064,
+  "context_fixture": "/tmp/pf3_outB.safetensors",
+  "window": {
+    "sliding_window": 1024,
+    "bites_in_prefill": true
+  },
+  "positions": [
+    {
+      "p": 1004,
+      "argmax_raw": 7593,
+      "margin_raw": 11.719103,
+      "top5_raw_ids": [
+        7593,
+        15707,
+        9628,
+        3718,
+        26846
+      ],
+      "top5_raw_vals": [
+        25.4961,
+        13.777,
+        12.0728,
+        11.9653,
+        11.848
+      ],
+      "fed_at_next": 106,
+      "argmax_policy": 7593,
+      "margin_policy": 11.719103
+    },
+    {
+      "p": 1005,
+      "argmax_raw": 7593,
+      "margin_raw": 3.803602,
+      "top5_raw_ids": [
+        7593,
+        26846,
+        15707,
+        5213,
+        1390
+      ],
+      "top5_raw_vals": [
+        27.2548,
+        23.4512,
+        22.2235,
+        22.2003,
+        21.4301
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 7593,
+      "margin_policy": 3.803602
+    },
+    {
+      "p": 1006,
+      "argmax_raw": 100,
+      "margin_raw": 1.377863,
+      "top5_raw_ids": [
+        100,
+        26846,
+        1018,
+        236820,
+        1390
+      ],
+      "top5_raw_vals": [
+        23.8182,
+        22.4404,
+        20.8366,
+        20.2963,
+        20.0352
+      ],
+      "fed_at_next": 105,
+      "argmax_policy": 100,
+      "margin_policy": 1.377863
+    },
+    {
+      "p": 1007,
+      "argmax_raw": 45518,
+      "margin_raw": 2.93187,
+      "top5_raw_ids": [
+        45518,
+        26846,
+        236829,
+        236761,
+        1018
+      ],
+      "top5_raw_vals": [
+        21.5752,
+        18.6434,
+        18.6289,
+        18.0787,
+        17.907
+      ],
+      "fed_at_next": 2364,
+      "argmax_policy": 45518,
+      "margin_policy": 2.93187
+    },
+    {
+      "p": 1008,
+      "argmax_raw": 107,
+      "margin_raw": 5.931807,
+      "top5_raw_ids": [
+        107,
+        236908,
+        7411,
+        4060,
+        108
+      ],
+      "top5_raw_vals": [
+        24.1828,
+        18.251,
+        18.2167,
+        18.1733,
+        17.8679
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 5.931807
+    },
+    {
+      "p": 1009,
+      "argmax_raw": 100,
+      "margin_raw": 4.644911,
+      "top5_raw_ids": [
+        100,
+        45518,
+        101,
+        236829,
+        1018
+      ],
+      "top5_raw_vals": [
+        26.4228,
+        21.7779,
+        21.2034,
+        19.9388,
+        18.7626
+      ],
+      "fed_at_next": 82858,
+      "argmax_policy": 100,
+      "margin_policy": 4.644911
+    },
+    {
+      "p": 1010,
+      "argmax_raw": 506,
+      "margin_raw": 3.348917,
+      "top5_raw_ids": [
+        506,
+        496,
+        1144,
+        822,
+        1041
+      ],
+      "top5_raw_vals": [
+        27.2091,
+        23.8601,
+        23.1085,
+        23.027,
+        21.8919
+      ],
+      "fed_at_next": 506,
+      "argmax_policy": 506,
+      "margin_policy": 3.348917
+    },
+    {
+      "p": 1011,
+      "argmax_raw": 1927,
+      "margin_raw": 0.721565,
+      "top5_raw_ids": [
+        1927,
+        63937,
+        8351,
+        9228,
+        2978
+      ],
+      "top5_raw_vals": [
+        24.9088,
+        24.1873,
+        23.4249,
+        23.3227,
+        23.1854
+      ],
+      "fed_at_next": 5232,
+      "argmax_policy": 1927,
+      "margin_policy": 0.721565
+    },
+    {
+      "p": 1012,
+      "argmax_raw": 531,
+      "margin_raw": 0.82588,
+      "top5_raw_ids": [
+        531,
+        236761,
+        529,
+        657,
+        532
+      ],
+      "top5_raw_vals": [
+        26.9547,
+        26.1288,
+        23.4137,
+        23.103,
+        22.9973
+      ],
+      "fed_at_next": 529,
+      "argmax_policy": 531,
+      "margin_policy": 0.82588
+    },
+    {
+      "p": 1013,
+      "argmax_raw": 822,
+      "margin_raw": 0.156759,
+      "top5_raw_ids": [
+        822,
+        506,
+        1041,
+        672,
+        1023
+      ],
+      "top5_raw_vals": [
+        27.3337,
+        27.1769,
+        25.3417,
+        20.6371,
+        20.1662
+      ],
+      "fed_at_next": 1041,
+      "argmax_policy": 822,
+      "margin_policy": 0.156759
+    },
+    {
+      "p": 1014,
+      "argmax_raw": 2033,
+      "margin_raw": 0.091156,
+      "top5_raw_ids": [
+        2033,
+        63937,
+        3155,
+        19698,
+        62073
+      ],
+      "top5_raw_vals": [
+        26.6818,
+        26.5907,
+        23.4539,
+        19.1279,
+        18.9914
+      ],
+      "fed_at_next": 2033,
+      "argmax_policy": 2033,
+      "margin_policy": 0.091156
+    },
+    {
+      "p": 1015,
+      "argmax_raw": 236761,
+      "margin_raw": 4.30954,
+      "top5_raw_ids": [
+        236761,
+        532,
+        236764,
+        106,
+        107
+      ],
+      "top5_raw_vals": [
+        27.8527,
+        23.5432,
+        22.7413,
+        20.5796,
+        20.4264
+      ],
+      "fed_at_next": 236764,
+      "argmax_policy": 236761,
+      "margin_policy": 4.30954
+    },
+    {
+      "p": 1016,
+      "argmax_raw": 506,
+      "margin_raw": 1.333504,
+      "top5_raw_ids": [
+        506,
+        532,
+        26509,
+        107,
+        1061
+      ],
+      "top5_raw_vals": [
+        25.559,
+        24.2255,
+        22.3312,
+        20.6551,
+        20.4467
+      ],
+      "fed_at_next": 532,
+      "argmax_policy": 506,
+      "margin_policy": 1.333504
+    },
+    {
+      "p": 1017,
+      "argmax_raw": 1144,
+      "margin_raw": 0.392729,
+      "top5_raw_ids": [
+        1144,
+        506,
+        3442,
+        1217,
+        1015
+      ],
+      "top5_raw_vals": [
+        27.3294,
+        26.9367,
+        25.6291,
+        25.2271,
+        23.0141
+      ],
+      "fed_at_next": 16885,
+      "argmax_policy": 1144,
+      "margin_policy": 0.392729
+    },
+    {
+      "p": 1018,
+      "argmax_raw": 786,
+      "margin_raw": 5.539251,
+      "top5_raw_ids": [
+        786,
+        775,
+        611,
+        5869,
+        506
+      ],
+      "top5_raw_vals": [
+        27.1883,
+        21.649,
+        20.8947,
+        19.7175,
+        19.5335
+      ],
+      "fed_at_next": 786,
+      "argmax_policy": 786,
+      "margin_policy": 5.539251
+    },
+    {
+      "p": 1019,
+      "argmax_raw": 529,
+      "margin_raw": 2.036255,
+      "top5_raw_ids": [
+        529,
+        3217,
+        1144,
+        1015,
+        1217
+      ],
+      "top5_raw_vals": [
+        27.6892,
+        25.653,
+        25.3763,
+        22.8495,
+        21.4995
+      ],
+      "fed_at_next": 529,
+      "argmax_policy": 529,
+      "margin_policy": 2.036255
+    },
+    {
+      "p": 1020,
+      "argmax_raw": 506,
+      "margin_raw": 0.511959,
+      "top5_raw_ids": [
+        506,
+        1144,
+        3217,
+        1015,
+        822
+      ],
+      "top5_raw_vals": [
+        27.5009,
+        26.989,
+        26.1415,
+        24.5719,
+        24.4332
+      ],
+      "fed_at_next": 1041,
+      "argmax_policy": 506,
+      "margin_policy": 0.511959
+    },
+    {
+      "p": 1021,
+      "argmax_raw": 5708,
+      "margin_raw": 0.907845,
+      "top5_raw_ids": [
+        5708,
+        11133,
+        3853,
+        1463,
+        6376
+      ],
+      "top5_raw_vals": [
+        24.9012,
+        23.9934,
+        23.9345,
+        23.7736,
+        23.6895
+      ],
+      "fed_at_next": 1463,
+      "argmax_policy": 5708,
+      "margin_policy": 0.907845
+    },
+    {
+      "p": 1022,
+      "argmax_raw": 236761,
+      "margin_raw": 3.196508,
+      "top5_raw_ids": [
+        236761,
+        236764,
+        532,
+        618,
+        3622
+      ],
+      "top5_raw_vals": [
+        28.3774,
+        25.1809,
+        24.8303,
+        23.5048,
+        22.8583
+      ],
+      "fed_at_next": 236761,
+      "argmax_policy": 236761,
+      "margin_policy": 3.196508
+    },
+    {
+      "p": 1023,
+      "argmax_raw": 108,
+      "margin_raw": 0.114595,
+      "top5_raw_ids": [
+        108,
+        107,
+        106,
+        236743,
+        109
+      ],
+      "top5_raw_vals": [
+        24.7623,
+        24.6477,
+        22.5843,
+        22.0515,
+        18.4479
+      ],
+      "fed_at_next": 106,
+      "argmax_policy": 108,
+      "margin_policy": 0.114595
+    },
+    {
+      "p": 1024,
+      "argmax_raw": 108,
+      "margin_raw": 2.845457,
+      "top5_raw_ids": [
+        108,
+        45518,
+        107,
+        236829,
+        138
+      ],
+      "top5_raw_vals": [
+        19.3852,
+        16.5398,
+        16.0026,
+        15.6747,
+        14.3056
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 108,
+      "margin_policy": 2.845457
+    },
+    {
+      "p": 1025,
+      "argmax_raw": 100,
+      "margin_raw": 2.327152,
+      "top5_raw_ids": [
+        100,
+        45518,
+        101,
+        106,
+        236829
+      ],
+      "top5_raw_vals": [
+        19.3204,
+        16.9932,
+        16.0377,
+        14.519,
+        14.3591
+      ],
+      "fed_at_next": 105,
+      "argmax_policy": 100,
+      "margin_policy": 2.327152
+    },
+    {
+      "p": 1026,
+      "argmax_raw": 45518,
+      "margin_raw": 1.971699,
+      "top5_raw_ids": [
+        45518,
+        107,
+        594,
+        3305,
+        100
+      ],
+      "top5_raw_vals": [
+        20.1387,
+        18.167,
+        13.3512,
+        13.0218,
+        12.7061
+      ],
+      "fed_at_next": 4368,
+      "argmax_policy": 45518,
+      "margin_policy": 1.971699
+    },
+    {
+      "p": 1027,
+      "argmax_raw": 107,
+      "margin_raw": 3.835201,
+      "top5_raw_ids": [
+        107,
+        45518,
+        108,
+        100,
+        236761
+      ],
+      "top5_raw_vals": [
+        20.8606,
+        17.0254,
+        16.2224,
+        14.7736,
+        13.9185
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 3.835201
+    },
+    {
+      "p": 1028,
+      "argmax_raw": 100,
+      "margin_raw": 12.487555,
+      "top5_raw_ids": [
+        100,
+        236820,
+        818,
+        7243,
+        236783
+      ],
+      "top5_raw_vals": [
+        28.4656,
+        15.9781,
+        14.9807,
+        14.5532,
+        14.2093
+      ],
+      "fed_at_next": 100,
+      "argmax_policy": 100,
+      "margin_policy": 12.487555
+    },
+    {
+      "p": 1029,
+      "argmax_raw": 45518,
+      "margin_raw": 10.531576,
+      "top5_raw_ids": [
+        45518,
+        3305,
+        44027,
+        107,
+        235950
+      ],
+      "top5_raw_vals": [
+        26.1745,
+        15.6429,
+        15.1732,
+        12.6366,
+        12.2189
+      ],
+      "fed_at_next": 45518,
+      "argmax_policy": 45518,
+      "margin_policy": 10.531576
+    },
+    {
+      "p": 1030,
+      "argmax_raw": 107,
+      "margin_raw": 13.4577,
+      "top5_raw_ids": [
+        107,
+        594,
+        2506,
+        1275,
+        1269
+      ],
+      "top5_raw_vals": [
+        26.0075,
+        12.5498,
+        11.033,
+        10.9574,
+        10.7966
+      ],
+      "fed_at_next": 107,
+      "argmax_policy": 107,
+      "margin_policy": 13.4577
+    },
+    {
+      "p": 1031,
+      "argmax_raw": 101,
+      "margin_raw": 14.03135,
+      "top5_raw_ids": [
+        101,
+        2061,
+        236820,
+        238302,
+        1251
+      ],
+      "top5_raw_vals": [
+        27.6817,
+        13.6504,
+        13.4009,
+        13.348,
+        13.227
+      ],
+      "fed_at_next": 101,
+      "argmax_policy": 101,
+      "margin_policy": 14.03135
+    },
+    {
+      "p": 1032,
+      "argmax_raw": 818,
+      "margin_raw": 1.551714,
+      "top5_raw_ids": [
+        818,
+        2021,
+        3834,
+        17574,
+        13286
+      ],
+      "top5_raw_vals": [
+        27.3423,
+        25.7905,
+        22.2939,
+        21.9465,
+        20.1811
+      ],
+      "fed_at_next": 818,
+      "argmax_policy": 818,
+      "margin_policy": 1.551714
+    },
+    {
+      "p": 1033,
+      "argmax_raw": 5232,
+      "margin_raw": 7.291712,
+      "top5_raw_ids": [
+        5232,
+        7274,
+        16825,
+        3645,
+        1595
+      ],
+      "top5_raw_vals": [
+        25.2505,
+        17.9588,
+        17.4352,
+        15.8828,
+        14.333
+      ],
+      "fed_at_next": 5232,
+      "argmax_policy": 5232,
+      "margin_policy": 7.291712
+    },
+    {
+      "p": 1034,
+      "argmax_raw": 531,
+      "margin_raw": 3.228697,
+      "top5_raw_ids": [
+        531,
+        563,
+        529,
+        657,
+        1677
+      ],
+      "top5_raw_vals": [
+        27.0042,
+        23.7755,
+        22.8839,
+        18.9994,
+        18.5334
+      ],
+      "fed_at_next": 531,
+      "argmax_policy": 531,
+      "margin_policy": 3.228697
+    },
+    {
+      "p": 1035,
+      "argmax_raw": 822,
+      "margin_raw": 8.756607,
+      "top5_raw_ids": [
+        822,
+        506,
+        1041,
+        1023,
+        26509
+      ],
+      "top5_raw_vals": [
+        27.4417,
+        18.6851,
+        17.0045,
+        15.448,
+        14.927
+      ],
+      "fed_at_next": 822,
+      "argmax_policy": 822,
+      "margin_policy": 8.756607
+    },
+    {
+      "p": 1036,
+      "argmax_raw": 2033,
+      "margin_raw": 2.709986,
+      "top5_raw_ids": [
+        2033,
+        62073,
+        1902,
+        63937,
+        1972
+      ],
+      "top5_raw_vals": [
+        25.6843,
+        22.9743,
+        19.047,
+        18.5244,
+        16.2856
+      ],
+      "fed_at_next": 2033,
+      "argmax_policy": 2033,
+      "margin_policy": 2.709986
+    },
+    {
+      "p": 1037,
+      "argmax_raw": 563,
+      "margin_raw": 1.86755,
+      "top5_raw_ids": [
+        563,
+        1677,
+        237028,
+        11979,
+        236764
+      ],
+      "top5_raw_vals": [
+        25.842,
+        23.9744,
+        18.0865,
+        17.7013,
+        17.1738
+      ],
+      "fed_at_next": 563,
+      "argmax_policy": 563,
+      "margin_policy": 1.86755
+    },
+    {
+      "p": 1038,
+      "argmax_raw": 711,
+      "margin_raw": 2.674961,
+      "top5_raw_ids": [
+        711,
+        506,
+        496,
+        21304,
+        7274
+      ],
+      "top5_raw_vals": [
+        25.2858,
+        22.6108,
+        20.7307,
+        19.5061,
+        17.0883
+      ],
+      "fed_at_next": 711,
+      "argmax_policy": 711,
+      "margin_policy": 2.674961
+    },
+    {
+      "p": 1039,
+      "argmax_raw": 496,
+      "margin_raw": 2.594263,
+      "top5_raw_ids": [
+        496,
+        614,
+        1133,
+        506,
+        2613
+      ],
+      "top5_raw_vals": [
+        26.1508,
+        23.5566,
+        21.0425,
+        20.5868,
+        20.1065
+      ],
+      "fed_at_next": 496,
+      "argmax_policy": 496,
+      "margin_policy": 2.594263
+    },
+    {
+      "p": 1040,
+      "argmax_raw": 5232,
+      "margin_raw": 2.204905,
+      "top5_raw_ids": [
+        5232,
+        33599,
+        3210,
+        1977,
+        3364
+      ],
+      "top5_raw_vals": [
+        21.9366,
+        19.7317,
+        18.9958,
+        18.0692,
+        17.8597
+      ],
+      "fed_at_next": 5232,
+      "argmax_policy": 5232,
+      "margin_policy": 2.204905
+    },
+    {
+      "p": 1041,
+      "argmax_raw": 529,
+      "margin_raw": 0.021177,
+      "top5_raw_ids": [
+        529,
+        9655,
+        573,
+        600,
+        5402
+      ],
+      "top5_raw_vals": [
+        23.755,
+        23.7338,
+        23.4544,
+        23.0511,
+        21.1483
+      ],
+      "fed_at_next": 529,
+      "argmax_policy": 529,
+      "margin_policy": 0.021177
+    },
+    {
+      "p": 1042,
+      "argmax_raw": 33599,
+      "margin_raw": 0.300068,
+      "top5_raw_ids": [
+        33599,
+        12822,
+        8349,
+        25417,
+        21441
+      ],
+      "top5_raw_vals": [
+        19.1127,
+        18.8127,
+        18.689,
+        18.6082,
+        18.156
+      ],
+      "fed_at_next": 33599,
+      "argmax_policy": 33599,
+      "margin_policy": 0.300068
+    },
+    {
+      "p": 1043,
+      "argmax_raw": 41945,
+      "margin_raw": 2.471571,
+      "top5_raw_ids": [
+        41945,
+        232544,
+        45585,
+        13358,
+        37863
+      ],
+      "top5_raw_vals": [
+        22.8928,
+        20.4212,
+        19.5946,
+        19.3774,
+        19.2072
+      ],
+      "fed_at_next": 41945,
+      "argmax_policy": 41945,
+      "margin_policy": 2.471571
+    },
+    {
+      "p": 1044,
+      "argmax_raw": 236793,
+      "margin_raw": 0.593052,
+      "top5_raw_ids": [
+        236793,
+        236764,
+        653,
+        237028,
+        532
+      ],
+      "top5_raw_vals": [
+        27.9189,
+        27.3259,
+        26.3029,
+        24.7072,
+        24.2393
+      ],
+      "fed_at_next": 236793,
+      "argmax_policy": 236793,
+      "margin_policy": 0.593052
+    },
+    {
+      "p": 1045,
+      "argmax_raw": 625,
+      "margin_raw": 11.551538,
+      "top5_raw_ids": [
+        625,
+        611,
+        573,
+        528,
+        4319
+      ],
+      "top5_raw_vals": [
+        27.5696,
+        16.0181,
+        15.7509,
+        15.2746,
+        15.2599
+      ],
+      "fed_at_next": 625,
+      "argmax_policy": 625,
+      "margin_policy": 11.551538
+    },
+    {
+      "p": 1046,
+      "argmax_raw": 563,
+      "margin_raw": 10.246321,
+      "top5_raw_ids": [
+        563,
+        1677,
+        19681,
+        691,
+        236789
+      ],
+      "top5_raw_vals": [
+        27.1522,
+        16.9059,
+        16.1336,
+        15.4915,
+        15.3939
+      ],
+      "fed_at_next": 563,
+      "argmax_policy": 563,
+      "margin_policy": 10.246321
+    },
+    {
+      "p": 1047,
+      "argmax_raw": 496,
+      "margin_raw": 9.294931,
+      "top5_raw_ids": [
+        496,
+        614,
+        506,
+        886,
+        711
+      ],
+      "top5_raw_vals": [
+        27.9446,
+        18.6497,
+        16.9601,
+        16.7592,
+        14.1007
+      ],
+      "fed_at_next": 496,
+      "argmax_policy": 496,
+      "margin_policy": 9.294931
+    },
+    {
+      "p": 1048,
+      "argmax_raw": 5232,
+      "margin_raw": 6.09063,
+      "top5_raw_ids": [
+        5232,
+        13818,
+        22238,
+        20825,
+        7274
+      ],
+      "top5_raw_vals": [
+        24.5163,
+        18.4256,
+        17.9759,
+        17.1443,
+        17.0383
+      ],
+      "fed_at_next": 5232,
+      "argmax_policy": 5232,
+      "margin_policy": 6.09063
+    },
+    {
+      "p": 1049,
+      "argmax_raw": 529,
+      "margin_raw": 7.425011,
+      "top5_raw_ids": [
+        529,
+        5284,
+        5402,
+        59308,
+        9655
+      ],
+      "top5_raw_vals": [
+        27.799,
+        20.374,
+        19.2252,
+        17.5558,
+        17.266
+      ],
+      "fed_at_next": 529,
+      "argmax_policy": 529,
+      "margin_policy": 7.425011
+    },
+    {
+      "p": 1050,
+      "argmax_raw": 52201,
+      "margin_raw": 0.540543,
+      "top5_raw_ids": [
+        52201,
+        137630,
+        203928,
+        7274,
+        8047
+      ],
+      "top5_raw_vals": [
+        19.8711,
+        19.3306,
+        16.8171,
+        16.7732,
+        16.6623
+      ],
+      "fed_at_next": 52201,
+      "argmax_policy": 52201,
+      "margin_policy": 0.540543
+    },
+    {
+      "p": 1051,
+      "argmax_raw": 236761,
+      "margin_raw": 10.611046,
+      "top5_raw_ids": [
+        236761,
+        236764,
+        532,
+        237028,
+        236793
+      ],
+      "top5_raw_vals": [
+        27.9057,
+        17.2947,
+        16.2025,
+        15.3428,
+        13.1708
+      ],
+      "fed_at_next": 236761,
+      "argmax_policy": 236761,
+      "margin_policy": 10.611046
+    },
+    {
+      "p": 1052,
+      "argmax_raw": 108,
+      "margin_raw": 1.358675,
+      "top5_raw_ids": [
+        108,
+        236743,
+        1030,
+        138,
+        45941
+      ],
+      "top5_raw_vals": [
+        28.0215,
+        26.6629,
+        22.7246,
+        19.1104,
+        16.6759
+      ],
+      "fed_at_next": 108,
+      "argmax_policy": 108,
+      "margin_policy": 1.358675
+    },
+    {
+      "p": 1053,
+      "argmax_raw": 1509,
+      "margin_raw": 3.919159,
+      "top5_raw_ids": [
+        1509,
+        63549,
+        52790,
+        154050,
+        119865
+      ],
+      "top5_raw_vals": [
+        26.2491,
+        22.33,
+        20.3992,
+        20.1563,
+        20.072
+      ],
+      "fed_at_next": 1509,
+      "argmax_policy": 1509,
+      "margin_policy": 3.919159
+    },
+    {
+      "p": 1054,
+      "argmax_raw": 563,
+      "margin_raw": 1.031191,
+      "top5_raw_ids": [
+        563,
+        11979,
+        23378,
+        64260,
+        258883
+      ],
+      "top5_raw_vals": [
+        23.0794,
+        22.0482,
+        21.309,
+        16.1612,
+        13.0479
+      ],
+      "fed_at_next": 563,
+      "argmax_policy": 563,
+      "margin_policy": 1.031191
+    },
+    {
+      "p": 1055,
+      "argmax_raw": 496,
+      "margin_raw": 2.339104,
+      "top5_raw_ids": [
+        496,
+        1603,
+        7274,
+        59308,
+        1076
+      ],
+      "top5_raw_vals": [
+        20.717,
+        18.3778,
+        18.3255,
+        18.0386,
+        15.8069
+      ],
+      "fed_at_next": 496,
+      "argmax_policy": 496,
+      "margin_policy": 2.339104
+    },
+    {
+      "p": 1056,
+      "argmax_raw": 12566,
+      "margin_raw": 0.524843,
+      "top5_raw_ids": [
+        12566,
+        7274,
+        47686,
+        258883,
+        7497
+      ],
+      "top5_raw_vals": [
+        21.8541,
+        21.3293,
+        15.3755,
+        15.3057,
+        14.9928
+      ],
+      "fed_at_next": 12566,
+      "argmax_policy": 12566,
+      "margin_policy": 0.524843
+    },
+    {
+      "p": 1057,
+      "argmax_raw": 236764,
+      "margin_raw": 1.656469,
+      "top5_raw_ids": [
+        236764,
+        47686,
+        3210,
+        6347,
+        10988
+      ],
+      "top5_raw_vals": [
+        24.5679,
+        22.9114,
+        19.2176,
+        16.7121,
+        16.7014
+      ],
+      "fed_at_next": 236764,
+      "argmax_policy": 236764,
+      "margin_policy": 1.656469
+    },
+    {
+      "p": 1058,
+      "argmax_raw": 7274,
+      "margin_raw": 1.544737,
+      "top5_raw_ids": [
+        7274,
+        138915,
+        3972,
+        43389,
+        8603
+      ],
+      "top5_raw_vals": [
+        20.6663,
+        19.1216,
+        17.2976,
+        16.7643,
+        16.3696
+      ],
+      "fed_at_next": 7274,
+      "argmax_policy": 7274,
+      "margin_policy": 1.544737
+    },
+    {
+      "p": 1059,
+      "argmax_raw": 47686,
+      "margin_raw": 3.220449,
+      "top5_raw_ids": [
+        47686,
+        3210,
+        152990,
+        234769,
+        36608
+      ],
+      "top5_raw_vals": [
+        24.5446,
+        21.3242,
+        19.8666,
+        18.3705,
+        17.9066
+      ],
+      "fed_at_next": 47686,
+      "argmax_policy": 47686,
+      "margin_policy": 3.220449
+    },
+    {
+      "p": 1060,
+      "argmax_raw": 529,
+      "margin_raw": 13.385746,
+      "top5_raw_ids": [
+        529,
+        73587,
+        236772,
+        236800,
+        3463
+      ],
+      "top5_raw_vals": [
+        26.656,
+        13.2702,
+        12.532,
+        12.468,
+        12.2725
+      ],
+      "fed_at_next": 529,
+      "argmax_policy": 529,
+      "margin_policy": 13.385746
+    },
+    {
+      "p": 1061,
+      "argmax_raw": 8603,
+      "margin_raw": 0.92313,
+      "top5_raw_ids": [
+        8603,
+        93991,
+        172138,
+        174954,
+        56677
+      ],
+      "top5_raw_vals": [
+        18.3132,
+        17.3901,
+        15.8348,
+        15.7476,
+        15.6476
+      ],
+      "fed_at_next": 8603,
+      "argmax_policy": 8603,
+      "margin_policy": 0.92313
+    },
+    {
+      "p": 1062,
+      "argmax_raw": 236772,
+      "margin_raw": 3.527031,
+      "top5_raw_ids": [
+        236772,
+        5168,
+        10633,
+        236779,
+        1662
+      ],
+      "top5_raw_vals": [
+        25.685,
+        22.158,
+        18.139,
+        14.9487,
+        14.6229
+      ],
+      "fed_at_next": 236772,
+      "argmax_policy": 236772,
+      "margin_policy": 3.527031
+    },
+    {
+      "p": 1063,
+      "argmax_raw": 10633,
+      "margin_raw": 3.458574,
+      "top5_raw_ids": [
+        10633,
+        30497,
+        1179,
+        164848,
+        47505
+      ],
+      "top5_raw_vals": [
+        19.9584,
+        16.4998,
+        16.0667,
+        15.9046,
+        15.2546
+      ],
+      "fed_at_next": 10633,
+      "argmax_policy": 10633,
+      "margin_policy": 3.458574
+    }
+  ],
+  "gen_policy": {
+    "applied": true,
+    "suppress_tokens": [
+      258883,
+      258882
+    ],
+    "eos_token_id": [
+      1,
+      106,
+      50
+    ],
+    "source": "model.generation_config (from_pretrained)",
+    "processor": "transformers.generation.logits_process.SuppressTokensLogitsProcessor",
+    "note": "SUPPRESSION seulement — l'arrêt EOS n'est PAS appliqué par cet oracle (mode --oracle du runner : suppression ON, arrêt OFF, décision Régis n°3)"
+  },
+  "script_md5": "00cf8c441c41d5aea1e766d75b4f2ee1",
+  "chrono_s": {
+    "load": 5.6,
+    "prefill_backbone": 58.6,
+    "head_sweep": 1.0,
+    "host": "M4"
+  },
+  "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "weights": "<oracle-host>/ml-data/weights_12b_dq",
+  "versions": {
+    "transformers": "5.14.1",
+    "torch": "2.13.0"
+  }
+}
