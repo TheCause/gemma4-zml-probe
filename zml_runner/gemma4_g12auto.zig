@@ -159,6 +159,7 @@ const Args = struct {
     selftest_gencfg: ?[]const u8 = null, // GC1 : politique de décodage, host-only (spec §4.5bis)
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
+    selftest_penalty: ?[]const u8 = null, // RP1 : penalty comparée 0 ULP au processor HF, host-only
     selftest_alloc_count: bool = false, // S-AC (D10) : le compteur compte, host-only
     selftest_kvdump_io: ?[]const u8 = null, // DC1 : round-trip fichier + mutant, host-only (dir existant)
     selftest_kvdump_eq: ?[]const u8 = null, // DC2 : équivalence intra-process (GPU) ; valeur = fichier de dump de travail
@@ -170,6 +171,10 @@ const Args = struct {
     top_p: f32 = 1.0,
     min_tokens_to_keep: u32 = 1,
     seed: ?u64 = null, // null, PAS 0 : 0 est une graine légitime, pas un sentinel
+    // Phase 1 (repetition penalty) — défauts NEUTRES, même discipline que la phase 2 : à 1.0 le
+    // chemin est un no-op par construction et le code d'avant le chantier est inchangé (gate RP2).
+    repetition_penalty: f32 = 1.0,
+    ignore_prompt: bool = false, // pénaliser les seuls tokens GÉNÉRÉS (HF pénalise aussi le prompt)
     gate_d1d2: bool = false, // gates G-D1/G-D2 : pont in-process contre une référence indépendante
     // Politique de décodage (spec 2026-07-28) : chemin EXPLICITE d'un generation_config.json —
     // un FICHIER, jamais un répertoire. Sert D11, dont le checkpoint corrompu est écrit à plat
@@ -202,12 +207,16 @@ const usage =
     "[--selftest-gencfg f (GC1 : fixture + sidecar .manifest.json ; host-only)] " ++
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
+    "[--selftest-penalty f (RP1 : penalty vs processor HF, 0 ULP ; host-only)] " ++
     "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
     "[--selftest-kvdump-io DIR (DC1 : round-trip kvdump + mutant ; host-only ; DIR doit exister)] " ++
     "[--selftest-kvdump-eq F (DC2 : équivalence intra-process du restore ; GPU ; requiert --prompt)] " ++
     "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
+    "[--repetition-penalty F (phase 1 ; > 0 fini ; 1.0 = neutre)] " ++
+    "[--ignore-prompt (ne pénaliser que les tokens GÉNÉRÉS ; HF pénalise aussi le prompt ; " ++
+    "exclut --load-cache)] " ++
     "[--gate-d1d2 (G-D1/G-D2 : applyTopP comparé à une référence descendante f64 + mutants " ++
     "température ; exige un régime ARMÉ ; invalide la mesure M-COUT du même run)] " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -314,6 +323,13 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.selftest_draw = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-penalty")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-penalty attend une valeur (fixture .safetensors produite par scripts/76_penalty_vectors.py)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_penalty = process_args[i];
         } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
             args.selftest_alloc_count = true;
         } else if (std.mem.eql(u8, a, "--selftest-kvdump-eq")) {
@@ -381,6 +397,21 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= process_args.len) return error.MissingArgument;
             args.seed = std.fmt.parseInt(u64, process_args[i], 10) catch return error.InvalidSeed;
+        } else if (std.mem.eql(u8, a, "--repetition-penalty")) {
+            i += 1;
+            if (i >= process_args.len) return error.MissingArgument;
+            const v = std.fmt.parseFloat(f32, process_args[i]) catch return error.InvalidRepetitionPenalty;
+            // ⚠ Garde en ACCEPTATION, même raison qu'à `--temperature` : « p <= 0 → rejet »
+            // laisserait passer NaN (toute comparaison avec NaN est fausse). Avec p = NaN,
+            // `p != 1.0` est VRAI, la penalty s'armerait, et chaque logit pénalisé deviendrait
+            // NaN — l'argmax rendrait alors un token arbitraire SANS erreur.
+            if (!(v > 0 and std.math.isFinite(v))) {
+                log.err("--repetition-penalty {s} refusée : attendu un réel fini > 0 (1.0 = neutre ; NaN et inf exclus par la forme)", .{process_args[i]});
+                return error.InvalidRepetitionPenalty;
+            }
+            args.repetition_penalty = v;
+        } else if (std.mem.eql(u8, a, "--ignore-prompt")) {
+            args.ignore_prompt = true;
         } else if (std.mem.eql(u8, a, "--gate-d1d2")) {
             args.gate_d1d2 = true;
         } else if (std.mem.eql(u8, a, "--gen-config")) {
@@ -1133,6 +1164,173 @@ fn selftestSampling(allocator: std.mem.Allocator, io: std.Io, fixture_path: []co
 }
 
 // ============================================================================================
+// RP1 (repetition penalty) — `applyRepetitionPenalty` comparée **0 ULP** au VRAI processor HF,
+// host-only (même patron que S2-U : aucun GPU, aucun poids, itération en secondes).
+//
+// Fixture produite par `scripts/76_penalty_vectors.py`, qui APPELLE
+// `RepetitionPenaltyLogitsProcessor` — retranscrire sa formule des deux côtés ferait passer une
+// faute commune (spec C5). La fixture n'a pas de sidecar `.manifest.json` : les 4 penalties sont
+// un CONTRAT de la spec (§RP1), portées ici par `RP_CASES` ; un tenseur manquant échoue
+// bruyamment à la lecture.
+//
+// ⚠ Les assertions de non-vacuité ne sont pas décoratives. Sans « ≥ 1 doublon dans hist », la
+// déduplication n'est jamais exercée ; sans « ≥ 1 logit négatif ET ≥ 1 positif », une seule des
+// deux branches de signe l'est — et une implémentation qui les échangerait passerait le gate.
+// ============================================================================================
+const RP_CASES = [_]struct { name: []const u8, p: f32 }{
+    .{ .name = "logits_out_0.8", .p = 0.8 },
+    .{ .name = "logits_out_1.0", .p = 1.0 },
+    .{ .name = "logits_out_1.15", .p = 1.15 },
+    .{ .name = "logits_out_1.5", .p = 1.5 },
+};
+
+fn selftestPenalty(allocator: std.mem.Allocator, io: std.Io, fixture_path: []const u8) !void {
+    var reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fixture_path);
+    defer reg.deinit();
+    var file = try std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const logits_in = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "logits_in");
+    defer allocator.free(logits_in);
+    const hist_i32 = try readFixtureAlloc(i32, .i32, allocator, io, &reg, &file, "hist");
+    defer allocator.free(hist_i32);
+    const ties = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, "logits_ties");
+    defer allocator.free(ties);
+
+    // `hist` est produit en i32 (convention safetensors du repo) ; la fonction prend des u32 —
+    // ids de tokens, jamais négatifs. Un négatif dans la fixture est une CORRUPTION, pas un cas.
+    const hist = try allocator.alloc(u32, hist_i32.len);
+    defer allocator.free(hist);
+    for (hist_i32, 0..) |v, i| {
+        if (v < 0 or @as(usize, @intCast(v)) >= logits_in.len) {
+            log.err("--selftest-penalty : hist[{d}] = {d} hors du vocab de la fixture (0..{d})", .{ i, v, logits_in.len });
+            return error.CorruptFixture;
+        }
+        hist[i] = @intCast(v);
+    }
+
+    // Buffers de travail — alloués UNE FOIS (le selftest est host-only, mais on exerce la même
+    // discipline que la boucle de génération : c'est ce code-là qui y sera appelé).
+    const work = try allocator.alloc(f32, logits_in.len);
+    defer allocator.free(work);
+    const seen = try allocator.alloc(u64, (logits_in.len + 63) / 64);
+    defer allocator.free(seen);
+
+    // ---- antécédents de la fixture : sans eux le gate passerait à vide ----
+    var n_distinct: usize = 0;
+    var n_neg: usize = 0;
+    var n_pos: usize = 0;
+    {
+        @memset(seen, 0);
+        for (hist) |t| {
+            const w = t >> 6;
+            const mask = @as(u64, 1) << @truncate(t);
+            if ((seen[w] & mask) != 0) continue;
+            seen[w] |= mask;
+            n_distinct += 1;
+            if (logits_in[t] < 0) n_neg += 1 else n_pos += 1;
+        }
+    }
+    var vac_ok = true;
+    if (n_distinct >= hist.len) {
+        log.err("NON-VACUITÉ FAIL — aucun doublon dans hist ({d} ids, {d} distincts) : la déduplication n'est pas exercée", .{ hist.len, n_distinct });
+        vac_ok = false;
+    }
+    if (n_neg == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun logit NÉGATIF parmi les ids de hist : la branche ×penalty n'est pas exercée", .{});
+        vac_ok = false;
+    }
+    if (n_pos == 0) {
+        log.err("NON-VACUITÉ FAIL — aucun logit POSITIF ou nul parmi les ids de hist : la branche ÷penalty n'est pas exercée", .{});
+        vac_ok = false;
+    }
+
+    // ---- comparaison 0 ULP contre HF, penalty par penalty ----
+    var n_ok: usize = 0;
+    for (RP_CASES) |c| {
+        const expected = try readFixtureAlloc(f32, .f32, allocator, io, &reg, &file, c.name);
+        defer allocator.free(expected);
+        if (expected.len != logits_in.len) {
+            log.err("{s} : {d} valeurs ≠ logits_in {d}", .{ c.name, expected.len, logits_in.len });
+            return error.ShapeMismatch;
+        }
+
+        @memcpy(work, logits_in);
+        @memset(seen, 0);
+        const touched = sampling.applyRepetitionPenalty(work, hist, c.p, seen);
+
+        var n_diff_hf: usize = 0; // logits que HF a changés
+        var n_bad: usize = 0; // logits où NOUS différons de HF (bit à bit)
+        var first_bad: i64 = -1;
+        for (work, 0..) |got, i| {
+            if (@as(u32, @bitCast(expected[i])) != @as(u32, @bitCast(logits_in[i]))) n_diff_hf += 1;
+            if (@as(u32, @bitCast(got)) != @as(u32, @bitCast(expected[i]))) {
+                if (first_bad < 0) first_bad = @intCast(i);
+                n_bad += 1;
+            }
+        }
+
+        var ok = true;
+        if (n_bad != 0) {
+            log.err("RP1 FAIL — penalty {d}: {d} valeurs hors 0 ULP, 1re à l'id {d} (nous={d:.9} HF={d:.9})", .{ c.p, n_bad, first_bad, work[@intCast(first_bad)], expected[@intCast(first_bad)] });
+            ok = false;
+        }
+        // Le retour `touched` est la sonde de non-vacuité du câblage (Task 4) : il doit dire la
+        // VÉRITÉ ici aussi, sinon le compteur `n_penalty_touched` mentirait en production.
+        const expect_touched = (c.p != 1.0);
+        if (touched != expect_touched) {
+            log.err("RP1 FAIL — penalty {d}: touched={} attendu {} (sonde de non-vacuité fausse)", .{ c.p, touched, expect_touched });
+            ok = false;
+        }
+        if (c.p == 1.0) {
+            if (n_diff_hf != 0) {
+                log.err("RP1 FAIL — penalty 1.0 : HF a changé {d} logits, la neutralité de la fixture est fausse", .{n_diff_hf});
+                ok = false;
+            }
+        } else if (n_diff_hf != n_distinct) {
+            // C'est LE fait qui fonde la spec : HF pénalise chaque token distinct AU PLUS UNE FOIS.
+            log.err("RP1 FAIL — penalty {d}: HF a changé {d} logits, attendu {d} (= ids distincts). Si c'est hist.len={d}, HF ne déduplique pas et la spec est à revoir.", .{ c.p, n_diff_hf, n_distinct, hist.len });
+            ok = false;
+        }
+        if (ok) n_ok += 1;
+    }
+
+    // ---- tie-break de l'argmax : PREMIER indice gagnant (critère RP1) ----
+    // La référence n'est pas une constante magique : on dérive « premier indice atteignant le
+    // maximum » indépendamment, et on exige que le max soit atteint ≥ 2 fois — sans quoi le
+    // critère de tie-break serait vérifié sur un vecteur qui n'a pas d'ex æquo.
+    var mx: f32 = ties[0];
+    for (ties) |v| {
+        if (v > mx) mx = v;
+    }
+    var n_ties: usize = 0;
+    var first_max: usize = 0;
+    for (ties, 0..) |v, i| {
+        if (v == mx) {
+            if (n_ties == 0) first_max = i;
+            n_ties += 1;
+        }
+    }
+    if (n_ties < 2) {
+        log.err("NON-VACUITÉ FAIL — logits_ties n'a que {d} occurrence du maximum : le tie-break n'est pas exercé", .{n_ties});
+        vac_ok = false;
+    }
+    const got_argmax = sampling.argmax(ties);
+    var tie_ok = true;
+    if (got_argmax != first_max) {
+        log.err("RP1 FAIL — tie-break : argmax={d}, attendu {d} (PREMIER des {d} ex æquo)", .{ got_argmax, first_max, n_ties });
+        tie_ok = false;
+    }
+
+    if (n_ok == RP_CASES.len and vac_ok and tie_ok) {
+        log.info("RP1 PASS — {d}/{d} penalties bit-identiques au processor HF ({d} valeurs chacune), hist {d} ids dont {d} distincts ({d} logits <0, {d} >=0), tie-break={d} sur {d} ex æquo", .{ n_ok, RP_CASES.len, logits_in.len, hist.len, n_distinct, n_neg, n_pos, got_argmax, n_ties });
+    } else {
+        log.err("RP1 FAIL — {d}/{d} penalties, non-vacuité={}, tie-break={}", .{ n_ok, RP_CASES.len, vac_ok, tie_ok });
+        return error.SelftestPenaltyFailed;
+    }
+}
+
+// ============================================================================================
 // S-AC (D10) — exerce les 4 fonctions vtable du CountingAllocator INSTALLÉ (celui de run()) et
 // vérifie les deltas. On passe par le wrapper déjà en place : c'est l'instrument de production
 // qu'on teste, pas une copie.
@@ -1770,6 +1968,14 @@ pub fn run(init: std.process.Init) !void {
         log.err("--dump-cache + sampling armé non supporté v1 (état PRNG non sérialisé — spec §3, dette)", .{});
         return error.DumpWithSamplingArmed;
     }
+    // Phase 1 (penalty) : sous reprise, `ids` vaut `ids_fed` COMPLET — prompt d'origine ET tokens
+    // déjà générés par le run dumpé. « Le prompt » n'y est plus une notion définie : la frontière
+    // que `--ignore-prompt` doit couper n'est pas reconstructible depuis le dump. Refus bruyant
+    // plutôt qu'une sémantique inventée. Dette écrite v1.
+    if (args.ignore_prompt and args.load_cache != null) {
+        log.err("--ignore-prompt + --load-cache non supporté v1 : sous reprise, ids = ids_fed complet (prompt + tokens générés du run dumpé) — la frontière du prompt n'existe plus", .{});
+        return error.IgnorePromptWithLoadCache;
+    }
 
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
     if (args.selftest_inputs) |fixture_path| {
@@ -1796,6 +2002,13 @@ pub fn run(init: std.process.Init) !void {
     // distribution du sampler qu'on teste, pas celle du modèle. ===
     if (args.selftest_draw) |fixture_path| {
         try selftestDraw(allocator, io, fixture_path, args.draws, args.seed);
+        return;
+    }
+
+    // === RP1 (phase 1, penalty) : même patron host-only, AVANT tokenizer/VRAM/Platform/poids.
+    // La fonction testée est celle que la boucle de génération appellera — pas une copie. ===
+    if (args.selftest_penalty) |fixture_path| {
+        try selftestPenalty(allocator, io, fixture_path);
         return;
     }
 

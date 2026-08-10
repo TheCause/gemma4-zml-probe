@@ -286,16 +286,19 @@ git commit -m "test(rp1): vecteurs penalty produits par le VRAI processor HF (d�
 - `zml_runner/BUILD.bazel` : **AUCUN changement** (`sampling.zig` est déjà dans les `srcs`
   des 3 cibles, `:527/:537/:547`)
 
-- [ ] **Step 1 : Écrire le selftest `--selftest-penalty <fixture>` qui échoue** — pattern
+- [x] **Step 1 : Écrire le selftest `--selftest-penalty <fixture>` qui échoue** — pattern
   exact de `--selftest-sampling` (host-only, early-return avant toute init GPU). Critères
   (spec RP1) : comparaison **0 ULP** (`@bitCast` u32, égalité entière) sur les 4 penalties ;
   assertions de non-vacuité de la fixture (≥ 1 doublon dans `hist`, ≥ 1 logit négatif
   pénalisé, ≥ 1 positif) ; tie-break argmax = **premier indice** sur le vecteur à ties.
 
-- [ ] **Step 2 : Builder → échec attendu** (`applyRepetitionPenalty` n'existe pas).
+- [x] **Step 2 : Builder → échec attendu** (`applyRepetitionPenalty` n'existe pas).
   Build local suffit : `ZML_REMOTE=… ./zml_runner/build_3090.sh` doit échouer à la compile.
+  → Rouge VU le 10 août 2026, `rc=1` :
+  `gemma4_g12auto.zig:1260:33: error: root source file struct 'sampling' has no member named
+  'applyRepetitionPenalty'`.
 
-- [ ] **Step 3 : Implémenter dans `sampling.zig`**
+- [x] **Step 3 : Implémenter dans `sampling.zig`**
 
 ```zig
 /// Repetition penalty — HF `RepetitionPenaltyLogitsProcessor`, lu à la source : logit
@@ -344,7 +347,7 @@ laisserait passer `NaN`. `--ignore-prompt` : booléen sans valeur.
 `ids` = `ids_fed` complet (prompt + générés du run dumpé) — « le prompt » n'y est plus une
 notion définie. `error.IgnorePromptWithLoadCache`, dette écrite v1.
 
-- [ ] **Step 4 : Builder + lancer le selftest**
+- [x] **Step 4 : Builder + lancer le selftest**
 
 ```bash
 # Les 2 positionnels ckpt/tokenizer sont OBLIGATOIRES (parseArgs exige >= 3 arguments,
@@ -354,8 +357,18 @@ $B1 /dev/null /dev/null --selftest-penalty /data/gemma4-zml-probe/fixtures/penal
 ```
 
 Expected : `RP1 PASS`, 4×512 valeurs bit-identiques, compteurs non nuls, tie-break conforme.
+→ Mesuré le 10 août 2026, `rc=0`, `BUILD: mode=ReleaseFast` :
+`RP1 PASS — 4/4 penalties bit-identiques au processor HF (512 valeurs chacune), hist 9 ids
+dont 6 distincts (3 logits <0, 3 >=0), tie-break=3 sur 3 ex æquo`.
+La division f32 de Zig et celle de torch coïncident **au bit près** sur les 4 penalties —
+c'était le risque principal du gate (double arrondi possible côté torch), il est levé par
+la mesure et non par un raisonnement.
+**Bonus, gardes CLI exercées** (règle 2 : un refus se VOIT échouer) —
+`nan`, `inf`, `-1`, `0`, `abc` refusés `exit=1` avec `InvalidRepetitionPenalty`, `1.15`
+accepté `exit=0`. `nan` est le cas qui compte : la garde est écrite en ACCEPTATION.
+Archivé : `docs/evidence/penalty/rp1_selftest.err.log`, `rp1_garde_cli.txt`.
 
-- [ ] **Step 5 : Commit + tag**
+- [x] **Step 5 : Commit + tag**
 
 ```bash
 git add zml_runner/sampling.zig zml_runner/gemma4_g12auto.zig
