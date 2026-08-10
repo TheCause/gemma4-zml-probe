@@ -30,7 +30,9 @@ Le but n'est **pas** « faire tourner Gemma 4 » (Ollama, llama.cpp, vLLM le fon
 
 C'est une **baseline de recherche**, pas un moteur de production : fp32 (avec un régime bf16 validé),
 mono-séquence, sans fast-prefill. Le **sampling** (`top_k`/`top_p`/`temperature` + tirage
-reproductible) est en revanche implémenté et gaté depuis le 29-30 juil 2026 sur le 12B.
+reproductible) est en revanche implémenté et gaté depuis le 29-30 juil 2026 sur le 12B, et l'**état
+d'une génération se sauvegarde et se réimplante** (`--dump-cache`/`--load-cache`) depuis le
+10 août — une reprise coûte **0,9 s** là où recalculer le préfixe coûte **449,5 s** (§7.7).
 
 ### Fiche d'identité
 
@@ -210,9 +212,10 @@ manquait — et `69_u8_gen_oracle.py` partageait **le même angle mort**, si bie
 pouvait détecter l'écart (l'instrument était aveugle au même endroit que son sujet).
 
 **Ce qui est appliqué** : `suppress_tokens` (avant la sélection) et les **trois** EOS (arrêt
-« any of », token conservé puis strippé à la détok). **Deux clés sur huit** — `do_sample`,
-`top_k`, `top_p`, `temperature` **ne sont PAS** appliqués, et chaque run le dit dans son segment
-`ignored=[…]`, dérivé des clés réellement présentes.
+« any of », token conservé puis strippé à la détok). **Deux clés sur huit à la clôture de CE
+chantier** — `do_sample`, `top_k`, `top_p`, `temperature` sont venus avec le sampling phase 2
+(29-30 juil), portant le total à **6 sur 8** ; chaque run dit dans son segment `ignored=[…]`,
+dérivé des clés réellement présentes, ce qu'il n'applique pas.
 
 **Où** : `zml_runner/gencfg.zig`, **host-side**, hors du graphe. Le graphe sort déjà un top-5
 trié ; avec |S| = 2 supprimés, l'argmax post-suppression est de rang brut ≤ 3, donc déjà dans ce
@@ -232,6 +235,39 @@ comportement d'avant le chantier ; `--selftest-gencfg <fixture>` rejoue le gate 
 ⚠ **Pas de repli silencieux** : un runner qui ne trouve pas sa politique **refuse de tourner**.
 C'est pourquoi `70_u8_corrupt.py` (contre-test D11), qui écrit son checkpoint à plat, dépose
 désormais la politique à côté de lui.
+
+### 2.3 quinquies Sauvegarder et réimplanter l'état d'une génération (chantier du 10 août 2026, 8 gates)
+
+Une génération 12B tient son état dans exactement six choses : les 4 caches KV (device), la
+position courante, le token à feeder, et la séquence déjà feedée (host). Les quatre premières
+vivaient jusqu'ici **et mouraient** avec le process. Depuis le 10 août, elles se sérialisent.
+
+**Ce que ça fait** :
+
+```bash
+# écrire l'état en fin de génération
+gemma4_g12auto <ckpt> <tok.json> --prompt "..." --max-tokens 16 --dump-cache etat.kvdump
+# le reprendre — dans N'IMPORTE QUEL process ultérieur, sans re-prefill
+gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --max-tokens 32
+gemma4_g12auto <ckpt> <tok.json> --load-cache etat.kvdump --oracle <fixture>   # teacher-forcé
+```
+
+**Le format** : UN safetensors auto-décrivant — `sl_k`/`sl_v`/`fl_k`/`fl_v` (F32) + `ids_fed`
+(I32) + un `__metadata__` portant la variante `l_max`, `step_next`, `fed_next`, la raison d'arrêt,
+le **fingerprint du checkpoint par CONTENU** (taille + xxh64 du header des poids — jamais les
+10 Go), le mode de build, la trace de sampling, et **un xxh64 par tenseur**. Relisible tel quel
+par le `safetensors` Python (`scripts/74_kvdump_inspect.py`).
+
+**Ce que ça coûte, mesuré** : atteindre un état de 3 927 positions **par le calcul** prend
+**449,5 s** ; le **restaurer** prend **0,898 s** — **×500**. Et la continuation est **bit-identique
+(32/32)** intra-process, **32/32 sans aucune divergence** inter-process.
+
+**Pourquoi le graphe ne bouge pas** : le dump est un `toSlice` (D2H) des buffers de **sortie** du
+dernier step vers les slices host qui existaient déjà ; le restore remplit ces mêmes slices au lieu
+du `@memset(0)` d'origine. `engine.zig` **0 octet**, HLO **byte-identique** (DC0), et l'interdit
+« aucune allocation par step » **tient** (DC6).
+
+Détail, claims jugées et dettes : §7.7 et [`KVDUMP_RESULTS.md`](KVDUMP_RESULTS.md).
 
 ### 2.4 Briques de recherche (au-delà de Gemma)
 
@@ -326,6 +362,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `62`–`70` | **W4-J2 (12B Unified)** : contrat sur pièce (62), export dq streaming + selfchecks (63), oracles par gate embed/sliding/full/chaîne/prefill (64-68), oracle décode + teacher-forcing **`--compute-fp32`** (69 — hooks par-module, l'instrument officiel des gates argmax), corruption non-vacuité (70) |
 | `30`–`33`, `45`, `spike_hadq`, `measure_k_distribution`, `test_kv_quant_generation` | Piste **TurboQuant** (quantization V, Hadamard) |
 | `71` | **Politique de décodage** : producteur de la fixture du gate GC1 — calcule `expect_tok` avec le **vrai** `SuppressTokensLogitsProcessor` de transformers sur le vecteur complet (262 144 logits), plus le sidecar des cas de validation et de découverte. C'est ce qui rend la claim C2 falsifiable au lieu de postulée |
+| `74` | **Dump/restore du KV-cache** : inspection et **fabrication de mutants** d'un fichier `.kvdump` (`inspect`, `mutate-flip`, `make-zeroed`, `set-meta`, `mutate-shape`, `make-fixture`, `verdict`). Tout à **bas niveau** (struct + json + copie par blocs) : l'API haut niveau `safetensors` réordonne les clés et recalcule les offsets, ce qui détruirait précisément ce qu'un mutant doit conserver — un **manifest intact sur des données altérées**. C'est ce script qui rend DC4 (mordant) et DC5 (refus) exécutables |
 | `gc11_claim_scope.sh` | **Gate GC11** : vérifie que tout document vivant énonçant « == HF » porte la portée « argmax sur les logits bruts ». `--self-test` fournit la contre-preuve (un document nu, examiné seul, doit faire échouer le gate) |
 | `smoke.sh` | Build-only des runners clés (toolchain OK sans weights ni RAM) |
 | `regen_fixtures.sh`, `sweep_perf.sh`, `g2_3_sweep.sh` | Régénération des fixtures ; sweep de perf (CHUNK) ; orchestration du sweep G2.3 (one-hot par famille) |
@@ -340,6 +377,7 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `gencfg.zig` | **Politique de décodage** `generation_config.json` (host-side) : découverte 1-hop, parsing, 6 validations, `isSuppressed`/`isEos`/`select`. Porte aussi `TOP_K` — déclaration **unique** de la constante 5, qui existait en trois copies. N'entre **pas** dans le graphe (GC0 : HLO byte-identique) |
 | `sampling.zig` | **Warpers de sampling** host-side, fonctions **pures** sur `f32` nus (aucune dépendance ZML ⇒ exerçables sans GPU par `--selftest-sampling`) : `applyTemperature`/`applyTopK`/`applyTopP`/`applySuppression`/`argmax`/`sample`, dans l'ordre **mesuré** de HF. Scratch alloué **une fois** |
 | `alloc_count.zig` | **Compteur d'allocations** (D10) : wrapper std-only de `std.mem.Allocator` posé au point de substitution unique `init.gpa`. **Toujours actif** — chaque run publie `ALLOC-LOOP`/`ALLOC-VAC`/`ALLOC-TOTAL`, ce qui rend l'interdit « aucune allocation par step » vérifié **gratuitement à chaque exécution**, pas seulement le jour du gate |
+| `kvdump.zig` | **Dump/restore de l'état de génération** (§7.7) : writer/reader safetensors généralisé depuis `writeIdsSafetensors` (manifest `__metadata__` + tenseurs), validations de forme, checksums xxh64, fingerprint de checkpoint **par contenu**. **Std-only** (aucune dépendance ZML) ⇒ le gate DC1 s'exerce sans GPU par `--selftest-kvdump-io` |
 | `gemma4_prefill.zig` | Prefill 35 couches |
 | `gemma4_logits.zig` | Head + logits |
 | `gemma4_decode1..4.zig`, `gemma4_decprim.zig` | Decode incrémental (pilote sliding → full → e2e → boucle) |
@@ -386,6 +424,8 @@ gemma4-e2b-it-meta/  Métadonnées du modèle (config, pas les poids)
 | `U_12B_CONTRACT.md` | **Contrat 12B Unified vérifié sur pièce** (U0 : 328 packed, GQA/MQA hétérogène, K=V) |
 | `U_12B_RESULTS.md` | **W4-J2 (12B sur la 3090)** : 11 gates, l'histoire épistémique de l'oracle fp32, findings |
 | `SESSION_2026-06-27_RAPPORT.md` | Rapport de la session « écrite sans compiler » + audit |
+| `KVDUMP_RESULTS.md` | **Dump/restore du KV-cache (12B)** : 8 gates, les 5 claims pré-enregistrées jugées, les 11 refus, le périmètre, 8 dettes, et ce que l'exécution a appris |
+| `evidence/kvdump/` | **Preuves versionnées** du chantier kvdump (logs de gates, `dc2_ref.json`, md5 HLO) — `logs/` étant gitignoré, précédent D10 |
 
 ### 5.4 Checklist de clôture de chantier (à faire quand un chantier est mergé)
 
@@ -588,6 +628,41 @@ Détails, histoire épistémique et findings : [`U_12B_RESULTS.md`](U_12B_RESULT
 
 Détails et contre-preuves (3 FAIL de mutant, archivés) : [`D10_RESULTS.md`](D10_RESULTS.md).
 
+### 7.7 Dump/restore du KV-cache (10 août 2026 — 8 gates, PR #20)
+
+`--dump-cache <f>` écrit l'état complet d'une génération — les 4 caches KV f32, **tous** les tokens
+feedés, et un manifest auto-décrivant — dans **UN** safetensors relu aussi bien par le runner que
+par le `safetensors` Python. `--load-cache <f>` le réimplante et **reprend sans re-prefill**.
+
+| Mesure | Valeur | Note |
+|---|---|---|
+| Atteindre l'état @3 927 positions **par le calcul** (4k) | **449,485 s** | 8,7 tok/s, compile exclue |
+| **Restaurer** le même état | **0,898 s** | lecture des 2,62 GiB **incluse**, compile exclue des deux côtés |
+| **Gain** | **×500,5** | prédit ≥ ×30, kill < ×5 |
+| Équivalence **intra-process** | **32/32 bit-identiques** | ids, indices top-5 **et bits** des valeurs (`DC2`) |
+| Équivalence **inter-process** | **32/32, zéro divergence** | le critère admettait un tie ≤ 1,873e-3 (`DC3`) |
+| Mordant (cache zéroté) | divergence dès **`@gen=0`** | à un step de marge 12,62 (`DC4`) |
+| Taille du dump | 1280 : **880 803 840 o** · 4k : **2 818 572 288 o** | prédictions **exactes à l'octet** |
+| Allocations par step | **inchangées** (`alloc=0`) | l'interdit D10 tient avec dump ET load (`DC6`) |
+| HLO | **byte-identique** au témoin pré-code | `engine.zig` 0 octet (`DC0`) |
+
+**Pourquoi c'est exact** : le cache sliding est **LINÉAIRE** `.k=L_MAX` (R10) — le scatter écrit à
+la position absolue, pas dans un ring — donc un cache dumpé à la position N se réimplante sans
+transposition, **à variante égale**. Et les caches naissent host (`[]u8` + `Buffer.fromBytes`) : le
+restore remplit les mêmes slices que le `@memset(0)` d'origine, **le graphe ne voit rien**.
+
+**Le restore est en DEUX phases** : le manifest et toutes les validations de forme **avant** la
+compile (fail-fast, quelques Ko lus) ; les GiB **après**, avec le chrono. Sans cette séparation, la
+compile serait dans la fenêtre de mesure du gain.
+
+**11 refus bruyants, chacun VU échouer** : variante, checkpoint (fingerprint par **contenu** :
+taille + xxh64 du header des poids, jamais les 10 Go), checksum, shape, format, troncature, état
+incohérent, plus de place, et 4 combinaisons de flags. Un restore n'est **jamais** silencieusement
+faux. Seul le `gencfg_path` divergent est un **WARN** : la politique est re-dérivée des fichiers
+courants, c'est voulu, mais l'écart doit être visible.
+
+Verdicts, 5 claims jugées et 8 dettes : [`KVDUMP_RESULTS.md`](KVDUMP_RESULTS.md).
+
 ---
 
 ## 8. Pièges et garde-fous (capitalisés — à lire avant de toucher au code)
@@ -724,6 +799,16 @@ Détails et contre-preuves (3 FAIL de mutant, archivés) : [`D10_RESULTS.md`](D1
     dont chaque run publie les compteurs) ou s'écrit « **NON GARDÉ** ». Corollaire mesuré :
     `toSliceAlloc` fait **deux** allocations par appel (résultat + staging par shard) plus un
     memcpy interne — une dette qui dit « alloue 1 Mo » peut sous-compter d'un facteur 2.
+29. **Un patron du repo est un patron AVEC son contexte de vie** (10 août, kvdump) : ne **jamais**
+    conserver un `std.json.Parsed` dans un struct **retourné par valeur**. `Parsed.deinit()` lit
+    `self.arena.child_allocator` ; si le `Parsed` a été produit avec `arena.allocator()`, ce
+    child_allocator **capture l'adresse de l'ArenaAllocator local** à la fonction. Le struct
+    retourné, le pointeur est pendouillant et le `deinit` **segfaulte** — après un run par
+    ailleurs parfaitement correct (tokens générés, texte écrit : le crash arrive aux `defer`).
+    Le patron copié (`gencfg.zig:239`, `parseFromSlice` + `defer parsed.deinit()`) est juste
+    **dans son contexte** : une fonction qui consomme et libère sur place. Transporté dans un
+    struct qui survit à sa fonction, il est faux. **Remède** : `parseFromSliceLeaky` sur une
+    arena que le struct **possède**, et une seule arène propriétaire.
 
 ---
 
@@ -739,6 +824,16 @@ Détails et contre-preuves (3 FAIL de mutant, archivés) : [`D10_RESULTS.md`](D1
   ⚠ **Ce qui n'est PAS couvert** : `applyTopP` n'a **aucune couverture GPU** (sa seule couverture
   est la fixture host) et `applyTemperature` n'est pas exercé de bout en bout — la config Google
   ne l'instancie pas, puisque `T = 1.0`. Dettes D1 et D2 du doc de résultats.
+- ~~L'état d'une génération est perdu à la sortie du process~~ — **fait le 10 août 2026** (8 gates,
+  cf. [`KVDUMP_RESULTS.md`](KVDUMP_RESULTS.md)) : `--dump-cache`/`--load-cache`, reprise **×500**
+  plus rapide que le re-calcul du préfixe.
+  ⚠ **Ce qui n'est PAS couvert** (dettes K1-K8) : l'**état du PRNG n'est pas sérialisé** — dumper
+  avec une seed armée est **refusé** plutôt qu'approximé (décision Régis) ; la variante **8k
+  compile le même code mais aucun gate ne l'exerce** (décision Régis) ; **E2B**, **`--repl`** et
+  la **reprise avec un prompt neuf** sont hors périmètre v1 ; le dump n'est **pas compressé**
+  (on ne dégrade pas un état exact pour du disque) ; et le **×500 a été mesuré sur une lecture à
+  CHAUD** — à froid le gain resterait ≥ ×130, mais la mesure n'a pas été faite (`drop_caches`
+  exige root sur la VM) : c'est une **dette de mesure déclarée**, pas un résultat.
 - **Périmètre E2B non couvert par la politique de décodage** : les runners E2B ne sortent pas les
   logits de leur graphe (`gen_auto.zig:753`, 6 sorties) et l'E2B n'a de toute façon **pas** de
   `suppress_tokens` — y coder `258882` en dur serait faux. Pour eux, « reproduit ce que
@@ -807,6 +902,10 @@ Détails et contre-preuves (3 FAIL de mutant, archivés) : [`D10_RESULTS.md`](D1
 | PR → main | Consolidation de la branche `generation-longue` | 🔄 9 juil (PR #3) |
 | W4-J1 | Brique poids 4-bit w4a16 (`dequantW4` in-graph) prouvée sur E2B : 6 gates, 48/48 == HF-même-checkpoint, −37 % VRAM, `engine.zig` intact | ✅ 24 juil |
 | W4-J2 | **Gemma 4 12B Unified sur la 3090** : 11 gates, moteur `Geom` comptime (E2B préservé par HLO md5), == HF-fp32-même-checkpoint STRICT (48/48 + 1150/1150, oracle fp32 hooks — Amendement 3), 9,0 tok/s, pic 16 680 MiB | ✅ 25 juil |
+| Contexte long 4k · masques in-graph · donation KV · REPL | `G12Auto(comptime L_MAX)` == HF-fp32 sur 4 041 positions ; masques générés in-graph (le terme quadratique tombe) ; `reuseBuffer` au retour (le mur 8k est levé) ; mode résident `--repl` | ✅ 26 juil (PR #13/#15/#16/#17) |
+| `generation_config` · sampling phase 2 | Politique de décodage host-side (`suppress_tokens` + 3 EOS) puis `top_k`/`top_p`/`temperature` + tirage reproductible : **6 clés sur 8**, HLO byte-identique | ✅ 29-30 juil (PR #18) |
+| D10 zéro allocation par step | La boucle ne fait **aucun** appel à l'allocateur Zig par step, et l'interdit est **gardé par un compteur toujours actif** ; audit du mode de build (174 claims, 9,0 → 9,6-9,7 tok/s) | ✅ 30 juil (PR #19) |
+| **Dump/restore du KV-cache** | L'état d'une génération se sauvegarde et se réimplante : **8 gates**, reprise **×500** vs re-calcul, **32/32 bit-exact** intra-process **et** inter-process, mordant prouvé, 11 refus bruyants, graphe intact | ✅ 10 août (PR #20) |
 
 Chaque gate a son tag git (`git tag -l 'gate/*' 'p5.*' '*-pass' '*validated*'`) et sa note dans `docs/`.
 

@@ -21,7 +21,7 @@ A bit-exact, op-by-op port of **`google/gemma-4-E2B-it`** (text path) to
 text→text engine with long-context generation, bf16 fidelity, static batching, **4-bit weights** —
 and now running **Gemma 4 12B** (official QAT w4a16 checkpoint) on a single RTX 3090.
 
-> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights + 12B on a 24 GB GPU.**
+> **Status — port complete + autonomous runtime + long generation + bf16 + batching + 4-bit weights + 12B on a 24 GB GPU + resumable KV-cache.**
 > Prefill, logits, single-token decode and **1020-token** generation all reproduce HuggingFace
 > (token-exact in fp32; within the measured HF-bf16 envelope in bf16). The engine now runs
 > **standalone on GPU** (native tokenizer, chat template, EOS early-stop), carries a modular
@@ -29,7 +29,7 @@ and now running **Gemma 4 12B** (official QAT w4a16 checkpoint) on a single RTX 
 > comptime geometry (`Geom`) runs both E2B and **12B Unified** — whose bf16 weights alone
 > (~24 GB) would not fit the GPU. **~70 atomic gates**, each committed and tagged.
 > Visual map of the core port: [`docs/CARTOGRAPHIE_portage.md`](docs/CARTOGRAPHIE_portage.md).
-> Full documentation (capabilities, usage, method, 23 pitfalls — in French): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
+> Full documentation (capabilities, usage, method, 29 pitfalls — in French): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
 
 ```
 prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
@@ -53,6 +53,7 @@ prefill (last_hidden ~1e-5 vs HF) → logits (tokens == HF, 0 flip)
 | **Gemma 4 12B on one 3090 (W4-J2)** | official `gemma-4-12B-it-qat-w4a16-ct` (48 layers, heterogeneous GQA/MQA with K=V full layers) decodes in ZML: **1150 tokens @ 9.0 tok/s** (**9.6-9.7 tok/s** re-measured in a proven build mode, see below), real VRAM peak **16 680 MiB** (bf16 weights alone: 24 GB — impossible); teacher-forced **== HF-fp32 STRICT, 48/48 + 1150/1150, zero requalification** (fp32-compute oracle on bf16 storage); E2B engine preserved by **byte-identical HLO** proof | `docs/U_12B_RESULTS.md` |
 | **Decoding policy** (`generation_config`) | the port now applies what Google ships: `suppress_tokens` + the **3 EOS**, then host-side `top_k`/`top_p`/`temperature` and **seed-reproducible sampling** — **6 of the 8 keys**, instead of a greedy the model card does not recommend. Graph untouched (byte-identical HLO) | PR #17/#18, `docs/GENERATION_CONFIG_RESULTS.md`, `docs/SAMPLING_RESULTS.md` |
 | **Zero host allocation per step (D10)** | the decode loop performs **no Zig allocator call per step** (device→host straight into a persistent buffer, top-k to the stack, hoisted call args, pre-reserved lists) — and the ban is **enforced by a permanent counter gate**, not by code review. Sampling block **3 796 → 908.7 µs/step** (0.86 % of a step). *Pinned memory hypothesis refuted by A/B* | PR #19, `docs/D10_RESULTS.md` |
+| **KV-cache dump/restore** | save the state of a running generation (4 KV caches + every fed token + a self-describing manifest) into **one safetensors**, then re-implant it and continue **without re-computing the prefix**. Restoring a 3 927-position state costs **0.898 s** where re-computing it costs **449.5 s** — a **×500 speedup**. Continuation is **bit-identical, 32/32** (ids, top-5 indices *and* value bits) intra-process, and **32/32 with zero divergence** across processes. 8 gates, **11 loud refusals** each seen to fire, graph untouched (byte-identical HLO), per-step allocation ban still holds | PR #20, `docs/KVDUMP_RESULTS.md` |
 
 ## Why
 
@@ -173,10 +174,10 @@ model's declared `suppress_tokens` and its **three** `eos_token_id`, host-side:
 --selftest-gencfg <fix>  # replay gate GC1 — host-only, no GPU
 ```
 
-⚠ **Only 2 of the 8 keys are applied.** `do_sample`, `top_k`, `top_p` and `temperature` are
-**not** — and `do_sample: true` is the model's *nominal* configuration, so greedy is a regime
-Google does not recommend. There is **no silent fallback**: a runner that cannot find its policy
-refuses to start. Details, figures and known debt:
+⚠ **This block alone applies 2 of the 8 keys** (`suppress_tokens`, `eos_token_id`); `top_k`,
+`top_p`, `temperature` and `do_sample` came with the sampling work below — **6 of 8** today, the
+remaining two (`bos_token_id`, `pad_token_id`) being moot at decode time. There is **no silent
+fallback**: a runner that cannot find its policy refuses to start. Details, figures and known debt:
 [`docs/GENERATION_CONFIG_RESULTS.md`](docs/GENERATION_CONFIG_RESULTS.md).
 
 **Sampling (phase 2, 29 Jul 2026)** — the 12B now runs the sampling configuration Google ships:
@@ -200,6 +201,38 @@ through (every comparison with `NaN` is false). `--temperature 0` is **rejected 
 
 Figures, the 9 known debts, and what is *not* covered:
 [`docs/SAMPLING_RESULTS.md`](docs/SAMPLING_RESULTS.md).
+
+**KV-cache dump/restore (10 Aug 2026)** — save the state of a running generation and re-implant it
+later, in another process, without re-computing the prefix:
+
+```bash
+# 1. generate, then dump the state (4 KV caches + every fed token + a self-describing manifest)
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tok.json> \
+  --prompt "..." --max-tokens 16 --dump-cache state.kvdump
+#    KVDUMP: state.kvdump l_max=1280 step_next=43 fed_next=1017 ids=43 octets=880804012 xxh64_ok
+
+# 2. ANY later process: re-implant and continue — no prefill
+./bazel-bin/examples/rqz/gemma4_g12auto <ckpt> <tok.json> \
+  --load-cache state.kvdump --max-tokens 32
+#    KVLOAD: ... (reprise sans prefill)   KVLOAD-PERF: ... -> 1er token en 0.898s
+
+--selftest-kvdump-io <DIR>    # gate DC1: file round-trip + built-in mutant, host-only, no GPU
+--selftest-kvdump-eq <FILE>   # gate DC2: dump → restore → continuation, bit-exact, one process
+scripts/74_kvdump_inspect.py  # inspect / mutate / zero-out / forge a manifest (Python side)
+```
+
+The file is **one safetensors**, readable by the stock Python `safetensors`. Its `__metadata__`
+carries a checkpoint fingerprint **by content** (size + xxh64 of the weights header — never the
+10 GB) and one xxh64 per tensor. **Every mismatch is a loud refusal, and each of the 11 was seen
+to fire**: wrong variant, wrong checkpoint, truncated file, bad format, bad shape, inconsistent
+state, no room left, and 4 flag combinations. A restore is never silently wrong.
+
+What it costs: at 4k, reaching a 3 927-position state **by computing it** takes **449.5 s**;
+restoring it takes **0.898 s** (2.62 GiB read included) — **×500**. What it proves: the
+continuation is **bit-identical (32/32)** to a reference within a process, and **32/32 with zero
+divergence** across processes. Deliberately *not* covered: PRNG state (so `--dump-cache` with an
+armed seed is refused), `--repl`, a fresh prompt on a restored cache, E2B. Figures, the 5
+pre-registered claims and the 8 debts: [`docs/KVDUMP_RESULTS.md`](docs/KVDUMP_RESULTS.md).
 
 **4-bit weights (W4)** — quantize E2B to w4a16, then decode it on GPU:
 
@@ -225,10 +258,16 @@ the 12B, where the linears dominate). No independent perf benchmarks beyond the 
 token-for-token gates.
 
 **Sampling is no longer a limitation** (12B only): `top_k`/`top_p`/`temperature` + seed-reproducible
-draw are implemented host-side and gated. Still open, written down rather than hidden:
+draw are implemented host-side and gated. **Neither is losing a generation's state**: it can be
+dumped and re-implanted (see above). Still open, written down rather than hidden:
 **repetition penalty** (specified, not executed), **`applyTopP` has no GPU coverage** (fixture only),
 the **E2B** runners don't expose logits so the decoding policy can't apply there, and C/PJRT-side
 allocations are *bounded* (< ~450 mallocs/step, measured) rather than counted.
+
+On dump/restore specifically: the **PRNG state is not serialized** (dumping with an armed seed is
+refused, not silently approximated), the **8k variant compiles the same code but no gate exercises
+it**, and the ×500 figure was measured on a **warm** read — a cold read would be NVMe-bound, where
+the speedup would still be ≥ ×130 (declared as a measurement debt, not as a result).
 
 **Next (at the design stage):** an upstream-ZML flash-attention path (batch > 1) would require
 paged KV; a Triton kernel is the credible route.

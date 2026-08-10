@@ -133,6 +133,11 @@ mais l'écart doit être visible.
    ne l'apprendrait qu'après un run GPU.
 6. **`Resume` ne porte pas `ids_fed`** (le plan le prévoyait) : `run()` les tient déjà dans `ids`,
    nécessaires aux pré-checks. Éviter la double propriété.
+7. **Le script est `scripts/74_kvdump_inspect.py`, pas `71_`** : le plan avait choisi 71 sans
+   vérifier — `71_gc1_fixture.py` existe depuis le chantier `generation_config`, et la
+   §5.1 de `DOCUMENTATION.md` attribue déjà ce numéro. 72 et 73 étant pris eux aussi, le premier
+   libre est 74. La spec et le plan gardent l'ancien numéro : ce sont des documents
+   **pré-enregistrés**, on ne les réécrit pas après coup — l'écart se déclare ici.
 
 ## 8. Ce que l'exécution a appris
 
@@ -161,9 +166,9 @@ gemma4_g12auto <ckpt> <tok> --selftest-kvdump-io /tmp/kvio
 gemma4_g12auto <ckpt> <tok> --selftest-kvdump-eq <dir>/dc2.kvdump --prompt "..."
 
 # inspection / mutants (Python) :
-scripts/71_kvdump_inspect.py inspect       <dump>
-scripts/71_kvdump_inspect.py make-zeroed   <dump> <out>
-scripts/71_kvdump_inspect.py verdict --log <run.err.log> --ref <dump>.ref.json --mode dc3|dc4
+scripts/74_kvdump_inspect.py inspect       <dump>
+scripts/74_kvdump_inspect.py make-zeroed   <dump> <out>
+scripts/74_kvdump_inspect.py verdict --log <run.err.log> --ref <dump>.ref.json --mode dc3|dc4
 ```
 
 Preuves versionnées : `docs/evidence/kvdump/` (`logs/` est gitignoré — précédent D10).
