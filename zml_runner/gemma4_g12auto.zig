@@ -13,7 +13,7 @@
 // {L_MAX,L_MAX} quadratiques sont SUPPRIMÉES ; maskRows ne sert plus qu'au selftest).
 //
 // CLI : gemma4_g12auto <model.safetensors (12B w4a16-ct, weights_12b)> <tokenizer.json> --prompt "..."
-//       [--max-tokens N] [--oracle fixture] [--ids-only] [--allow-cpu] [--force-vram]
+//       [--max-tokens N] [--oracle fixture] [--ids-only] [--ids-only-turn2] [--allow-cpu] [--force-vram]
 //       [--dump-top5] [--out-ids f] [--window-vacuity f] [--no-prealloc]
 //       [--selftest-inputs f] [--selftest-gather f (mode GPU, requiert un --prompt factice)]
 //       [--selftest-gencfg f (GC1 : politique generation_config, host-only, sans GPU ni tokenizer)]
@@ -130,6 +130,61 @@ fn promptToIds(allocator: std.mem.Allocator, encoder: anytype, prompt_text: []co
     return ids;
 }
 
+// K5 — rendu du TOUR 2 (spec 2026-08-10 §4.4) : le suffixe canonique post-clôture.
+//
+// VÉRITÉ = la MESURE HF de la Task 2 (docs/evidence/k5/rendu_tour2_hf.json), pas ce commentaire :
+// apply_chat_template sur [user1, assistant1, user2] avec generation prompt, moins le préfixe
+// commun avec [user1, assistant1] SANS generation prompt. Résultat mesuré (template sha
+// ae53464b…, transformers 5.14) : le suffixe vaut 17 ids
+//   [105,2364,107, <user2>, 106,107,105,4368,107,100,45518,107,101]
+// — c'est LITTÉRALEMENT le rendu du tour 1 privé de son BOS. D'où la délégation ci-dessous :
+// dupliquer le littéral le ferait diverger en silence le jour où le tour 1 change.
+//
+// ⚠ CE QUE LE PLAN PRÉVOYAIT ET QUE LA MESURE A CORRIGÉ : le gabarit planifié commençait par un
+// '\n'. FAUX — la mesure donne closure_tail_ids = [106, 107] : le '\n' (107) qui suit le
+// `<turn|>` appartient à la CLÔTURE DU TOUR 1, pas au tour 2. Il est injecté dans ids_full
+// (D-K5-5), et PF6 compare le suffixe SEUL. Le laisser ici aurait fait échouer PF6 sur son id
+// de tête — et le plan interdit de « corriger » un tel FAIL en retranchant l'id : il se
+// diagnostique contre closure_tail_ids, ce qui a été fait AVANT d'écrire cette ligne.
+fn renderChatTemplateTurn2(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
+    return renderChatTemplate(allocator, prompt);
+}
+
+// Tour 2 → ids, SANS BOS (le BOS est le préfixe du SEUL tour 1, `:95`). Même hygiène que
+// promptToIds : reset() avant encode, l'encoder iree est un automate à état.
+fn promptToIdsTurn2(allocator: std.mem.Allocator, encoder: anytype, prompt_text: []const u8) !std.ArrayList(u32) {
+    encoder.reset();
+    const rendered = try renderChatTemplateTurn2(allocator, prompt_text);
+    defer allocator.free(rendered);
+    var prompt_tok = try encoder.encodeAlloc(allocator, rendered);
+    defer prompt_tok.deinit(allocator);
+    var ids: std.ArrayList(u32) = try .initCapacity(allocator, prompt_tok.items.len);
+    errdefer ids.deinit(allocator);
+    try ids.appendSlice(allocator, prompt_tok.items);
+    return ids;
+}
+
+// K5/D-K5-5 — CLÔTURE du tour 1, tokenisée et non devinée. Le rendu HF ferme toujours le tour
+// assistant avant le suivant, et la mesure dit avec quoi : `<turn|>` (106) PUIS '\n' (107).
+// `fed_next` déjà EOS ⇒ seul le '\n' reste à poser. Les longueurs attendues sont GARDÉES : un
+// tokenizer qui découperait autrement doit BLOQUER, pas produire un contexte silencieusement
+// différent de celui que HF verrait (même politique que l'eot_id mesuré, `:2058`).
+fn closureToIds(allocator: std.mem.Allocator, encoder: anytype, fed_next_is_eos: bool) !std.ArrayList(u32) {
+    encoder.reset();
+    const text: []const u8 = if (fed_next_is_eos) "\n" else "<turn|>\n";
+    const want: usize = if (fed_next_is_eos) 1 else 2;
+    var tok = try encoder.encodeAlloc(allocator, text);
+    defer tok.deinit(allocator);
+    if (tok.items.len != want) {
+        log.err("K5 : clôture '{s}' encode en {d} ids (attendu {d}) — ids={any} ; tokenizer différent de celui mesuré (docs/evidence/k5/rendu_tour2_hf.json)", .{ text, tok.items.len, want, tok.items });
+        return error.ClosureNotExpectedLength;
+    }
+    var ids: std.ArrayList(u32) = try .initCapacity(allocator, tok.items.len);
+    errdefer ids.deinit(allocator);
+    try ids.appendSlice(allocator, tok.items);
+    return ids;
+}
+
 /// `TensorRegistry.fromPath` refuse le checkpoint PACKÉ : `weights_12b/model.safetensors` est un
 /// symlink vers le cache HF dont le `file.realPath` (resolveFiletype, safetensors.zig:543) se
 /// résout en `blobs/<sha256>` SANS extension `.safetensors` -> `.unknown` -> error.InvalidPath
@@ -153,6 +208,10 @@ const Args = struct {
     max_tokens: ?usize = null,
     oracle_path: ?[]const u8 = null,
     ids_only: bool = false,
+    // K5/PF6 : rendu du TOUR 2 en ids, host-only. Un mode à part et non une option de --ids-only :
+    // le tour 2 n'a de sens que par contraste avec le tour 1 (pas de BOS, clôture non incluse), et
+    // le gate doit pouvoir le lire SANS dump ni GPU.
+    ids_only_turn2: bool = false,
     allow_cpu: bool = false,
     selftest_inputs: ?[]const u8 = null,
     selftest_gather: ?[]const u8 = null,
@@ -216,7 +275,7 @@ const usage =
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--repetition-penalty F (phase 1 ; > 0 fini ; 1.0 = neutre)] " ++
     "[--ignore-prompt (ne pénaliser que les tokens GÉNÉRÉS ; HF pénalise aussi le prompt ; " ++
-    "exclut --load-cache)] " ++
+    "exclut --load-cache — garde CONSERVÉE par K5)] " ++
     "[--gate-d1d2 (G-D1/G-D2 : applyTopP comparé à une référence descendante f64 + mutants " ++
     "température ; exige un régime ARMÉ ; invalide la mesure M-COUT du même run)] " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
@@ -224,7 +283,10 @@ const usage =
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
     "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)] " ++
     "[--dump-cache F (état KV+ids en fin de génération -> safetensors ; exclut --repl et --seed)] " ++
-    "[--load-cache F (reprise sans prefill ; avec --max-tokens ou --oracle ; exclut --prompt/--repl)]";
+    "[--load-cache F (reprise sans prefill ; avec --max-tokens ou --oracle ; exclut --repl) " ++
+    "[--prompt \"tour 2\"] = PREFILL PARTIEL (K5) : le contexte vient du dump, le prompt neuf est " ++
+    "absorbé comme tour suivant] " ++
+    "[--ids-only-turn2 (K5/PF6 : rendu du tour 2 en ids, host-only ; exige --prompt)]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -281,6 +343,8 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.oracle_path = process_args[i];
         } else if (std.mem.eql(u8, a, "--ids-only")) {
             args.ids_only = true;
+        } else if (std.mem.eql(u8, a, "--ids-only-turn2")) {
+            args.ids_only_turn2 = true;
         } else if (std.mem.eql(u8, a, "--allow-cpu")) {
             args.allow_cpu = true;
         } else if (std.mem.eql(u8, a, "--force-vram")) {
@@ -1827,6 +1891,30 @@ fn writeIdsSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try f.writePositionalAll(io, std.mem.sliceAsBytes(data), 8 + header.len);
 }
 
+// K5 — variante DEUX clés de writeIdsSafetensors : "ids" (les générés, format historique INTACT
+// pour tous les consommateurs existants) + "ctx_ids" (la séquence COMPLÈTE feedée avant
+// génération, c.-à-d. ids_full). L'oracle 69 --context-ids en a besoin : sous reprise avec prompt
+// neuf, le contexte n'est PAS exprimable par un --prompt templaté, il n'existe que sous forme
+// d'ids. Écrite à côté de la fonction historique plutôt qu'en la modifiant : la reprise simple et
+// tous les runs normaux doivent produire le même fichier qu'avant (claim C-K5-E).
+fn writeIdsCtxSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ids_i64: []const i64, ctx: []const u32) !void {
+    const n = ids_i64.len;
+    const c = ctx.len;
+    const data = try allocator.alloc(i32, n + c);
+    defer allocator.free(data);
+    for (ids_i64, 0..) |t, k| data[k] = @intCast(t); // ids < vocab 262144 : cast sans perte
+    for (ctx, 0..) |t, k| data[n + k] = @intCast(t);
+    const header = try std.fmt.allocPrint(allocator, "{{\"ids\":{{\"dtype\":\"I32\",\"shape\":[{d}],\"data_offsets\":[0,{d}]}},\"ctx_ids\":{{\"dtype\":\"I32\",\"shape\":[{d}],\"data_offsets\":[{d},{d}]}}}}", .{ n, n * 4, c, n * 4, (n + c) * 4 });
+    defer allocator.free(header);
+    var len_le: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len_le, header.len, .little);
+    const f = try std.Io.Dir.createFile(.cwd(), io, path, .{});
+    defer f.close(io);
+    try f.writePositionalAll(io, &len_le, 0);
+    try f.writePositionalAll(io, header, 8);
+    try f.writePositionalAll(io, std.mem.sliceAsBytes(data), 8 + header.len);
+}
+
 // === DC1 (spec kvdump §5) : round-trip du format kvdump + MUTANT, host-only. Aucun GPU, aucun
 // poids : c'est le format de fichier qu'on teste, pas le modèle. `dir` doit EXISTER (l'API
 // std.Io.Dir de cette toolchain n'expose pas de makeDir — le run le crée en amont).
@@ -1945,12 +2033,12 @@ pub fn run(init: std.process.Init) !void {
     // oracle/out-ids écraserait ou accumulerait silencieusement des artefacts de gate ; refusé
     // au lancement (garde AVANT tout early-return de mode). ===
     if (args.repl and (args.oracle_path != null or args.window_vacuity != null or
-        args.out_ids != null or args.ids_only or args.selftest_inputs != null or
+        args.out_ids != null or args.ids_only or args.ids_only_turn2 or args.selftest_inputs != null or
         args.selftest_gather != null or args.selftest_gencfg != null or
         args.selftest_sampling != null or args.selftest_draw != null or
         args.selftest_alloc_count or args.selftest_kvdump_io != null or args.selftest_kvdump_eq != null))
     {
-        log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
+        log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--ids-only-turn2/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
     }
 
@@ -1965,10 +2053,10 @@ pub fn run(init: std.process.Init) !void {
         log.err("--dump-cache + --repl non supporté v1 (spec §4.5 : un flag inopérant serait un mensonge)", .{});
         return error.DumpCacheReplUnsupported;
     }
-    if (args.load_cache != null and args.prompt != null) {
-        log.err("--load-cache + --prompt : le contexte vient du dump, pas d'un prompt (spec §3)", .{});
-        return error.LoadCacheWithPrompt;
-    }
+    // K5 (spec 2026-08-10 §4.1) : --load-cache + --prompt est désormais le PREFILL PARTIEL — le
+    // contexte vient du dump, le prompt est absorbé comme TOUR 2 aux positions step_next… .
+    // L'ancienne garde LoadCacheWithPrompt (spec kvdump §3) est LEVÉE par ce chantier ; ce qui la
+    // remplace n'est pas une garde mais une preuve : l'aller-retour teacher-forcé PF1/PF3.
     // Décision Régis ACTÉE (GO 9 août) : sampling armé + dump = refus bruyant. L'état du PRNG
     // Xoshiro256 n'est PAS sérialisé — le sérialiser ajouterait une claim d'équivalence
     // stochastique qu'aucun gate simple ne prouve. Dette écrite au doc de résultats.
@@ -2106,6 +2194,21 @@ pub fn run(init: std.process.Init) !void {
         return;
     }
 
+    // === K5/PF6 : --ids-only-turn2 — le rendu du TOUR 2 en ids, host-only (aucun dump, aucun GPU,
+    // aucune politique). C'est la sortie que le gate PF6 compare littéralement au suffixe HF mesuré
+    // (docs/evidence/k5/rendu_tour2_hf.json, clé suffix_ids). Même patron d'early-return que
+    // --ids-only : APRÈS la tokenisation, AVANT la garde VRAM. ===
+    if (args.ids_only_turn2) {
+        if (prompt_text.len == 0) {
+            log.err("--ids-only-turn2 exige --prompt (le texte du tour 2)", .{});
+            return error.PromptTooLong;
+        }
+        var t2 = try promptToIdsTurn2(allocator, &encoder, prompt_text);
+        defer t2.deinit(allocator);
+        log.info("ids_turn2 = {any}", .{t2.items});
+        return;
+    }
+
     // === Garde VRAM (docs/VRAM_CHECK_DESIGN.md) — avant tout travail GPU. Les modes host-only
     // (--selftest-inputs/--ids-only) ont déjà early-return au-dessus. `--selftest-gather` N'EST
     // PLUS host-only depuis L3 (spec [it.4]) : il compile un mini-graphe GPU (`SgFwd`) et passe
@@ -2224,6 +2327,40 @@ pub fn run(init: std.process.Init) !void {
     if (args.load_cache) |cache_path| {
         mcheck = try loadCacheManifest(allocator, io, cache_path, args.ckpt, policy.path);
         try ids.appendSlice(allocator, mcheck.?.ids_fed);
+        if (args.prompt != null) {
+            // K5 : prompt VIDE gardé AVANT le rendu — le rendu émet toujours ses marqueurs de
+            // tour, `n_new` ne peut donc jamais valoir 0 après lui (une garde post-rendu serait à
+            // antécédent vide, feedback_test_vacuite_antecedent). C'est le cas PF4(d).
+            if (prompt_text.len == 0) {
+                log.err("K5 : --prompt vide sous reprise — un tour 2 sans contenu n'est pas un prefill partiel", .{});
+                return error.PromptTooLong;
+            }
+            // K5 (spec §4.1) : ids_full = ids_fed ++ [fed_next] ++ [clôture] ++ ids_t2.
+            // fed_next est TOUJOURS inclus (D-K5-1) : dernier token généré, jamais feedé — il fait
+            // partie du texte produit (y compris un EOS de fin de tour).
+            try ids.append(allocator, @intCast(mcheck.?.fed_next));
+            // D-K5-5 : le rendu HF ferme TOUJOURS le tour assistant avant le suivant. La MESURE
+            // (Task 2) donne la clôture exacte : `<turn|>` + '\n' quand fed_next n'est pas un EOS
+            // (arrêt max_tokens, cas nominal d'un run A borné), '\n' seul sinon.
+            const fed_is_eos = policy.isEos(mcheck.?.fed_next);
+            var closure = try closureToIds(allocator, &encoder, fed_is_eos);
+            defer closure.deinit(allocator);
+            try ids.appendSlice(allocator, closure.items);
+            log.info("K5: tour 1 clos par {any} (fed_next={d} {s} un EOS)", .{ closure.items, mcheck.?.fed_next, if (fed_is_eos) "EST" else "n'est PAS" });
+            var t2 = try promptToIdsTurn2(allocator, &encoder, prompt_text);
+            defer t2.deinit(allocator);
+            const n_new = t2.items.len; // ids du tour 2 (le SEUL segment réellement prefillé)
+            // D-K5-3 : garde fenêtre TRANSPOSÉE au prompt neuf. La garde historique (juste en
+            // dessous, et sa jumelle `:3058`) est désactivée sous reprise ; sa raison d'être n'a
+            // jamais été écrite (c2211c0) — on transpose la prudence au seul segment qui est
+            // effectivement prefillé. La LEVER exigerait son propre gate : dette écrite.
+            if (n_new >= @as(usize, @intCast(SLIDING_WINDOW))) {
+                log.err("K5 : tour 2 de {d} ids >= SLIDING_WINDOW({d})", .{ n_new, SLIDING_WINDOW });
+                return error.PromptTooLong;
+            }
+            try ids.appendSlice(allocator, t2.items);
+            log.info("K5: prefill partiel — contexte {d} ids + fed_next + clôture {d} + tour2 {d} ids = {d} total", .{ mcheck.?.ids_fed.len, closure.items.len, n_new, ids.items.len });
+        }
     }
 
     // === --oracle : lit la fixture AVANT tout (positions[0] = seq_len attendu == ids.len ; fed =
@@ -3146,10 +3283,21 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
 
     var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
-    // kvdump : reprise — `step` et `fed` viennent du dump. La boucle entre DIRECTEMENT en phase
-    // de génération (`in_gen_phase = step + 1 >= ids.len` est vrai par l'invariant
-    // ids_fed.len == step_next). Rien d'autre ne change : mêmes call_args, même exécutable,
-    // mêmes compteurs (D10).
+    // kvdump : reprise — `step` et `fed` viennent du dump. En reprise SIMPLE, la boucle entre
+    // DIRECTEMENT en phase de génération (`in_gen_phase = step + 1 >= ids.len` est vrai par
+    // l'invariant ids_fed.len == step_next). Rien d'autre ne change : mêmes call_args, même
+    // exécutable, mêmes compteurs (D10).
+    //
+    // K5 : sous reprise AVEC prompt neuf, `ids` vaut ids_full (contexte ++ fed_next ++ clôture ++
+    // tour 2), donc ids.len > step_next et `in_gen_phase` est FAUX au premier step — la boucle
+    // absorbe le tour 2 en prefill-par-decode, par construction et sans branche dédiée. C'est tout
+    // le chantier : le graphe ne distingue pas prefill et génération (position ≡ ctrl.step).
+    //
+    // ⚠ Une assertion `ids[step_next] == fed_next` a été envisagée ici puis RETIRÉE en revue de
+    // spec : les deux membres dérivent du même champ du manifest, elle ne peut pas échouer
+    // (feedback_controle_qui_ne_peut_pas_reussir). La limite réelle — un `fed_next` FORGÉ fabrique
+    // un contexte que le host ne peut pas contredire (le cache lui est opaque) — est documentée
+    // spec §4.6 et n'est visible QUE de l'aller-retour teacher-forcé : c'est ce que PF2 démontre.
     if (resume_state) |rs| {
         step = rs.step_next;
         fed = rs.fed_next;
@@ -3361,6 +3509,12 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         }
         // --dump-top5 (U9) : top-5 par step aussi en mode LIBRE (w4auto ne le loggait qu'en --oracle).
         if (in_gen_phase and dump_top5) log.info("  top5 @ gen={d} : idx={any} val={any} rank_used={d} chosen={d}", .{ gen_top5.items.len - 1, top5.idx, top5.val, sel.rank, sel.tok });
+        // K5/PF1 : les positions du PREFILL DE REPRISE sont teacher-forcées par construction (le
+        // token feedé est imposé par ids_full, aucun effet boule de neige) — leur top-5 est LA
+        // sortie que l'oracle compare, et il est BRUT (la politique s'applique après, host-side).
+        // Émis SEULEMENT sous reprise : le prefill d'un tour 1 n'intéresse aucun gate, et mille
+        // lignes pollueraient les logs des runs longs.
+        if (!in_gen_phase and dump_top5 and resume_state != null) log.info("  top5 @ ctx={d} : idx={any} val={any}", .{ step, top5.idx, top5.val });
 
         // cache swap (motif gemma4_gen_long_gpu.zig:139-168) : deinit l'ancien, adopte le nouveau.
         var old_cache = cache_buf;
@@ -3613,8 +3767,17 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     // === --out-ids (U9) : ids générés -> safetensors (clé "ids", i32) — AVANT le verdict oracle
     // (un A1Mismatch ne doit pas perdre la trace des ids produits, utile au diagnostic). ===
     if (out_ids_path) |out_path| {
-        try writeIdsSafetensors(allocator, io, out_path, generated.items);
-        log.info("--out-ids : {d} ids écrits -> {s}", .{ generated.items.len, out_path });
+        // K5 : la clé ctx_ids n'apparaît QUE sous reprise AVEC prompt neuf (ids.len > step_next).
+        // La reprise simple garde le format historique à une clé — sinon son log changerait et la
+        // claim C-K5-E (« le chemin actuel est inchangé ») serait violée par le gate lui-même.
+        const k5_resume_prompt = if (resume_state) |rs| ids.len > rs.step_next else false;
+        if (k5_resume_prompt) {
+            try writeIdsCtxSafetensors(allocator, io, out_path, generated.items, ids);
+            log.info("--out-ids : {d} ids générés + ctx_ids {d} écrits -> {s}", .{ generated.items.len, ids.len, out_path });
+        } else {
+            try writeIdsSafetensors(allocator, io, out_path, generated.items);
+            log.info("--out-ids : {d} ids écrits -> {s}", .{ generated.items.len, out_path });
+        }
     }
 
     // === Gate oracle (A1, hérité w4auto — U8 l'utilisera avec la fixture u8_gen48) ===
