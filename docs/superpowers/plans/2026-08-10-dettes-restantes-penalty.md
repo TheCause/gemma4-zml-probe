@@ -363,8 +363,8 @@ l'`input_ids` que HF passe à son processor au même point. Câblage en DEUX tem
    directement en génération `:2802-2809`) ET le re-seed par prompt du repl. L'allocation
    des buffers, elle, reste à `:2054-2074` (une fois par process).
 2. **Append au point où le token généré est acté** — à côté du
-   `generated.appendBounded(tok)` existant (`:3025`), PAS « en fin d'itération » : la fin
-   littérale (`fed = tok`, `:3059`) vient APRÈS les 3 `break` (borne oracle, EOT,
+   `generated.appendBounded(tok)` existant (`:3023`), PAS « en fin d'itération » : la fin
+   littérale (`fed = tok`, `:3060`) vient APRÈS les 3 `break` (borne oracle, EOT,
    max_tokens) et perdrait le dernier token généré — off-by-one de la famille que la spec
    rév. 4-1 pourchasse, qui fausserait l'égalité du Step 5. Écriture directe
    `scfg.hist[scfg.hist_len] = tok; scfg.hist_len += 1;` — zéro allocation ; garde de
