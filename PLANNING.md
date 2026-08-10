@@ -51,11 +51,33 @@ teacher-forcé 4k (K5-2) · PF1 ne voit pas un mensonge d'1 position (K5-3) · c
 880 Mio par tour (K5-4, c'est K4) · le `74` ne tourne pas sur la VM, faute de `numpy`/`xxhash`
 (K5-5).
 
-**⚠ Dette observée hors périmètre K5 (10 août)** : le gate **GC11** travaille sur une liste
-explicite de cibles ; `docs/D10_RESULTS.md` et `docs/SAMPLING_RESULTS.md` énoncent chacun un
-`== HF` **sans être dans cette liste**. Le gate ne les voit pas. Constaté en vérifiant que
-`K5_RESULTS.md` n'y échappait pas (il n'énonce pas la claim sous cette forme) — **non corrigé
-ici** : élargir la liste est un changement de portée du gate, à décider séparément.
+**🏁 Dette observée hors périmètre K5, puis SOLDÉE le même jour (10 août)** — le gate **GC11**
+travaillait sur une **liste en dur** : `docs/D10_RESULTS.md` (écrit le **lendemain** de
+l'instauration du gate) et `docs/SAMPLING_RESULTS.md` énonçaient `== HF` sans y figurer.
+Constaté en vérifiant que `K5_RESULTS.md` n'échappait pas au gate (il n'énonce pas la claim sous
+cette forme). Sur décision Régis, corrigé **des deux côtés puis en profondeur** :
+
+1. `D10_RESULTS.md` §8 **qualifié** (le seul site nu postérieur au gate) ;
+2. **périmètre AUTO-DÉCOUVERT** (`f8718c4`) : références vivantes nommées + **tout
+   `docs/*_RESULTS.md`**, exclusions explicites/datées/**affichées** (les 3 documents de
+   résultats antérieurs au gate) dont la pertinence est re-contrôlée à chaque run (détection de
+   **vestige**). Option `--perimetre` pour que tout contrôle externe lise le périmètre réel au
+   lieu de ré-implémenter la règle.
+3. Self-test étendu du cas **(d)** : un `*_RESULTS.md` **que personne n'a listé** doit être
+   **découvert** puis condamné — c'est le seul cas qui distingue le nouveau gate de l'ancien ; et
+   **(e)**, l'autre sens : canary retiré, le dépôt réel repasse au vert.
+
+**Non-régression vérifiée** : les 11 anciennes cibles sont toutes dans le périmètre (13), +2
+gagnées (`K5_RESULTS.md`, `KVDUMP_RESULTS.md`).
+
+⚠ **Restent NON qualifiés, délibérément** : `BATCHING_RESULTS.md` (12 juil), `W4_RESULTS.md`
+(24 juil), `TURBOQUANT_ZML_RESULTS.md` (4 juin) — tous **antérieurs** au gate, même statut que
+les plans et journaux qu'il exclut par principe. Les qualifier demande une décision, pas un
+correctif.
+
+**⚡ La leçon, transversale** : *un gate à liste EN DUR rétrécit tout seul.* Il ne se dégrade pas
+bruyamment — il continue d'afficher PASS sur un périmètre qui se périme. Ce qui l'a révélé n'est
+pas le gate, c'est un **recensement fait à la main** pendant une clôture.
 
 ## 🏁 Chantier « dump/restore du KV-cache » — EXÉCUTÉ, 8 GATES VERTS (9-10 août 2026)
 
