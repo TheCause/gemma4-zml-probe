@@ -47,6 +47,9 @@ const sampling = @import("sampling.zig");
 // D10 : compteur d'allocations (spec 2026-07-30 zero-alloc, C1) — wrapper std-only de init.gpa,
 // toujours actif ; porteur des gates AL-0/AL-VAC/AL-BASE. `builtin.mode` : bannière BUILD (§8).
 const alloc_count = @import("alloc_count.zig");
+// Dump/restore du KV-cache (spec 2026-08-09) — module std-only : writer/reader safetensors
+// généralisé, manifest `__metadata__`, checksums xxh64. Aucun octet de graphe (DC0).
+const kvdump = @import("kvdump.zig");
 const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{ .log_level = .info };
@@ -156,6 +159,8 @@ const Args = struct {
     selftest_sampling: ?[]const u8 = null, // S2-U : warpers de sampling, host-only (spec phase 2)
     selftest_draw: ?[]const u8 = null, // S2-D : tirage sur logits FIGÉS en fixture, host-only
     selftest_alloc_count: bool = false, // S-AC (D10) : le compteur compte, host-only
+    selftest_kvdump_io: ?[]const u8 = null, // DC1 : round-trip fichier + mutant, host-only (dir existant)
+    selftest_kvdump_eq: ?[]const u8 = null, // DC2 : équivalence intra-process (GPU) ; valeur = fichier de dump de travail
     draws: usize = 10000,
     // Sampling phase 2 — défauts NEUTRES : sans eux, le chemin B n'est pas armé et le code
     // d'avant le chantier est strictement inchangé.
@@ -181,6 +186,10 @@ const Args = struct {
     no_prealloc: bool = false, // U10 : preallocate=false, nvidia-smi mesure la VRAM réelle (mécanisme gen_long_gpu)
     no_pin: bool = false, // D10 (C7) : désactive l'allocation DMA (pinned) de work — A/B de M-PIN
     repl: bool = false, // mode RÉSIDENT (spec 2026-07-26 repl-mode) : compile une fois, prompts en boucle sur stdin
+    // Dump/restore du KV-cache (spec 2026-08-09) — l'état E1-E4 d'une génération dans UN
+    // safetensors auto-décrivant ; le restore repart sans re-prefill.
+    dump_cache: ?[]const u8 = null, // --dump-cache <fichier> : état E1-E4 en fin de generateOnce
+    load_cache: ?[]const u8 = null, // --load-cache <fichier> : reprise sans prefill
 };
 
 const usage =
@@ -192,13 +201,17 @@ const usage =
     "[--selftest-sampling f (S2-U : fixture warpers + sidecar ; host-only)] " ++
     "[--selftest-draw f --draws N --seed S (S2-D : tirage sur logits figés ; host-only)] " ++
     "[--selftest-alloc-count (S-AC : compteur d'allocations ; host-only)] " ++
+    "[--selftest-kvdump-io DIR (DC1 : round-trip kvdump + mutant ; host-only ; DIR doit exister)] " ++
+    "[--selftest-kvdump-eq F (DC2 : équivalence intra-process du restore ; GPU ; requiert --prompt)] " ++
     "[--no-pin (désactive l'alloc DMA pinned de work — A/B M-PIN)] " ++
     "[--temperature F] [--top-k N] [--top-p F] [--min-tokens-to-keep N] [--seed N] " ++
     "(sampling phase 2 ; sans --seed la sélection reste un argmax) " ++
     "[--gen-config FICHIER (generation_config.json explicite — un fichier, pas un répertoire)] " ++
     "[--no-gen-config (désactive la politique de décodage : comportement d'avant le chantier)] " ++
     "[--repl (résident : prompts en boucle sur stdin ; --prompt devient optionnel = 1er prompt ; " ++
-    "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)]";
+    "exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*)] " ++
+    "[--dump-cache F (état KV+ids en fin de génération -> safetensors ; exclut --repl et --seed)] " ++
+    "[--load-cache F (reprise sans prefill ; avec --max-tokens ou --oracle ; exclut --prompt/--repl)]";
 
 // Parsing à la main (comme les runners existants, ex. gemma4_gen_long_gpu.zig --no-prealloc) :
 // pas de lib de flags ici, juste un balayage séquentiel des positionnels puis des --flags.
@@ -299,6 +312,20 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
             args.selftest_draw = process_args[i];
         } else if (std.mem.eql(u8, a, "--selftest-alloc-count")) {
             args.selftest_alloc_count = true;
+        } else if (std.mem.eql(u8, a, "--selftest-kvdump-eq")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-kvdump-eq attend une valeur (chemin du dump de travail à écrire)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_kvdump_eq = process_args[i];
+        } else if (std.mem.eql(u8, a, "--selftest-kvdump-io")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--selftest-kvdump-io attend une valeur (répertoire de travail EXISTANT)", .{});
+                return error.MissingArgument;
+            }
+            args.selftest_kvdump_io = process_args[i];
         } else if (std.mem.eql(u8, a, "--no-pin")) {
             args.no_pin = true;
         } else if (std.mem.eql(u8, a, "--draws")) {
@@ -357,6 +384,20 @@ fn parseArgs(process_args: []const [:0]const u8) !Args {
                 return error.MissingArgument;
             }
             args.gen_config = process_args[i];
+        } else if (std.mem.eql(u8, a, "--dump-cache")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--dump-cache attend une valeur (chemin du fichier .kvdump à écrire)", .{});
+                return error.MissingArgument;
+            }
+            args.dump_cache = process_args[i];
+        } else if (std.mem.eql(u8, a, "--load-cache")) {
+            i += 1;
+            if (i >= process_args.len) {
+                log.err("--load-cache attend une valeur (chemin d'un fichier .kvdump)", .{});
+                return error.MissingArgument;
+            }
+            args.load_cache = process_args[i];
         } else if (std.mem.eql(u8, a, "--no-gen-config")) {
             args.no_gen_config = true;
         } else {
@@ -1351,6 +1392,20 @@ fn selftestGather(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 // c'est trois occasions qu'elles divergent en silence.
 const Top5 = struct { idx: [gencfg.TOP_K]usize, val: [gencfg.TOP_K]f32 };
 
+// Raison d'arrêt (A3) — HISSÉE au niveau du type (elle vivait dans generateOnce) : le manifest
+// kvdump la publie (`stop_reason`) et le selftest DC2 en fait une PRÉ-CONDITION (un appel qui
+// s'arrête avant sa borne rend le gate INEXÉCUTABLE, pas FAIL).
+const StopReason = enum { oracle, eot, max_tokens, l_max };
+
+// kvdump/DC2 : ce que le selftest d'équivalence doit récupérer d'un appel à generateOnce.
+// Les copies sont faites APRÈS la boucle (hors fenêtre ALLOC-LOOP gelée) — aucune interaction
+// avec DC6.
+const Capture = struct {
+    ids: *std.ArrayList(i64),
+    top5: *std.ArrayList(Top5),
+    stop: *StopReason,
+};
+
 // Vocabulaire du contrat U0 (docs/U_12B_CONTRACT.md — `tokenizer.json` du snapshot : 262 144
 // entrées, dont 24 `added_tokens`). Sert UNIQUEMENT à borner les ids de suppression au moment du
 // fail-fast, avant que les poids soient chargés. La valeur est CONTRÔLÉE contre
@@ -1560,6 +1615,106 @@ fn writeIdsSafetensors(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try f.writePositionalAll(io, std.mem.sliceAsBytes(data), 8 + header.len);
 }
 
+// === DC1 (spec kvdump §5) : round-trip du format kvdump + MUTANT, host-only. Aucun GPU, aucun
+// poids : c'est le format de fichier qu'on teste, pas le modèle. `dir` doit EXISTER (l'API
+// std.Io.Dir de cette toolchain n'expose pas de makeDir — le run le crée en amont).
+// Le gate ne vaut que parce qu'il contient sa propre contre-preuve : un octet de données flippé,
+// manifest INTACT, DOIT rendre KvDumpChecksumMismatch. Sans ce mutant, un checksum jamais vérifié
+// passerait pour vérifié (leçon feedback_invariant_tue_le_controle).
+fn selftestKvdumpIo(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    // (0) Compatibilité INTER-LANGAGE du checksum, contrôlée AVANT tout le reste : le manifest est
+    // écrit par Zig et relu par Python (script 71, gate DC1 volet Python). Si les deux xxh64 ne
+    // sont pas la même fonction, tout le dispositif de checksums est un décor — et on ne
+    // l'apprendrait qu'après un run GPU. Référence MESURÉE sur la VM (Task 0.4) :
+    // `xxhash.xxh64(b"x").intdigest()` == 6665539201184043299.
+    const ref_x = kvdump.xxh64("x");
+    if (ref_x != 6665539201184043299) {
+        log.err("KVIO: xxh64(\"x\") = {d} != 6665539201184043299 (référence Python xxhash) — les deux implémentations ne calculent pas le même hash", .{ref_x});
+        return error.KvIoHashDivergence;
+    }
+
+    var a_vals: [24]f32 = undefined;
+    for (0..24) |k| a_vals[k] = @floatFromInt(k);
+    var b_vals: [6]i32 = .{ 7, -1, 0, 262143, 3, 12 };
+    const a_bytes = std.mem.sliceAsBytes(a_vals[0..]);
+    const b_bytes = std.mem.sliceAsBytes(b_vals[0..]);
+    const a_h = kvdump.xxh64(a_bytes);
+    const b_h = kvdump.xxh64(b_bytes);
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/self.kvdump", .{dir});
+    defer allocator.free(path);
+
+    var hx_a: [32]u8 = undefined;
+    var hx_b: [32]u8 = undefined;
+    const meta = [_]kvdump.MetaKV{
+        .{ .k = "format", .v = kvdump.FORMAT },
+        .{ .k = "l_max", .v = "9999" },
+        .{ .k = "step_next", .v = "6" },
+        .{ .k = "a_xxh64", .v = try std.fmt.bufPrint(&hx_a, "{x}", .{a_h}) },
+        .{ .k = "b_xxh64", .v = try std.fmt.bufPrint(&hx_b, "{x}", .{b_h}) },
+    };
+    const sh_a = [_]i64{ 2, 3, 4 };
+    const sh_b = [_]i64{6};
+    const tensors = [_]kvdump.TensorOut{
+        .{ .name = "a", .dtype = "F32", .shape = &sh_a, .bytes = a_bytes },
+        .{ .name = "b", .dtype = "I32", .shape = &sh_b, .bytes = b_bytes },
+    };
+    kvdump.write(allocator, io, path, &tensors, &meta) catch |e| {
+        log.err("KVIO: écriture impossible ({s}) : {s} — le répertoire existe-t-il ?", .{ path, @errorName(e) });
+        return e;
+    };
+
+    // (1) relecture : header + meta + shapes + données, dans des buffers NEUFS.
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    defer f.close(io);
+    var h = try kvdump.readHeader(allocator, io, f);
+    defer h.deinit();
+    const fmt_got = h.metaGet("format") orelse return error.KvDumpBadFormat;
+    if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
+        log.err("KVIO: format relu = {s} != {s}", .{ fmt_got, kvdump.FORMAT });
+        return error.KvDumpBadFormat;
+    }
+    const l_max_got = try kvdump.metaInt(&h, "l_max", 10);
+    const step_next_got = try kvdump.metaInt(&h, "step_next", 10);
+    if (l_max_got != 9999 or step_next_got != 6) {
+        log.err("KVIO: manifest non round-trippé : l_max={d} step_next={d}", .{ l_max_got, step_next_got });
+        return error.KvIoMetaRoundTrip;
+    }
+    try kvdump.expectShape(&h, "a", "F32", &sh_a);
+    try kvdump.expectShape(&h, "b", "I32", &sh_b);
+
+    const got_a = try allocator.alloc(u8, a_bytes.len);
+    defer allocator.free(got_a);
+    const got_b = try allocator.alloc(u8, b_bytes.len);
+    defer allocator.free(got_b);
+    try kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    try kvdump.readTensorInto(io, f, &h, "b", got_b, b_h);
+    if (!std.mem.eql(u8, got_a, a_bytes) or !std.mem.eql(u8, got_b, b_bytes)) {
+        log.err("KVIO: round-trip NON bit-identique (a_ok={} b_ok={})", .{ std.mem.eql(u8, got_a, a_bytes), std.mem.eql(u8, got_b, b_bytes) });
+        return error.KvIoRoundTrip;
+    }
+
+    // (2) MUTANT INTÉGRÉ : 1 octet flippé dans les DONNÉES de `a`, manifest INTACT.
+    // La contre-preuve du gate : si ce flip passe, le checksum ne vérifie rien.
+    const mut_off = h.data_base + 3;
+    var one: [1]u8 = undefined;
+    if (try f.readPositionalAll(io, &one, mut_off) != 1) return error.KvIoMutantSetup;
+    one[0] ^= 0xFF;
+    try f.writePositionalAll(io, &one, mut_off);
+    const mut_res = kvdump.readTensorInto(io, f, &h, "a", got_a, a_h);
+    if (mut_res) |_| {
+        log.err("KVIO: MUTANT NON VU — un octet flippé a passé le checksum : le contrôle est VACUEUX", .{});
+        return error.KvIoMutantNotSeen;
+    } else |e| {
+        if (e != error.KvDumpChecksumMismatch) {
+            log.err("KVIO: mutant refusé par la mauvaise erreur : {s} (attendu KvDumpChecksumMismatch)", .{@errorName(e)});
+            return error.KvIoMutantWrongError;
+        }
+    }
+
+    log.info("KVIO: round-trip PASS + mutant VU (ChecksumMismatch)", .{});
+}
+
 pub fn run(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -1581,10 +1736,33 @@ pub fn run(init: std.process.Init) !void {
         args.out_ids != null or args.ids_only or args.selftest_inputs != null or
         args.selftest_gather != null or args.selftest_gencfg != null or
         args.selftest_sampling != null or args.selftest_draw != null or
-        args.selftest_alloc_count))
+        args.selftest_alloc_count or args.selftest_kvdump_io != null or args.selftest_kvdump_eq != null))
     {
         log.err("--repl est exclusif de --oracle/--window-vacuity/--out-ids/--ids-only/--selftest-*\n{s}", .{usage});
         return error.ConflictingFlags;
+    }
+
+    // === kvdump (spec 2026-08-09 §4.5) : les QUATRE refus de combinaisons de flags. Placés ICI,
+    // au plus tôt (~1 s, aucune compile, aucun GPU) : un flag silencieusement inopérant serait un
+    // mensonge, et chacun de ces refus est VU échouer par le gate DC5. ===
+    if (args.load_cache != null and args.repl) {
+        log.err("--load-cache + --repl non supporté (spec §3 : sémantique multi-tour absente)", .{});
+        return error.LoadCacheReplUnsupported;
+    }
+    if (args.dump_cache != null and args.repl) {
+        log.err("--dump-cache + --repl non supporté v1 (spec §4.5 : un flag inopérant serait un mensonge)", .{});
+        return error.DumpCacheReplUnsupported;
+    }
+    if (args.load_cache != null and args.prompt != null) {
+        log.err("--load-cache + --prompt : le contexte vient du dump, pas d'un prompt (spec §3)", .{});
+        return error.LoadCacheWithPrompt;
+    }
+    // Décision Régis ACTÉE (GO 9 août) : sampling armé + dump = refus bruyant. L'état du PRNG
+    // Xoshiro256 n'est PAS sérialisé — le sérialiser ajouterait une claim d'équivalence
+    // stochastique qu'aucun gate simple ne prouve. Dette écrite au doc de résultats.
+    if (args.dump_cache != null and args.seed != null) {
+        log.err("--dump-cache + sampling armé non supporté v1 (état PRNG non sérialisé — spec §3, dette)", .{});
+        return error.DumpWithSamplingArmed;
     }
 
     // === Task 3 : --selftest-inputs — indépendant du prompt/tokenizer/poids (fixture only) ===
@@ -1622,10 +1800,21 @@ pub fn run(init: std.process.Init) !void {
         return;
     }
 
+    // === DC1 (kvdump) : round-trip fichier + mutant, host-only — même patron d'early-return,
+    // AVANT tokenizer/VRAM/Platform/poids. C'est ce qui rend le gate exécutable en une seconde
+    // et sans GPU (spec kvdump §5, livrable 1). ===
+    if (args.selftest_kvdump_io) |dir| {
+        try selftestKvdumpIo(allocator, io, dir);
+        return;
+    }
+
     // --repl : --prompt devient OPTIONNEL (s'il est fourni : premier prompt de la boucle).
+    // --load-cache : --prompt est INTERDIT (refus ci-dessus) — les ids viennent du manifest du
+    // dump. Sans cette exemption, TOUTE reprise mourrait ici, avant même la lecture du fichier
+    // (finding bloquant de la revue kvdump).
     const prompt_text = args.prompt orelse blk: {
-        if (args.repl) break :blk "";
-        log.err("--prompt est requis (sauf --repl)\n{s}", .{usage});
+        if (args.repl or args.load_cache != null) break :blk "";
+        log.err("--prompt est requis (sauf --repl et --load-cache)\n{s}", .{usage});
         return error.MissingArgument;
     };
 
@@ -1652,7 +1841,10 @@ pub fn run(init: std.process.Init) !void {
 
     // Tokenisation du prompt CLI via promptToIds (extraction repl-mode — même chemin qu'en
     // résident). En --repl sans --prompt : liste vide, la boucle stdin fournira les prompts.
-    var ids: std.ArrayList(u32) = if (args.repl and prompt_text.len == 0)
+    // --load-cache : aucune tokenisation — `ids` sera REMPLI par `ids_fed` du manifest (Task 5,
+    // avant les pré-checks de run()). Le tokenizer reste chargé : le décodage de la continuation
+    // en a besoin.
+    var ids: std.ArrayList(u32) = if (args.load_cache != null or (args.repl and prompt_text.len == 0))
         .empty
     else
         try promptToIds(allocator, &encoder, prompt_text);
@@ -1744,6 +1936,17 @@ pub fn run(init: std.process.Init) !void {
         try checkVram(allocator, io);
     }
 
+    // === kvdump — PHASE 1 du restore (spec §4.3) : manifest + validations de forme + ids_fed,
+    // AVANT la compile ET AVANT les pré-checks de run(). `ids` reçoit ids_fed ICI : les gardes
+    // qui suivent (garde oracle `positions[0] == ids.len`, garde de place `ids.len + limit >
+    // L_MAX`) travaillent donc sur l'état RÉEL de la reprise, pas sur une liste vide. ===
+    var mcheck: ?ManifestCheck = null;
+    defer if (mcheck) |*mc| mc.deinit(allocator, io);
+    if (args.load_cache) |cache_path| {
+        mcheck = try loadCacheManifest(allocator, io, cache_path, args.ckpt, policy.path);
+        try ids.appendSlice(allocator, mcheck.?.ids_fed);
+    }
+
     // === --oracle : lit la fixture AVANT tout (positions[0] = seq_len attendu == ids.len ; fed =
     // la séquence de référence [s0,t1,…] à comparer à `generated`, cf note d'alignement en tête de
     // fichier). positions[0] == ids.len parce que le 1er step de génération de l'oracle FEED s0 à la
@@ -1789,7 +1992,12 @@ pub fn run(init: std.process.Init) !void {
         log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.items.len, limit, L_MAX });
         return error.SequenceTooLong;
     }
-    if (ids.items.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+    // ⚠ En mode --load-cache cette garde est DÉSACTIVÉE (spec §4.3) : elle protège le PREFILL,
+    // qui n'a pas lieu — un état repris dépasse légitimement la fenêtre glissante, le cache la
+    // porte déjà. La garde de place ci-dessus, elle, RESTE active (ids.len == step_next par
+    // l'invariant vérifié en phase 1) : c'est elle qui réalise le refus `SequenceTooLong` de la
+    // validation §4.3(7) — même condition, même erreur, même moment (avant compile).
+    if (args.load_cache == null and ids.items.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.items.len, SLIDING_WINDOW });
         return error.PromptTooLong;
     }
@@ -2086,8 +2294,27 @@ pub fn run(init: std.process.Init) !void {
     // Writer stdout UNIQUE pour toute la session (fix R1 : un 2e writer sur le même fd
     // entrelace ses octets avec le premier — une seule file d'écriture).
     var stdout_w = std.Io.File.stdout().writer(io, &.{});
+    // kvdump : le dump n'existe qu'en one-shot (le refus DumpCacheReplUnsupported garantit qu'on
+    // n'arrive jamais ici avec le flag en --repl ; le `null` des sites REPL est un invariant).
+    const dump_spec: ?DumpSpec = if (args.dump_cache) |p| .{ .path = p, .ckpt_path = args.ckpt } else null;
+    // kvdump — PHASE 2 du restore : APRÈS la compile (elle est hors du chrono KVLOAD-PERF, comme
+    // elle est hors du temps de calcul publié côté (i) de DC7 : l'inclure d'un seul côté serait
+    // inéquitable). Les 4 caches atterrissent dans host.cache_*, que generateOnce monte en device.
+    const resume_state: ?Resume = if (mcheck) |*mc| try loadCacheTensors(io, mc, &host) else null;
+
+    // === DC2 : équivalence intra-process. Dispatché ICI (comme --window-vacuity) : il lui faut
+    // l'exécutable compilé. Il appelle loadCacheManifest/loadCacheTensors DIRECTEMENT, donc le
+    // refus `LoadCacheWithPrompt` ne le concerne pas — il EXIGE au contraire un --prompt. ===
+    if (args.selftest_kvdump_eq) |eq_path| {
+        if (ids.items.len == 0) {
+            log.err("--selftest-kvdump-eq exige un --prompt (les trois appels partent du même prompt)", .{});
+            return error.MissingArgument;
+        }
+        return selftestKvdumpEq(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, ids.items, args.ckpt, eq_path);
+    }
+
     if (!args.repl) {
-        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items);
+        return generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, oracle_ids, args.out_ids, ids.items, dump_spec, resume_state, null);
     }
 
     // === Mode RÉSIDENT : load+compile payés UNE fois, prompts en boucle sur stdin. Chaque
@@ -2097,7 +2324,7 @@ pub fn run(init: std.process.Init) !void {
         if (ids.items.len > 0) { // --prompt fourni : premier prompt de la session
         try stdout_w.interface.print("prompt> {s}\n", .{prompt_text});
         try stdout_w.interface.flush();
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, ids.items, null, null, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2126,7 +2353,7 @@ pub fn run(init: std.process.Init) !void {
             continue;
         };
         defer pids.deinit(allocator); // scope = l'itération : libéré à chaque tour de boucle
-        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items) catch |e| switch (e) {
+        generateOnce(allocator, &counter, io, platform, sharding, &exe, &eng_buf, &pk_buf, tok_sym, cache_sym, &host, &tokenizer, &stdout_w, eot_id, &policy, &scfg, vocab, max_tokens, args.dump_top5, null, null, pids.items, null, null, null) catch |e| switch (e) {
             error.SequenceTooLong, error.PromptTooLong, error.TokenOutOfRange => log.err("prompt refusé ({s}) — prompt suivant", .{@errorName(e)}),
             else => return e,
         };
@@ -2143,7 +2370,336 @@ pub fn run(init: std.process.Init) !void {
 // ci-dessous (one-shot, 1er prompt du REPL, prompts suivants du REPL) doivent partager LA même
 // politique. Un oubli sur l'un des trois la rendrait silencieusement inopérante dans ce mode —
 // c'est exactement ce que le gate GC10 vérifie.
-fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32) !void {
+// kvdump (spec 2026-08-09 §4.2) : ce qu'il faut pour écrire le manifest — le chemin de sortie et
+// le checkpoint à empreinter. Le chemin gencfg vient de `policy.path`, déjà passé à generateOnce.
+const DumpSpec = struct { path: []const u8, ckpt_path: []const u8 };
+
+// Shapes des 4 caches — DÉCLARÉES UNE FOIS : le dump les écrit, le restore les exige. Deux
+// listes séparées auraient pu diverger en silence, et `KvDumpShapeMismatch` n'aurait plus
+// discriminé qu'entre deux erreurs de frappe.
+const SL_SHAPE = [_]i64{ @intCast(NUM_SLIDING_SLOTS), 1, KVH_SL, L_MAX, HD_S };
+const FL_SHAPE = [_]i64{ @intCast(NUM_FULL_SLOTS), 1, KVH_FL, L_MAX, HD_F };
+
+// === DC2 (spec kvdump §5) — ÉQUIVALENCE INTRA-PROCESS, BIT-EXACTE. Trois appels à
+// `generateOnce` dans LE MÊME processus, donc le MÊME exécutable compilé/autotuné : insensible à
+// la bistabilité PAR CONSTRUCTION (l'argument de S2-PONT). C'est le seul niveau où une
+// équivalence bit-à-bit est légitimement exigible (inter-process : DC3, borné par la marge).
+//   (1) génère K=16 tokens et DUMPE ; (2) génère K+M=48 tokens depuis zéro = RÉFÉRENCE ;
+//   (3) RESTAURE le dump de (1) et génère M=32 -> doit reproduire les steps K..K+M de (2).
+// Deux pré-conditions AUTO-VÉRIFIÉES, dont l'échec rend le gate INEXÉCUTABLE (jamais FAIL) :
+//   A. les deux appels atteignent leur borne (`stop_reason == .max_tokens`) — un EOS précoce
+//      ne prouve rien ; aucun précédent de tenue en mode libre n'est invocable (les longs runs
+//      historiques étaient en mode ORACLE, où l'EOS est désactivé) ;
+//   B. les K premiers ids de (1) et (2) sont identiques — c'est le canari du déterminisme
+//      intra-process ET de l'alignement ids<->top5 (si l'alignement était faux, le 16/16
+//      échouerait déjà ici).
+fn selftestKvdumpEq(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, ids: []const u32, ckpt_path: []const u8, dump_path: []const u8) !void {
+    const K: usize = 16; // tokens avant le dump
+    const M: usize = 32; // tokens de continuation comparés
+
+    var c1_ids: std.ArrayList(i64) = .empty;
+    defer c1_ids.deinit(allocator);
+    var c1_t5: std.ArrayList(Top5) = .empty;
+    defer c1_t5.deinit(allocator);
+    var s1: StopReason = .oracle;
+    log.info("KVEQ: appel (1) — {d} tokens puis dump -> {s}", .{ K, dump_path });
+    try generateOnce(allocator, counter, io, platform, sharding, exe, eng_buf, pk_buf, tok_sym, cache_sym, host, tokenizer, stdout_w, eot_id, policy, scfg, vocab, K, false, null, null, ids, .{ .path = dump_path, .ckpt_path = ckpt_path }, null, .{ .ids = &c1_ids, .top5 = &c1_t5, .stop = &s1 });
+
+    var c2_ids: std.ArrayList(i64) = .empty;
+    defer c2_ids.deinit(allocator);
+    var c2_t5: std.ArrayList(Top5) = .empty;
+    defer c2_t5.deinit(allocator);
+    var s2: StopReason = .oracle;
+    log.info("KVEQ: appel (2) — {d} tokens depuis zéro (référence)", .{K + M});
+    try generateOnce(allocator, counter, io, platform, sharding, exe, eng_buf, pk_buf, tok_sym, cache_sym, host, tokenizer, stdout_w, eot_id, policy, scfg, vocab, K + M, false, null, null, ids, null, null, .{ .ids = &c2_ids, .top5 = &c2_t5, .stop = &s2 });
+
+    // Pré-condition A — un arrêt prématuré ne FAIL pas : il rend l'antécédent irréalisable.
+    if (s1 != .max_tokens or s2 != .max_tokens) {
+        log.err("KVEQ: INEXECUTABLE — arrêt prématuré (stop1={s} stop2={s})", .{ @tagName(s1), @tagName(s2) });
+        std.process.exit(3);
+    }
+    if (c1_ids.items.len != K or c2_ids.items.len != K + M) {
+        log.err("KVEQ: INEXECUTABLE — comptes inattendus ({d} et {d})", .{ c1_ids.items.len, c2_ids.items.len });
+        std.process.exit(3);
+    }
+    // Pré-condition B — déterminisme intra-process ET alignement ids<->top5.
+    for (0..K) |j| {
+        if (c1_ids.items[j] != c2_ids.items[j]) {
+            log.err("KVEQ: INEXECUTABLE — déterminisme intra-process non vérifié (@gen={d} : {d} vs {d})", .{ j, c1_ids.items[j], c2_ids.items[j] });
+            std.process.exit(3);
+        }
+    }
+
+    // (3) restore + continuation. `ids` de cet appel = ids_fed du dump (la séquence feedée).
+    var mc = try loadCacheManifest(allocator, io, dump_path, ckpt_path, policy.path);
+    defer mc.deinit(allocator, io);
+    const rs = try loadCacheTensors(io, &mc, host);
+    var c3_ids: std.ArrayList(i64) = .empty;
+    defer c3_ids.deinit(allocator);
+    var c3_t5: std.ArrayList(Top5) = .empty;
+    defer c3_t5.deinit(allocator);
+    var s3: StopReason = .oracle;
+    log.info("KVEQ: appel (3) — restore @step={d} puis {d} tokens", .{ rs.step_next, M });
+    try generateOnce(allocator, counter, io, platform, sharding, exe, eng_buf, pk_buf, tok_sym, cache_sym, host, tokenizer, stdout_w, eot_id, policy, scfg, vocab, M, false, null, null, mc.ids_fed, null, rs, .{ .ids = &c3_ids, .top5 = &c3_t5, .stop = &s3 });
+    if (c3_ids.items.len != M) {
+        log.err("KVEQ: INEXECUTABLE — la continuation a produit {d} tokens au lieu de {d} (stop={s})", .{ c3_ids.items.len, M, @tagName(s3) });
+        std.process.exit(3);
+    }
+
+    // Verdict : ids ET top-5 (indices ET BITS des valeurs) — 32/32 ou FAIL nommé.
+    for (0..M) |j| {
+        const ref_i = c2_ids.items[K + j];
+        const got_i = c3_ids.items[j];
+        const ref5 = c2_t5.items[K + j];
+        const got5 = c3_t5.items[j];
+        if (ref_i != got_i) {
+            log.err("KVEQ: FAIL @gen={d} ids ref={d} got={d}", .{ j, ref_i, got_i });
+            return error.KvEqMismatch;
+        }
+        for (0..gencfg.TOP_K) |r| {
+            const rb: u32 = @bitCast(ref5.val[r]);
+            const gb: u32 = @bitCast(got5.val[r]);
+            if (ref5.idx[r] != got5.idx[r] or rb != gb) {
+                log.err("KVEQ: FAIL @gen={d} rang={d} ref=({d},0x{x}) got=({d},0x{x})", .{ j, r, ref5.idx[r], rb, got5.idx[r], gb });
+                return error.KvEqMismatch;
+            }
+        }
+    }
+    log.info("KVEQ: {d}/{d} bit-identiques -> PASS", .{ M, M });
+
+    // Référence pour DC3/DC4 : ids + marge DÉCISIONNELLE de chaque step (val du rang retenu −
+    // val du rang non supprimé suivant). ⚠ L'instrument logué du runner n'existe qu'en mode
+    // --oracle : ici la marge est CALCULÉE depuis les top-5 capturés + la politique.
+    // Formatage manuel (jamais `{any}` : ce fichier est lu par les gates Python).
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}.ref.json", .{dump_path});
+    defer allocator.free(ref_path);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"step_next\":");
+    try appendNum(allocator, &out, "{d}", .{rs.step_next});
+    try out.appendSlice(allocator, ",\"k\":");
+    try appendNum(allocator, &out, "{d}", .{K});
+    try out.appendSlice(allocator, ",\"ids\":[");
+    for (0..M) |j| {
+        if (j != 0) try out.append(allocator, ',');
+        try appendNum(allocator, &out, "{d}", .{c2_ids.items[K + j]});
+    }
+    try out.appendSlice(allocator, "],\"marges\":[");
+    for (0..M) |j| {
+        if (j != 0) try out.append(allocator, ',');
+        const t5 = c2_t5.items[K + j];
+        const sel = try policy.select(&t5.idx);
+        var next_free: ?usize = null;
+        for (sel.rank + 1..gencfg.TOP_K) |r| {
+            if (!policy.isSuppressed(t5.idx[r])) {
+                next_free = r;
+                break;
+            }
+        }
+        if (next_free) |r| {
+            try appendNum(allocator, &out, "{d:.9}", .{t5.val[sel.rank] - t5.val[r]});
+        } else {
+            try out.appendSlice(allocator, "null");
+        }
+    }
+    try out.appendSlice(allocator, "]}\n");
+    const rf = try std.Io.Dir.createFile(.cwd(), io, ref_path, .{});
+    defer rf.close(io);
+    try rf.writePositionalAll(io, out.items, 0);
+    log.info("KVEQ: référence écrite -> {s} ({d} ids, {d} marges)", .{ ref_path, M, M });
+}
+
+/// Petit utilitaire de formatage sans `{any}` : un fragment formaté, appendé, libéré.
+fn appendNum(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(s);
+    try out.appendSlice(allocator, s);
+}
+
+// === RESTORE (spec §4.3) — EN DEUX PHASES. La compile ne doit être NI dans le chrono de C-D,
+// NI avant les validations de forme :
+//   phase 1 `loadCacheManifest` : AVANT la compile, ne lit que le header (quelques Ko) + le
+//     petit tenseur `ids_fed` — c'est lui qui alimente les pré-checks de run() (garde oracle
+//     `positions[0] == ids.len`, garde de place) ;
+//   phase 2 `loadCacheTensors` : APRÈS la compile, démarre le chrono KVLOAD-PERF et lit les
+//     4 caches (les GiB) directement dans host.cache_* — le `@memset(0)` de HostInputs.init est
+//     ainsi remplacé de fait, et le graphe ne voit AUCUNE différence.
+const Resume = struct { step_next: usize, fed_next: i64, t_load0: std.Io.Timestamp };
+
+const ManifestCheck = struct {
+    file: std.Io.File,
+    header: kvdump.Header,
+    path: []const u8,
+    step_next: usize,
+    fed_next: i64,
+    ids_fed: []u32, // possédé par CE struct
+
+    fn deinit(self: *ManifestCheck, allocator: std.mem.Allocator, io: std.Io) void {
+        allocator.free(self.ids_fed);
+        self.header.deinit();
+        self.file.close(io);
+    }
+};
+
+/// Phase 1 : header + validations de forme + `ids_fed`. AUCUN cache n'est lu ici.
+/// Chaque écart est un refus BRUYANT et nommé (spec §4.5) — jamais un restore silencieusement faux.
+fn loadCacheManifest(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ckpt_path: []const u8, gencfg_path: []const u8) !ManifestCheck {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }) catch |e| {
+        log.err("--load-cache : {s} illisible ({s})", .{ path, @errorName(e) });
+        return e;
+    };
+    errdefer file.close(io);
+    var header = kvdump.readHeader(allocator, io, file) catch |e| {
+        log.err("--load-cache : header illisible ({s}) : {s}", .{ path, @errorName(e) });
+        return e;
+    };
+    errdefer header.deinit();
+
+    // (2) format
+    const fmt_got = header.metaGet("format") orelse {
+        log.err("--load-cache : clé `format` absente du manifest ({s})", .{path});
+        return error.KvDumpBadFormat;
+    };
+    if (!std.mem.eql(u8, fmt_got, kvdump.FORMAT)) {
+        log.err("--load-cache : format `{s}` != `{s}` attendu", .{ fmt_got, kvdump.FORMAT });
+        return error.KvDumpBadFormat;
+    }
+    // (3) variante : le cache sliding est LINÉAIRE .k=L_MAX (R10) — un dump d'une autre borne
+    // se réimplanterait à des positions FAUSSES. Refus, jamais une transposition implicite.
+    const l_max_got = try kvdump.metaInt(&header, "l_max", 10);
+    if (l_max_got != @as(u64, @intCast(L_MAX))) {
+        log.err("--load-cache : l_max du dump = {d} != L_MAX du binaire = {d} (variante incompatible)", .{ l_max_got, L_MAX });
+        return error.KvDumpVariantMismatch;
+    }
+    // (4) shapes/dtype des 5 tenseurs == shapes compilées
+    const step_next: usize = @intCast(try kvdump.metaInt(&header, "step_next", 10));
+    const fed_next_u = try kvdump.metaInt(&header, "fed_next", 10);
+    const ids_shape = [_]i64{@intCast(step_next)};
+    kvdump.expectShape(&header, "sl_k", "F32", &SL_SHAPE) catch |e| {
+        log.err("--load-cache : shape/dtype de sl_k incompatible", .{});
+        return e;
+    };
+    try kvdump.expectShape(&header, "sl_v", "F32", &SL_SHAPE);
+    try kvdump.expectShape(&header, "fl_k", "F32", &FL_SHAPE);
+    try kvdump.expectShape(&header, "fl_v", "F32", &FL_SHAPE);
+    // (6) invariant d'état : la shape déclarée de ids_fed EST step_next. Un manifest forgé
+    // (step_next mentí) meurt ici, avant toute lecture de données.
+    kvdump.expectShape(&header, "ids_fed", "I32", &ids_shape) catch {
+        const declared = kvdump.entryBytes(&header, "ids_fed") catch 0;
+        log.err("--load-cache : ids_fed ({d} octets déclarés) incohérent avec step_next={d} (attendu {d} octets)", .{ declared, step_next, step_next * 4 });
+        return error.KvDumpInconsistentState;
+    };
+    if (step_next == 0) {
+        log.err("--load-cache : step_next=0 — un état sans aucun token feedé n'est pas un état de reprise", .{});
+        return error.KvDumpInconsistentState;
+    }
+    // (5) fingerprint du checkpoint, par CONTENU (taille + xxh64 du header) — jamais par chemin :
+    // un même checkpoint atteint par un autre symlink reste valide, un autre checkpoint de même
+    // taille est arrêté par le hash du header (noms/shapes/offsets de tous ses tenseurs).
+    const fp = try kvdump.ckptFingerprint(allocator, io, ckpt_path);
+    const want_bytes = try kvdump.metaInt(&header, "ckpt_bytes", 10);
+    const want_hdr = try kvdump.metaInt(&header, "ckpt_hdr_xxh64", 16);
+    if (fp.bytes != want_bytes or fp.hdr_xxh64 != want_hdr) {
+        log.err("--load-cache : checkpoint DIFFÉRENT de celui du dump (bytes {d} vs {d}, hdr_xxh64 {x} vs {x})", .{ fp.bytes, want_bytes, fp.hdr_xxh64, want_hdr });
+        return error.KvDumpCheckpointMismatch;
+    }
+    // (8) gencfg : la politique est re-dérivée des fichiers COURANTS — c'est voulu, mais l'écart
+    // doit être VISIBLE. WARN, pas un refus (spec §4.5, dernière ligne).
+    if (header.metaGet("gencfg_path")) |gp| {
+        if (!std.mem.eql(u8, gp, gencfg_path)) {
+            log.warn("--load-cache : gencfg du dump `{s}` != courant `{s}` — la politique appliquée est la COURANTE", .{ gp, gencfg_path });
+        }
+    }
+    if (header.metaGet("sampling")) |sp| {
+        if (!std.mem.eql(u8, sp, "off")) log.warn("--load-cache : le dump portait sampling={s} — un restore avec d'autres warpers diverge légitimement", .{sp});
+    }
+
+    // `ids_fed` : petit (step_next x 4 octets), lu ICI parce que les pré-checks de run() en
+    // dépendent (la garde oracle compare positions[0] à ids.len). Checksum vérifié.
+    const raw = try allocator.alloc(i32, step_next);
+    defer allocator.free(raw);
+    try kvdump.readTensorInto(io, file, &header, "ids_fed", std.mem.sliceAsBytes(raw), try kvdump.metaInt(&header, "ids_fed_xxh64", 16));
+    const ids_fed = try allocator.alloc(u32, step_next);
+    errdefer allocator.free(ids_fed);
+    for (raw, 0..) |t, k| {
+        if (t < 0 or t >= VOCAB_CONTRACT) {
+            log.err("--load-cache : ids_fed[{d}] = {d} hors vocab [0,{d})", .{ k, t, VOCAB_CONTRACT });
+            return error.TokenOutOfRange;
+        }
+        ids_fed[k] = @intCast(t);
+    }
+    if (fed_next_u >= VOCAB_CONTRACT) {
+        log.err("--load-cache : fed_next = {d} hors vocab [0,{d})", .{ fed_next_u, VOCAB_CONTRACT });
+        return error.TokenOutOfRange;
+    }
+    return .{
+        .file = file,
+        .header = header,
+        .path = path,
+        .step_next = step_next,
+        .fed_next = @intCast(fed_next_u),
+        .ids_fed = ids_fed,
+    };
+}
+
+/// Phase 2 : les GiB. Le chrono de C-D démarre à la PREMIÈRE ligne — la lecture des 2,6 GiB est
+/// DANS la fenêtre (un chrono qui l'exclurait serait biaisé vers le PASS) ; la compile est
+/// dehors, des deux côtés de la comparaison.
+fn loadCacheTensors(io: std.Io, mc: *const ManifestCheck, host: anytype) !Resume {
+    const t_load0: std.Io.Timestamp = .now(io, .awake);
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_k", host.cache_sl_k, try kvdump.metaInt(&mc.header, "sl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "sl_v", host.cache_sl_v, try kvdump.metaInt(&mc.header, "sl_v_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_k", host.cache_fl_k, try kvdump.metaInt(&mc.header, "fl_k_xxh64", 16));
+    try kvdump.readTensorInto(io, mc.file, &mc.header, "fl_v", host.cache_fl_v, try kvdump.metaInt(&mc.header, "fl_v_xxh64", 16));
+    log.info("KVLOAD: {s} l_max={d} step_next={d} fed_next={d} ids={d} (reprise sans prefill)", .{ mc.path, L_MAX, mc.step_next, mc.fed_next, mc.ids_fed.len });
+    log.info("KVLOAD: contexte de {d} tokens (non réaffiché)", .{mc.ids_fed.len});
+    return .{ .step_next = mc.step_next, .fed_next = mc.fed_next, .t_load0 = t_load0 };
+}
+
+/// Écrit l'état E1-E4 (spec §4.1) : 4 caches f32 + ids_fed i32 + manifest auto-décrivant.
+/// Le fingerprint du checkpoint est par CONTENU (taille + xxh64 du header), jamais par chemin.
+fn dumpCacheFile(allocator: std.mem.Allocator, io: std.Io, ds: DumpSpec, host: anytype, ids_fed: []const i32, step_next: usize, fed_next: i64, stop_reason: anytype, policy: *const gencfg.GenCfg, scfg: *const sampling.SamplingCfg) !void {
+    const ids_shape = [_]i64{@intCast(ids_fed.len)};
+    const ids_bytes = std.mem.sliceAsBytes(ids_fed);
+    const fp = try kvdump.ckptFingerprint(allocator, io, ds.ckpt_path);
+    var buf: [12][96]u8 = undefined;
+    // `sampling` est une trace INFORMATIVE : un restore avec d'autres warpers diverge
+    // légitimement, mais l'écart doit être VISIBLE (spec §4.1). Le dump avec sampling ARMÉ +
+    // seed est refusé en amont (DumpWithSamplingArmed) — ici on trace ce qui était demandé.
+    const sampling_str = if (scfg.pathArmed())
+        try std.fmt.bufPrint(&buf[10], "T={d},top_k={d},top_p={d}", .{ scfg.temperature, scfg.top_k, scfg.top_p })
+    else
+        "off";
+    const meta = [_]kvdump.MetaKV{
+        .{ .k = "format", .v = kvdump.FORMAT },
+        .{ .k = "l_max", .v = try std.fmt.bufPrint(&buf[0], "{d}", .{L_MAX}) },
+        .{ .k = "step_next", .v = try std.fmt.bufPrint(&buf[1], "{d}", .{step_next}) },
+        .{ .k = "fed_next", .v = try std.fmt.bufPrint(&buf[2], "{d}", .{fed_next}) },
+        .{ .k = "stop_reason", .v = @tagName(stop_reason) },
+        .{ .k = "ckpt_bytes", .v = try std.fmt.bufPrint(&buf[3], "{d}", .{fp.bytes}) },
+        .{ .k = "ckpt_hdr_xxh64", .v = try std.fmt.bufPrint(&buf[4], "{x}", .{fp.hdr_xxh64}) },
+        .{ .k = "gencfg_path", .v = policy.path },
+        .{ .k = "build_mode", .v = @tagName(builtin.mode) },
+        .{ .k = "sampling", .v = sampling_str },
+        .{ .k = "sl_k_xxh64", .v = try std.fmt.bufPrint(&buf[5], "{x}", .{kvdump.xxh64(host.cache_sl_k)}) },
+        .{ .k = "sl_v_xxh64", .v = try std.fmt.bufPrint(&buf[6], "{x}", .{kvdump.xxh64(host.cache_sl_v)}) },
+        .{ .k = "fl_k_xxh64", .v = try std.fmt.bufPrint(&buf[7], "{x}", .{kvdump.xxh64(host.cache_fl_k)}) },
+        .{ .k = "fl_v_xxh64", .v = try std.fmt.bufPrint(&buf[8], "{x}", .{kvdump.xxh64(host.cache_fl_v)}) },
+        .{ .k = "ids_fed_xxh64", .v = try std.fmt.bufPrint(&buf[9], "{x}", .{kvdump.xxh64(ids_bytes)}) },
+    };
+    const tensors = [_]kvdump.TensorOut{
+        .{ .name = "sl_k", .dtype = "F32", .shape = &SL_SHAPE, .bytes = host.cache_sl_k },
+        .{ .name = "sl_v", .dtype = "F32", .shape = &SL_SHAPE, .bytes = host.cache_sl_v },
+        .{ .name = "fl_k", .dtype = "F32", .shape = &FL_SHAPE, .bytes = host.cache_fl_k },
+        .{ .name = "fl_v", .dtype = "F32", .shape = &FL_SHAPE, .bytes = host.cache_fl_v },
+        .{ .name = "ids_fed", .dtype = "I32", .shape = &ids_shape, .bytes = ids_bytes },
+    };
+    try kvdump.write(allocator, io, ds.path, &tensors, &meta);
+    const total = 2 * host.cache_sl_k.len + 2 * host.cache_fl_k.len + ids_bytes.len;
+    log.info("KVDUMP: {s} l_max={d} step_next={d} fed_next={d} ids={d} octets={d} xxh64_ok", .{ ds.path, L_MAX, step_next, fed_next, ids_fed.len, total });
+}
+
+fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, eng_buf: anytype, pk_buf: anytype, tok_sym: zml.Tensor, cache_sym: engine.Cache, host: anytype, tokenizer: anytype, stdout_w: anytype, eot_id: u32, policy: *const gencfg.GenCfg, scfg: *sampling.SamplingCfg, vocab: i64, max_tokens: usize, dump_top5: bool, oracle_ids: ?[]const i32, out_ids_path: ?[]const u8, ids: []const u32, dump_spec: ?DumpSpec, resume_state: ?Resume, capture: ?Capture) !void {
     const limit: usize = if (oracle_ids) |fx| fx.len else max_tokens;
     if (ids.len == 0) {
         log.err("prompt vide (0 ids)", .{});
@@ -2155,7 +2711,10 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         log.err("garde-fou : ids.len({d}) + limit({d}) > L_MAX({d})", .{ ids.len, limit, L_MAX });
         return error.SequenceTooLong;
     }
-    if (ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
+    // kvdump (spec §4.3) : en mode resume cette garde est REMPLACÉE par `step_next + limit <=
+    // L_MAX` (assurée par la garde de place ci-dessus, ids.len == step_next). Un état repris
+    // dépasse légitimement la fenêtre glissante : elle protégeait le prefill, qui n'a pas lieu.
+    if (resume_state == null and ids.len >= @as(usize, @intCast(SLIDING_WINDOW))) {
         log.err("garde-fou : ids.len({d}) >= SLIDING_WINDOW({d})", .{ ids.len, SLIDING_WINDOW });
         return error.PromptTooLong;
     }
@@ -2185,7 +2744,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
 
     // Raison d'arrêt (A3) : capturée DANS la boucle (pas reconstruite après coup) — le strip EOT
     // du détok et le verdict A3 en dépendent. `.oracle` = sortie par compte fed.len (mode --oracle).
-    const StopReason = enum { oracle, eot, max_tokens, l_max };
+    // (Le type StopReason est déclaré au niveau du fichier : le manifest kvdump le publie.)
     var stop_reason: StopReason = .oracle;
     // Id de l'EOS qui a réellement arrêté la génération. Avec TROIS EOS possibles, « arrêt : EOT »
     // ne dit plus lequel : GC6 exige que le log NOMME l'id.
@@ -2218,6 +2777,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
 
     var fed: i64 = @intCast(ids[0]);
     var step: usize = 0;
+    // kvdump : reprise — `step` et `fed` viennent du dump. La boucle entre DIRECTEMENT en phase
+    // de génération (`in_gen_phase = step + 1 >= ids.len` est vrai par l'invariant
+    // ids_fed.len == step_next). Rien d'autre ne change : mêmes call_args, même exécutable,
+    // mêmes compteurs (D10).
+    if (resume_state) |rs| {
+        step = rs.step_next;
+        fed = rs.fed_next;
+    }
     const t0: std.Io.Timestamp = .now(io, .awake);
     // Step 2.7 (spec [it.6]) : capturé au dernier step de prefill (cf plus bas), initialisé à t0
     // par sûreté (jamais réellement lu à cette valeur — le prefill compte toujours ≥1 step).
@@ -2395,6 +2962,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
         }
         // Phase 2 (génération, s0 INCLUS dès le 1er passage ici — dernier step de prefill).
         try generated.appendBounded(tok); // D10 (C5) : idem — error.OutOfMemory si la borne était fausse, jamais une UB
+        // kvdump / C-D : l'instrument du gain. Fenêtre = du DÉBUT de la lecture des tenseurs
+        // (phase 2, post-compile) au PREMIER token produit — les GiB relus sont DEDANS.
+        if (resume_state) |rs| {
+            if (generated.items.len == 1) {
+                const dt_s = @as(f64, @floatFromInt(rs.t_load0.untilNow(io, .awake).toNanoseconds())) / std.time.ns_per_s;
+                log.info("KVLOAD-PERF: chargement+h2d+reprise -> 1er token en {d:.3}s", .{dt_s});
+            }
+        }
         // D10 (C8) : sonde VmRSS — tokens générés 20 et 200, buffers de pile (zéro alloc Zig).
         if (generated.items.len == 20) rss_t20 = mem_probe.rssKb(io);
         if (generated.items.len == 200) rss_t200 = mem_probe.rssKb(io);
@@ -2433,10 +3008,66 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     // quelques ns d'écart l'un de l'autre (back-to-back, aucun travail entre les deux) —
     // négligeable à cette échelle.
     const gen_elapsed = t_prefill_end.untilNow(io, .awake);
+
+    // D10 : deltas ALLOC-LOOP FIGÉS ICI, avant tout travail post-boucle (le dump alloue via
+    // l'allocateur compté ; sans ce gel, la ligne ALLOC-LOOP l'imputerait à la boucle et
+    // DC6 échouerait par construction — finding bloquant de revue kvdump).
+    const al_alloc = counter.n_alloc - al0_alloc;
+    const al_resize = counter.n_resize - al0_resize;
+    const al_remap = counter.n_remap - al0_remap;
+    const al_free = counter.n_free - al0_free;
+    const al_bytes = counter.bytes_alloc - al0_bytes;
+
+    // === kvdump (spec §4.2) : POINT DE DUMP UNIQUE — après la boucle et le gel des deltas,
+    // AVANT les deinit du cache. Les 4 buffers lus sont les SORTIES du dernier step (le swap
+    // précède tous les `break`) : jamais un buffer DONNÉ, le contrat de donation tient. ===
+    if (dump_spec) |ds| {
+        // d2h des 4 buffers FINAUX vers les slices host EXISTANTES (zéro alloc de 2,6 GiB,
+        // plafond B10 intact — spec §4.2). toSlice : le mécanisme D2H prouvé (D10/C2).
+        try cache_buf.sl_k.toSlice(io, zml.Slice.init(cache_buf.sl_k.shape(), host.cache_sl_k));
+        try cache_buf.sl_v.toSlice(io, zml.Slice.init(cache_buf.sl_v.shape(), host.cache_sl_v));
+        try cache_buf.fl_k.toSlice(io, zml.Slice.init(cache_buf.fl_k.shape(), host.cache_fl_k));
+        try cache_buf.fl_v.toSlice(io, zml.Slice.init(cache_buf.fl_v.shape(), host.cache_fl_v));
+
+        if (generated.items.len == 0) {
+            log.err("KVDUMP: aucun token généré — état sans fed_next, dump refusé", .{});
+            return error.KvDumpInconsistentState;
+        }
+        const step_next: usize = step + 1;
+        // ids_fed = ids ++ generated[0..len-1] (le dernier généré n'a PAS été feedé).
+        // Invariant spec §4.2 : ids_fed.len == step_next — assertion dure, jamais silencieuse.
+        const n_gen_fed = generated.items.len - 1;
+        if (ids.len + n_gen_fed != step_next) {
+            log.err("KVDUMP: invariant cassé ids({d})+gen_fed({d}) != step_next({d})", .{ ids.len, n_gen_fed, step_next });
+            return error.KvDumpInconsistentState;
+        }
+        const ids_fed = try allocator.alloc(i32, step_next);
+        defer allocator.free(ids_fed);
+        for (ids, 0..) |t, k| ids_fed[k] = @intCast(t);
+        for (0..n_gen_fed) |k| ids_fed[ids.len + k] = @intCast(generated.items[k]);
+        const fed_next: i64 = generated.items[generated.items.len - 1];
+
+        try dumpCacheFile(allocator, io, ds, host, ids_fed, step_next, fed_next, stop_reason, policy, scfg);
+
+        // Contrat « cache ZÉROS par génération » (:2162) restauré pour l'appel suivant.
+        @memset(host.cache_sl_k, 0);
+        @memset(host.cache_sl_v, 0);
+        @memset(host.cache_fl_k, 0);
+        @memset(host.cache_fl_v, 0);
+    }
+
     cache_buf.sl_k.deinit();
     cache_buf.sl_v.deinit();
     cache_buf.fl_k.deinit();
     cache_buf.fl_v.deinit();
+
+    // kvdump/DC2 : captures pour l'orchestrateur — APRÈS la boucle et APRÈS le gel des deltas,
+    // donc strictement hors de la fenêtre ALLOC-LOOP (aucune interaction avec DC6).
+    if (capture) |cap| {
+        try cap.ids.appendSlice(allocator, generated.items);
+        try cap.top5.appendSlice(allocator, gen_top5.items);
+        cap.stop.* = stop_reason;
+    }
 
     // Détecteur de vacuité du chantier (§4.2bis). Dénominateur = les tokens GÉNÉRÉS, jamais les
     // steps : le prefill (27-28 steps sur les témoins) diluerait la mesure au point de la rendre
@@ -2445,9 +3076,7 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     log.info("GENCFG: suppress a mordu {d} fois sur {d} tokens générés (prefill exclu)", .{ n_suppress_hits, generated.items.len });
     // D10 : deltas de la fenêtre ALLOC-LOOP (gate AL-0/AL-BASE) + totaux process (non-vacuité).
     log.info("ALLOC-LOOP: alloc={d} resize={d} remap={d} free={d} bytes={d} steps={d}", .{
-        counter.n_alloc - al0_alloc, counter.n_resize - al0_resize,
-        counter.n_remap - al0_remap, counter.n_free - al0_free,
-        counter.bytes_alloc - al0_bytes, step + 1,
+        al_alloc, al_resize, al_remap, al_free, al_bytes, step + 1,
     });
     log.info("ALLOC-TOTAL: alloc={d} free={d} bytes={d} shards={d}", .{
         counter.n_alloc, counter.n_free, counter.bytes_alloc, scfg.n_shards,
@@ -2482,7 +3111,14 @@ fn generateOnce(allocator: std.mem.Allocator, counter: *alloc_count.CountingAllo
     const pf_s = elapsed_s - gen_s;
     const pf_rate = if (pf_s > 0) @as(f64, @floatFromInt(ids.len)) / pf_s else 0;
     const gen_rate = if (gen_s > 0) @as(f64, @floatFromInt(generated.items.len)) / gen_s else 0;
-    log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+    // kvdump : en reprise, le champ « prefill » serait un MENSONGE (aucun prefill n'a eu lieu ;
+    // t_prefill_end n'est jamais réassigné, donc pf_s ne mesurerait que du bruit).
+    if (resume_state) |rs| {
+        const rs_rate = if (elapsed_s > 0) @as(f64, @floatFromInt(generated.items.len)) / elapsed_s else 0;
+        log.info("PERF-RESUME : reprise @step={d}, {d} tokens générés en {d:.3}s ({d:.1} tok/s)", .{ rs.step_next, generated.items.len, elapsed_s, rs_rate });
+    } else {
+        log.info("PERF : prefill {d} steps en {d:.3}s ({d:.1} tok/s) ; génération {d} tokens en {d:.3}s ({d:.1} tok/s)", .{ ids.len, pf_s, pf_rate, generated.items.len, gen_s, gen_rate });
+    }
 
     // D10 (C8/AL-RSS) : émis AVANT le verdict oracle A1 — un A1Mismatch n'avale pas la mesure.
     if (rss_t20 != null and rss_t200 != null) {

@@ -1,0 +1,48 @@
+info: BUILD: mode=ReleaseFast
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: GENCFG: /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json suppress=[258883,258882] eos=[1,106,50] ignored=[bos_token_id,do_sample,pad_token_id,temperature,top_k,top_p,transformers_version] (mode=libre)
+info: SAMPLING: neutre — chemin top-5 inchangé (aucun warper, aucun tirage)
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck, 48 couches + 40 v_proj + embed 2 Go) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=2626548 KiB (~2 GiB) swap=0 KiB (~0 GiB)
+info: Compiling G12Step.forward (gather+scale 62.0+dequant W4+forwardStageGen 48 couches+topK, mono-graphe) ...
+info:   compile: 27.42s
+info: [mem] post-compile (go/no-go): RSS=3297284 KiB (~3 GiB) swap=0 KiB (~0 GiB)
+info: KVEQ: appel (1) — 16 tokens puis dump -> /data/gemma4-zml-probe/kvdump/dc2.kvdump
+info: Boucle autonome : 28 steps de prefill, puis génération (limite 16 = max_tokens)
+info: KVDUMP: /data/gemma4-zml-probe/kvdump/dc2.kvdump l_max=1280 step_next=43 fed_next=1017 ids=43 octets=880804012 xxh64_ok
+info: GENCFG: suppress a mordu 0 fois sur 16 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=43
+info: ALLOC-TOTAL: alloc=803 free=765 bytes=954773537 shards=1
+info: PERF : prefill 28 steps en 2.960s (9.5 tok/s) ; génération 16 tokens en 1.547s (10.3 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=null t200=null)
+info: mode libre : 16 tokens générés (EOT_ID=106, max_tokens=16)
+info: generated = { 129930, 3037, 2049, 4052, 569, 759, 107058, 2112, 118583, 513, 236789, 62462, 696, 22865, 37485, 1017 }
+info: arrêt : max-tokens (16)
+info: KVEQ: appel (2) — 48 tokens depuis zéro (référence)
+info: Boucle autonome : 28 steps de prefill, puis génération (limite 48 = max_tokens)
+info: GENCFG: suppress a mordu 0 fois sur 48 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=75
+info: ALLOC-TOTAL: alloc=816 free=776 bytes=955084529 shards=1
+info: PERF : prefill 28 steps en 2.889s (9.7 tok/s) ; génération 48 tokens en 4.853s (9.9 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=3978272 t200=null)
+info: mode libre : 48 tokens générés (EOT_ID=106, max_tokens=48)
+info: generated = { 129930, 3037, 2049, 4052, 569, 759, 107058, 2112, 118583, 513, 236789, 62462, 696, 22865, 37485, 1017, 108, 4967, 107058, 2112, 118583, 513, 236789, 62462, 1009, 3037, 9939, 2947, 55844, 674, 28421, 569, 10040, 513, 236789, 602, 56667, 568, 182283, 723, 92474, 236768, 1608, 723, 9062, 125091, 569, 60588 }
+info: arrêt : max-tokens (48)
+info: KVLOAD: /data/gemma4-zml-probe/kvdump/dc2.kvdump l_max=1280 step_next=43 fed_next=1017 ids=43 (reprise sans prefill)
+info: KVLOAD: contexte de 43 tokens (non réaffiché)
+info: KVEQ: appel (3) — restore @step=43 puis 32 tokens
+info: Boucle autonome : 43 steps de prefill, puis génération (limite 32 = max_tokens)
+info: KVLOAD-PERF: chargement+h2d+reprise -> 1er token en 0.335s
+info: GENCFG: suppress a mordu 0 fois sur 32 tokens générés (prefill exclu)
+info: ALLOC-LOOP: alloc=0 resize=0 remap=0 free=0 bytes=0 steps=75
+info: ALLOC-TOTAL: alloc=836 free=789 bytes=955580235 shards=1
+info: PERF-RESUME : reprise @step=43, 32 tokens générés en 3.309s (9.7 tok/s)
+info: RSS-DELTA: INEXECUTABLE (run trop court : t20=3978292 t200=null)
+info: mode libre : 32 tokens générés (EOT_ID=106, max_tokens=32)
+info: generated = { 108, 4967, 107058, 2112, 118583, 513, 236789, 62462, 1009, 3037, 9939, 2947, 55844, 674, 28421, 569, 10040, 513, 236789, 602, 56667, 568, 182283, 723, 92474, 236768, 1608, 723, 9062, 125091, 569, 60588 }
+info: arrêt : max-tokens (32)
+info: KVEQ: 32/32 bit-identiques -> PASS
+info: KVEQ: référence écrite -> /data/gemma4-zml-probe/kvdump/dc2.kvdump.ref.json (32 ids, 32 marges)

@@ -1,0 +1,31 @@
+fichier      : /tmp/dc5/dc4_zero.kvdump
+header       : 953 octets, data_base = 961
+taille réelle: 880804973 octets
+tenseurs     :
+  sl_k     F32  shape=[40, 1, 8, 1280, 256] octets=419430400
+  sl_v     F32  shape=[40, 1, 8, 1280, 256] octets=419430400
+  fl_k     F32  shape=[8, 1, 1, 1280, 512] octets=20971520
+  fl_v     F32  shape=[8, 1, 1, 1280, 512] octets=20971520
+  ids_fed  I32  shape=[43] octets=172
+manifest     :
+  build_mode = ReleaseFast
+  ckpt_bytes = 10264229896
+  ckpt_hdr_xxh64 = d4b64c2527f7eda4
+  fed_next = 1017
+  fl_k_xxh64 = 3dfd53f051ab68e8
+  fl_v_xxh64 = 3dfd53f051ab68e8
+  format = g12-kvdump-v1
+  gencfg_path = /data/hf_cache/hub/models--google--gemma-4-12B-it-qat-w4a16-ct/snapshots/1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee/generation_config.json
+  ids_fed_xxh64 = 2deb07d238c05d10
+  l_max = 1280
+  sampling = off
+  sl_k_xxh64 = fb7542f909ebe96c
+  sl_v_xxh64 = fb7542f909ebe96c
+  step_next = 43
+  stop_reason = max_tokens
+  xxh64 sl_k     : fb7542f909ebe96c == manifest
+  xxh64 sl_v     : fb7542f909ebe96c == manifest
+  xxh64 fl_k     : 3dfd53f051ab68e8 == manifest
+  xxh64 fl_v     : 3dfd53f051ab68e8 == manifest
+  xxh64 ids_fed  : 2deb07d238c05d10 == manifest
+VERDICT      : tous les checksums concordent

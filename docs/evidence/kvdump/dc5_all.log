@@ -1,0 +1,31 @@
+set-meta : ckpt_hdr_xxh64 : 'd4b64c2527f7eda4' -> '0' dans /tmp/dc5/ckpt.kvdump
+set-meta : format : 'g12-kvdump-v1' -> 'g12-kvdump-v9' dans /tmp/dc5/fmt.kvdump
+set-meta : step_next : '43' -> '7' dans /tmp/dc5/step.kvdump
+mutate-shape : sl_k [40, 1, 8, 1280, 256] -> [41, 1, 8, 1280, 256] dans /tmp/dc5/shape.kvdump (données intactes)
+=== mutants fabriqués ===
+total 3440676
+-rw-rw-r-- 1 ia ia 880804956 Aug  9 21:28 ckpt.kvdump
+-rw-rw-r-- 1 ia ia 880804971 Aug  9 21:28 fmt.kvdump
+-rw-rw-r-- 1 ia ia 880804971 Aug  9 21:28 shape.kvdump
+-rw-rw-r-- 1 ia ia 880804970 Aug  9 21:28 step.kvdump
+-rw-rw-r-- 1 ia ia      1000 Aug  9 21:28 trunc.kvdump
+=== a-variante(4k lit un dump 1280) ===
+error: --load-cache : l_max du dump = 1280 != L_MAX du binaire = 4096 (variante incompatible)
+error: KvDumpVariantMismatch
+=== b-checkpoint ===
+error: --load-cache : checkpoint DIFFÉRENT de celui du dump (bytes 10264229896 vs 10264229896, hdr_xxh64 d4b64c2527f7eda4 vs 0)
+error: KvDumpCheckpointMismatch
+=== c-troncature ===
+error: KvDumpTruncated
+=== d-format ===
+error: --load-cache : format `g12-kvdump-v9` != `g12-kvdump-v1` attendu
+error: KvDumpBadFormat
+=== e-shape ===
+error: --load-cache : shape/dtype de sl_k incompatible
+error: KvDumpShapeMismatch
+=== f-etat-incoherent ===
+error: --load-cache : ids_fed (172 octets déclarés) incohérent avec step_next=7 (attendu 28 octets)
+error: KvDumpInconsistentState
+=== g-plus-de-place ===
+error: garde-fou : ids.len(43) + limit(999999) > L_MAX(1280)
+error: SequenceTooLong
