@@ -146,13 +146,22 @@ ces corrections. **Ne pas exécuter le plan du 27 juil directement.**
 
 **Files :** aucun (lecture seule).
 
-- [ ] **Step 1 : Vérifier l'état du repo**
+> **✅ TRANCHÉ — 10 août 2026, Régis (session d'exécution).**
+> - **D1** : les 4 décisions de la table A sont **MAINTENUES** (K1, K2/DA-4, K6, DA-6).
+>   Les rouvrir serait un chantier séparé, hors de ce plan.
+> - **D2** : **GO** sur la phase 1 penalty — Tasks 1-7 exécutées.
+> - **D3** : **GO** sur le périmètre `--repl` — Task 6 incluse (directives + RP5/RP6).
+> - **D4** : RP7 **requalifiée en mesure publiée** (métrique n-gramme ON/OFF, sans PASS/FAIL) ;
+>   dette D5 close par requalification datée du 10 août 2026.
+
+- [x] **Step 1 : Vérifier l'état du repo**
 
 Run : `git -C ~/dev/gemma4-zml-probe status --porcelain && git log --oneline -3`
 Expected : arbre propre, HEAD = `0461585` ou plus récent sur `main`.
 Si l'arbre n'est pas propre : STOP, montrer à Régis (un travail non committé est invisible).
+→ Mesuré : arbre propre, `HEAD = 23ebdf7` sur `main` (plus récent que `0461585`). ✅
 
-- [ ] **Step 2 : Poser les décisions à Régis, AVANT tout code**
+- [x] **Step 2 : Poser les décisions à Régis, AVANT tout code**
 
 1. **D1 — Confirmer les 4 décisions de la table A** (K1, K2/DA-4, K6, DA-6). Reco :
    **maintenir les 4**. En rouvrir une = chantier séparé, pas celui-ci.
@@ -165,11 +174,13 @@ Si l'arbre n'est pas propre : STOP, montrer à Régis (un travail non committé 
    sur témoin long, sans PASS/FAIL), le symptôme n'ayant jamais été reproduit. L'alternative
    (chercher un prompt qui récite) est ouverte mais non bornée.
 
-- [ ] **Step 3 : Créer la branche**
+- [x] **Step 3 : Créer la branche**
 
 ```bash
 git -C ~/dev/gemma4-zml-probe switch -c penalty-phase1
 ```
+
+→ Branche `penalty-phase1` créée depuis `23ebdf7`.
 
 ---
 
@@ -177,14 +188,16 @@ git -C ~/dev/gemma4-zml-probe switch -c penalty-phase1
 
 **Files :** aucun fichier modifié — artefacts hors arbre + `docs/evidence/penalty/` (créer).
 
-- [ ] **Step 1 : RP-1 — vérifier que l'oracle décode fp32 est opérationnel** (déjà soldé
+- [x] **Step 1 : RP-1 — vérifier que l'oracle décode fp32 est opérationnel** (déjà soldé
   par GC8, on le VOIT au lieu de le croire)
 
 Run : `sed -n '545,556p' scripts/69_u8_gen_oracle.py`
 Expected : la garde levée + le `print` « --compute-fp32 en mode DÉCODE : instrument fp32 ».
 Si la garde est revenue (régression) : STOP, c'est un finding.
+→ Vu le 10 août 2026 (`:547-556`) : garde levée, `print` d'avertissement présent, aucun
+`raise`. RP-1 confirmée soldée, pas de régression.
 
-- [ ] **Step 2 : Déployer l'état non modifié et capturer le témoin HLO**
+- [x] **Step 2 : Déployer l'état non modifié et capturer le témoin HLO**
 
 ```bash
 # depuis M1 :
@@ -199,8 +212,10 @@ md5sum /data/gemma4-zml-probe/rp_hlo_witness/*before_optimizations.txt
 
 Expected : md5 = **`297679847aa04b719942d75d093adf2b`**. L'archiver dans
 `docs/evidence/penalty/hlo_witness.md5`. Tout autre md5 : STOP (le graphe a bougé avant nous).
+→ Mesuré le 10 août 2026 : **md5 identique**, 512 fichiers dumpés, `BUILD: mode=ReleaseFast`,
+`ALLOC-LOOP: alloc=0` (17 steps). Archivé.
 
-- [ ] **Step 3 : Témoin d'ids LONG, penalty neutre** (le prompt canonique fait EOT au 2ᵉ
+- [x] **Step 3 : Témoin d'ids LONG, penalty neutre** (le prompt canonique fait EOT au 2ᵉ
   token — deux ids n'exercent rien)
 
 ```bash
@@ -214,8 +229,11 @@ l'identique en RP2). Vérifier au log : `BUILD: mode=ReleaseFast`, `ALLOC-LOOP: 
 et **publier le nombre d'ids générés : `n < 50` → changer de prompt** (en mode libre l'EOT
 peut couper tôt — un témoin de 5 ids ferait passer RP2 sur du quasi-vide, leçon vacuité de
 l'antécédent). Rapatrier le témoin sur M1 (hors arbre, `logs/`).
+→ Mesuré le 10 août 2026 : **200 ids générés** (aucun EOT prématuré, très loin du seuil
+`n < 50`), `ALLOC-LOOP: alloc=0` sur 228 steps, `BUILD: mode=ReleaseFast`. RUN_ARGS figés
+dans `docs/evidence/penalty/RUN_ARGS.md` ; témoin rapatrié en `logs/rp_witness_long.safetensors`.
 
-- [ ] **Step 4 : Commit des preuves**
+- [x] **Step 4 : Commit des preuves**
 
 ```bash
 git add docs/evidence/penalty/hlo_witness.md5
