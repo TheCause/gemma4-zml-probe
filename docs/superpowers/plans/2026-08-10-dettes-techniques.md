@@ -14,7 +14,7 @@ convention du repo : refus/comportement **VU** avant et après, gate committé, 
 documentaire selon la checklist §5.4 de `docs/DOCUMENTATION.md`.
 
 **Tech stack :** Zig 0.16-dev (build via `zml_runner/build_3090.sh` — JAMAIS `-c opt` seul,
-cf `docs/MODE_BUILD_AUDIT.md`), Bazel + ZML sur la VM 3090 (`ssh ia@192.168.1.163`,
+cf `docs/MODE_BUILD_AUDIT.md`), Bazel + ZML sur la VM 3090 (`ssh user@gpu-host`,
 workspace `/data/rqz_workspace/zml`, repo `/data/gemma4-zml-probe/`), Python venv
 `/data/venvs/gemma4-probe`.
 
@@ -37,7 +37,7 @@ taggés). Règles non négociables du repo :
    run le re-vérifie gratuitement.
 5. **VRAM** : `nvidia-smi --query-compute-apps` avant tout run GPU ; un Ollama résident peut
    occuper la carte (`ollama stop <modèle>`, réversible).
-6. **Anonymisation** : aucun chemin perso (`/Users/regis`, hostnames) dans un commit — grep
+6. **Anonymisation** : aucun chemin perso (`/Users/<user>`, hostnames) dans un commit — grep
    avant push (`git grep -nE 'Users/regis|macmini|192\.168' -- ':!docs/superpowers'`).
 7. **Branche + PR** : jamais de commit direct sur `main`. Branche `dettes-techniques-aout`,
    merge en `--no-ff` après GO Régis.
@@ -61,7 +61,7 @@ W=/data/gemma4-zml-probe/weights_12b
 $B1 $W/model.safetensors $W/tokenizer.json <flags...>
 ```
 
-Alternative équivalente depuis M1 : `ZML_REMOTE=ia@192.168.1.163
+Alternative équivalente depuis M1 : `ZML_REMOTE=user@gpu-host
 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh` (script = source unique des
 flags ; cibles via la variable `TARGETS`, pas d'argument positionnel).
 
@@ -226,7 +226,7 @@ en silence, piège documenté au PLANNING) :
 
 ```bash
 # depuis M1, à la racine du repo :
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 ```
 
 (le script est la source unique des deux flags de mode ; ses cibles par défaut incluent

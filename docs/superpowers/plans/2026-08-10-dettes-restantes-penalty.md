@@ -16,7 +16,7 @@ commentaire « La penalty appartient à la PHASE 1 : absente ici ») : une fonct
 (interdit D10, compteur toujours actif).
 
 **Tech stack :** Zig 0.16-dev (build via `zml_runner/build_3090.sh` — JAMAIS `-c opt` seul,
-cf `docs/MODE_BUILD_AUDIT.md`), Bazel + ZML sur la VM 3090 (`ssh ia@192.168.1.163`,
+cf `docs/MODE_BUILD_AUDIT.md`), Bazel + ZML sur la VM 3090 (`ssh user@gpu-host`,
 workspace `/data/rqz_workspace/zml`, repo `/data/gemma4-zml-probe/`), Python venv
 `/data/venvs/gemma4-probe` (transformers 5.14.1), oracle fp32 sur M4.
 
@@ -57,7 +57,7 @@ gates S2 et G-D, §7), `zml_runner/sampling.zig` (warpers existants), `docs/D10_
 
 ```bash
 # Build (depuis M1, à la racine du repo) — source unique des 2 flags de mode :
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 # (cibles par défaut incluent gemma4_g12auto ; variante via TARGETS=..., pas d'argument positionnel)
 
 # Runner (sur la VM) :
@@ -201,9 +201,9 @@ Si la garde est revenue (régression) : STOP, c'est un finding.
 
 ```bash
 # depuis M1 :
-export ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz
+export ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz
 ./zml_runner/deploy_to_3090.sh          # ⚠ les défauts sont des placeholders qui échouent
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 # sur la VM :
 XLA_FLAGS="--xla_dump_to=/data/gemma4-zml-probe/rp_hlo_witness" \
   $B1 $W/model.safetensors $W/tokenizer.json --prompt "witness" --max-tokens 4
