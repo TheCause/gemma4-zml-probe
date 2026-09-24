@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "classes": ["direct", "search", "calculate", "insufficient"],
+  "letter_template": "Decide how to handle the request below.\n{options}\n\nRequest: {q}\n\nAnswer with a single letter: A, B, C or D.",
+  "json_template": "Decide how to handle the request below.\n{options}\n\nRequest: {q}\n\nAnswer with JSON only: {\"choice\": \"<direct|search|calculate|insufficient>\"}",
+  "option_text": {
+    "direct": "answer directly without any tool",
+    "search": "search the documentation",
+    "calculate": "perform a calculation",
+    "insufficient": "not enough information to choose"
+  },
+  "perms": {
+    "orig": ["direct", "search", "calculate", "insufficient"],
+    "rev": ["insufficient", "calculate", "search", "direct"]
+  },
+  "json_option_order": ["direct", "search", "calculate", "insufficient"],
+  "warmup": "Decide how to handle the request below.\nA: answer directly without any tool\nB: search the documentation\n\nRequest: Say hello.\n\nAnswer with a single letter: A or B.",
+  "cases": [
+    {"id": "direct-01", "gold": "direct", "q": "What is the capital of Japan?"},
+    {"id": "direct-02", "gold": "direct", "q": "Translate 'good morning' into Spanish."},
+    {"id": "direct-03", "gold": "direct", "q": "Give me a synonym for 'happy'."},
+    {"id": "direct-04", "gold": "direct", "q": "Who wrote the novel 'Pride and Prejudice'?"},
+    {"id": "direct-05", "gold": "direct", "q": "Write a one-line birthday wish for a friend."},
+    {"id": "direct-06", "gold": "direct", "q": "What colour do you get by mixing blue and yellow?"},
+    {"id": "search-01", "gold": "search", "q": "Which configuration key sets the request timeout in our internal API gateway?"},
+    {"id": "search-02", "gold": "search", "q": "What does error code E1047 mean in the billing service's manual?"},
+    {"id": "search-03", "gold": "search", "q": "How do I rotate the signing keys according to our deployment runbook?"},
+    {"id": "search-04", "gold": "search", "q": "What is the default retention period for audit logs in the product documentation?"},
+    {"id": "search-05", "gold": "search", "q": "Which environment variable enables verbose tracing in the SDK, per its reference docs?"},
+    {"id": "search-06", "gold": "search", "q": "What are the rate limits of the v2 export endpoint as documented?"},
+    {"id": "calculate-01", "gold": "calculate", "q": "What is 17.5% of 2,348.60?"},
+    {"id": "calculate-02", "gold": "calculate", "q": "Compute the monthly payment on a 250,000 loan at 3.9% annual interest over 20 years."},
+    {"id": "calculate-03", "gold": "calculate", "q": "How many seconds are there in 7 weeks and 3 days?"},
+    {"id": "calculate-04", "gold": "calculate", "q": "What is the square root of 98,596?"},
+    {"id": "calculate-05", "gold": "calculate", "q": "Convert 68 degrees Fahrenheit to Celsius, to two decimals."},
+    {"id": "calculate-06", "gold": "calculate", "q": "If 3 machines make 450 parts in 6 hours, how many parts do 5 machines make in 10 hours?"},
+    {"id": "insufficient-01", "gold": "insufficient", "q": "Can you fix it?"},
+    {"id": "insufficient-02", "gold": "insufficient", "q": "How much will it cost?"},
+    {"id": "insufficient-03", "gold": "insufficient", "q": "Is the second one better?"},
+    {"id": "insufficient-04", "gold": "insufficient", "q": "Send it to them before the deadline."},
+    {"id": "insufficient-05", "gold": "insufficient", "q": "What should I change in that file?"},
+    {"id": "insufficient-06", "gold": "insufficient", "q": "Why did it fail this time?"}
+  ]
+}
