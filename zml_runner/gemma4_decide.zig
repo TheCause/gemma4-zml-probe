@@ -526,7 +526,7 @@ fn deinitCache(c: *zml.Bufferized(engine.Cache)) void {
 const Timings = struct { reset_ns: u64 = 0, absorb_ns: u64 = 0, read_b_ns: u64 = 0, read_c_ns: u64 = 0, policy_ns: u64 = 0, gen_ns: u64 = 0 };
 
 const CaseResult = struct {
-    step0: u32,
+    step0: u32 = std.math.maxInt(u32), // sentinelle : jamais écrasée ⇒ step0 ≠ 0 ⇒ FAIL C-SD-D visible
     t: Timings,
     top5_idx: [5]i32 = .{0} ** 5,
     top5_val: [5]f32 = .{0} ** 5,
@@ -545,13 +545,19 @@ fn nsSince(io: std.Io, t: std.Io.Timestamp) u64 {
 /// Exécute un cas. `b_first` fixe l'ordre des deux lectures du dernier pas (parité de la rép.).
 /// Bras json : génération gloutonne (top1 du top-5) jusqu'à EOT ou 96 tokens (spec §4.3).
 fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, bufs: anytype, cache_sym: engine.Cache, host: *const HostInputs, c: Case, arm: Arm, eot_id: u32, vocab: i64, b_first: bool) !CaseResult {
-    var r = CaseResult{ .step0 = 0, .t = .{}, .read_order = if (b_first) "BC" else "CB" };
+    var r = CaseResult{ .t = .{}, .read_order = if (b_first) "BC" else "CB" };
     errdefer r.gen.deinit(allocator);
 
     // Remise à zéro du cache (défense, spec §4.3) : coût en t_reset, HORS temps de décision.
     const t_r: std.Io.Timestamp = .now(io, .awake);
     var cache = try uploadZeroCache(io, platform, sharding, cache_sym, host);
     defer deinitCache(&cache);
+    // fromBytes n'attend PAS le transfert (wait=false, buffer.zig:139-148) : on attend les 4 buffers
+    // ici, sinon le reliquat du transfert tomberait dans t_absorb (revue Task 6).
+    try cache.sl_k.await(io);
+    try cache.sl_v.await(io);
+    try cache.fl_k.await(io);
+    try cache.fl_v.await(io);
     r.t.reset_ns = nsSince(io, t_r);
 
     var cand_host = c.label_ids;
@@ -559,8 +565,8 @@ fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sh
     defer cand_buf.deinit();
 
     const n = c.ids.len;
-    var step: u32 = 0; // repart de 0 à CHAQUE cas (C-SD-D) — journalisé en step0
-    r.step0 = step;
+    var step: u32 = 0; // repart de 0 à CHAQUE cas (C-SD-D)
+    var step0_taken = false;
     var fed: u32 = c.ids[0];
     const t0: std.Io.Timestamp = .now(io, .awake);
     var t_gen0: std.Io.Timestamp = t0;
@@ -578,6 +584,10 @@ fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sh
         }
         var tok_host = [1]u32{fed};
         var tok_buf = try zml.Buffer.fromBytes(io, platform, bufs.tok_shape, sharding, std.mem.sliceAsBytes(&tok_host));
+        if (!step0_taken) { // step0 = la valeur EFFECTIVEMENT passée à Ctrl.step au 1er pas (revue Task 6)
+            r.step0 = step;
+            step0_taken = true;
+        }
         var step_buf = try zml.Buffer.scalar(io, platform, step, .u32, sharding);
         const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
         var call_args = try exe.args(allocator);
@@ -692,6 +702,20 @@ fn wfs(a: std.mem.Allocator, b: *std.ArrayList(u8), xs: []const f32) !void {
     try b.append(a, ']');
 }
 
+/// Fichier JSONL écrit ligne à ligne, à un offset qui avance.
+const Sink = struct {
+    f: std.Io.File,
+    off: u64 = 0,
+    buf: std.ArrayList(u8) = .empty,
+
+    fn emit(self: *Sink, al: std.mem.Allocator, io: std.Io, arm: Arm, rep: usize, order: []const u8, c: Case, r: *const CaseResult) !void {
+        self.buf.clearRetainingCapacity();
+        try appendLine(al, &self.buf, arm, rep, order, c, r);
+        try self.f.writePositionalAll(io, self.buf.items, self.off);
+        self.off += self.buf.items.len;
+    }
+};
+
 fn appendLine(al: std.mem.Allocator, buf: *std.ArrayList(u8), arm: Arm, rep: usize, order: []const u8, c: Case, r: *const CaseResult) !void {
     try w(al, buf, "{{\"arm\":\"{s}\",\"rep\":{d},\"order\":\"{s}\",\"case_id\":\"{s}\",\"perm\":\"{s}\",\"step0\":{d},\"n_prompt\":{d}", .{ @tagName(arm), rep, order, c.case_id, c.perm, r.step0, c.ids.len });
     try w(al, buf, ",\"t_reset_ns\":{d},\"t_absorb_ns\":{d},\"t_read_b_ns\":{d},\"t_read_c_ns\":{d},\"t_policy_ns\":{d},\"t_gen_ns\":{d},\"read_order\":\"{s}\"", .{ r.t.reset_ns, r.t.absorb_ns, r.t.read_b_ns, r.t.read_c_ns, r.t.policy_ns, r.t.gen_ns, r.read_order });
@@ -766,6 +790,11 @@ pub fn main(init: std.process.Init) !void {
     const out_path = args.out orelse return badField("--out");
     const mani = try readManifest(allocator, arena.allocator(), io, mpath, args.arm);
     log.info("manifest : {d} cas ({s}), eot_id={d}, warmup={d} ids", .{ mani.cases.len, @tagName(args.arm), mani.eot_id, mani.warmup.ids.len });
+    // Sortie créée AVANT la plateforme (un chemin invalide échoue en < 1 s) et écrite ligne à ligne
+    // (une erreur en cours de run ne perd pas les cas déjà faits) — revue Task 6.
+    var sink = Sink{ .f = try std.Io.Dir.createFile(.cwd(), io, out_path, .{}) };
+    defer sink.f.close(io);
+    defer sink.buf.deinit(allocator);
 
     if (args.force_vram) log.warn("--force-vram : garde VRAM sautée", .{}) else try checkVram(allocator, io);
 
@@ -867,21 +896,19 @@ pub fn main(init: std.process.Init) !void {
 
     const bufs = .{ .eng = eng_buf, .tabs = tabs_buf, .pk = pk_buf, .tok_shape = tok_sym.shape(), .cand_shape = cand_sym.shape() };
     const vocab = model.embed_tokens.dim(.voc);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
 
     // Échauffement : prompt hors liste, froid, journalisé (order="warmup"), exclu des statistiques (spec §6).
     {
         var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, mani.warmup, .letter, mani.eot_id, vocab, true);
         defer r.gen.deinit(allocator);
-        try appendLine(allocator, &out, .letter, 0, "warmup", mani.warmup, &r);
+        try sink.emit(allocator, io, .letter, 0, "warmup", mani.warmup, &r);
         log.info("warmup : t_absorb={d} µs ({d} ids)", .{ r.t.absorb_ns / 1000, mani.warmup.ids.len });
     }
     for (1..args.reps + 1) |rep| { // la répétition parcourt TOUTE la liste (C-SD-D)
         for (mani.cases) |c| {
             var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, c, args.arm, mani.eot_id, vocab, rep % 2 == 1);
             defer r.gen.deinit(allocator);
-            try appendLine(allocator, &out, args.arm, rep, "fwd", c, &r);
+            try sink.emit(allocator, io, args.arm, rep, "fwd", c, &r);
         }
         log.info("rep {d}/{d} terminée ({d} cas)", .{ rep, args.reps, mani.cases.len });
     }
@@ -892,12 +919,9 @@ pub fn main(init: std.process.Init) !void {
             const c = mani.cases[k];
             var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, c, args.arm, mani.eot_id, vocab, true);
             defer r.gen.deinit(allocator);
-            try appendLine(allocator, &out, args.arm, 1, "rev", c, &r);
+            try sink.emit(allocator, io, args.arm, 1, "rev", c, &r);
         }
         log.info("passe inverse terminée ({d} cas)", .{mani.cases.len});
     }
-    const f = try std.Io.Dir.createFile(.cwd(), io, out_path, .{});
-    defer f.close(io);
-    try f.writePositionalAll(io, out.items, 0);
-    log.info("écrit {s} ({d} octets)", .{ out_path, out.items.len });
+    log.info("écrit {s} ({d} octets)", .{ out_path, sink.off });
 }
