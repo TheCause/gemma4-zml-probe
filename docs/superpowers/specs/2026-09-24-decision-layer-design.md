@@ -42,6 +42,10 @@
 > mutation 87 dédiée ; (2) P2 : « chaque cas » contre « médiane », `t_C` et `len_lettre`
 > non définis sur deux permutations, exclusion EOT → tout défini ; (3) C-SD-B′ : critère de
 > choix du cas aligné sur ce qui fait mordre la mutation.
+>
+> **Rév. 4a (24 sept)** — C-SD-C : l'empreinte est le **sha256 normalisé** de
+> `53_g2_3_hlo_check.py::normalized_hash` (script `88_sd_hlo_fingerprint.py`), pas un md5 brut ;
+> même rôle, neutralisations éprouvées. Témoin `main` : `docs/evidence/sd/hlo_witness_main.txt`.
 
 ---
 
