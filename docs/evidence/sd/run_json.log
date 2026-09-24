@@ -1,0 +1,18 @@
+info: BUILD: mode=ReleaseFast
+info: manifest : 24 cas (json), eot_id=106, warmup=49 ids
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=1642060 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Compiling StepDec.forward (gather+forwardStep+topK+gather candidats+logSumExp) ...
+info:   compile: 14.149s
+info: [mem] post-compile: RSS=2005876 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: warmup : t_absorb=485976 µs (49 ids)
+info: rep 1/5 terminée (24 cas)
+info: rep 2/5 terminée (24 cas)
+info: rep 3/5 terminée (24 cas)
+info: rep 4/5 terminée (24 cas)
+info: rep 5/5 terminée (24 cas)
+info: écrit /tmp/r_json.jsonl (65441 octets)
+rc=0
