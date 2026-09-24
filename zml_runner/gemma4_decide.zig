@@ -504,6 +504,239 @@ const StepDec = struct {
     }
 };
 
+// ============================================================================================
+// SD — boucle par cas (spec §4.3 « Synchronisation », §6).
+// ============================================================================================
+fn uploadZeroCache(io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, cache_sym: engine.Cache, host: *const HostInputs) !zml.Bufferized(engine.Cache) {
+    return .{
+        .sl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_k.shape(), sharding, host.cache_sl_k),
+        .sl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.sl_v.shape(), sharding, host.cache_sl_v),
+        .fl_k = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_k.shape(), sharding, host.cache_fl_k),
+        .fl_v = try zml.Buffer.fromBytes(io, platform, cache_sym.fl_v.shape(), sharding, host.cache_fl_v),
+    };
+}
+
+fn deinitCache(c: *zml.Bufferized(engine.Cache)) void {
+    c.sl_k.deinit();
+    c.sl_v.deinit();
+    c.fl_k.deinit();
+    c.fl_v.deinit();
+}
+
+const Timings = struct { reset_ns: u64 = 0, absorb_ns: u64 = 0, read_b_ns: u64 = 0, read_c_ns: u64 = 0, policy_ns: u64 = 0, gen_ns: u64 = 0 };
+
+const CaseResult = struct {
+    step0: u32,
+    t: Timings,
+    top5_idx: [5]i32 = .{0} ** 5,
+    top5_val: [5]f32 = .{0} ** 5,
+    zc: [policy.N]f32 = .{0} ** policy.N,
+    lse: f32 = 0,
+    read_order: []const u8 = "BC",
+    decision: ?policy.Decision = null,
+    gen: std.ArrayList(u32) = .empty,
+    stop: []const u8 = "-",
+};
+
+fn nsSince(io: std.Io, t: std.Io.Timestamp) u64 {
+    return @intCast(t.untilNow(io, .awake).toNanoseconds());
+}
+
+/// Exécute un cas. `b_first` fixe l'ordre des deux lectures du dernier pas (parité de la rép.).
+/// Bras json : génération gloutonne (top1 du top-5) jusqu'à EOT ou 96 tokens (spec §4.3).
+fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, exe: anytype, bufs: anytype, cache_sym: engine.Cache, host: *const HostInputs, c: Case, arm: Arm, eot_id: u32, vocab: i64, b_first: bool) !CaseResult {
+    var r = CaseResult{ .step0 = 0, .t = .{}, .read_order = if (b_first) "BC" else "CB" };
+    errdefer r.gen.deinit(allocator);
+
+    // Remise à zéro du cache (défense, spec §4.3) : coût en t_reset, HORS temps de décision.
+    const t_r: std.Io.Timestamp = .now(io, .awake);
+    var cache = try uploadZeroCache(io, platform, sharding, cache_sym, host);
+    defer deinitCache(&cache);
+    r.t.reset_ns = nsSince(io, t_r);
+
+    var cand_host = c.label_ids;
+    var cand_buf = try zml.Buffer.fromBytes(io, platform, bufs.cand_shape, sharding, std.mem.sliceAsBytes(&cand_host));
+    defer cand_buf.deinit();
+
+    const n = c.ids.len;
+    var step: u32 = 0; // repart de 0 à CHAQUE cas (C-SD-D) — journalisé en step0
+    r.step0 = step;
+    var fed: u32 = c.ids[0];
+    const t0: std.Io.Timestamp = .now(io, .awake);
+    var t_gen0: std.Io.Timestamp = t0;
+    const max_gen: usize = 96;
+
+    while (true) : (step += 1) {
+        if (fed >= vocab) {
+            log.err("cas {s}/{s} : token hors vocab {d} (vocab={d})", .{ c.case_id, c.perm, fed, vocab });
+            return error.TokenOutOfRange;
+        }
+        if (step >= @as(u32, @intCast(L_MAX))) { // positions/tables épuisées (bras json seulement : n ≤ L_MAX)
+            r.stop = "l_max";
+            r.t.gen_ns = nsSince(io, t_gen0);
+            break;
+        }
+        var tok_host = [1]u32{fed};
+        var tok_buf = try zml.Buffer.fromBytes(io, platform, bufs.tok_shape, sharding, std.mem.sliceAsBytes(&tok_host));
+        var step_buf = try zml.Buffer.scalar(io, platform, step, .u32, sharding);
+        const ctrl_buf = zml.Bufferized(engine.Ctrl){ .step = step_buf };
+        var call_args = try exe.args(allocator);
+        var call_results = try exe.results(allocator);
+        call_args.set(.{ bufs.eng, bufs.tabs, tok_buf, cand_buf, bufs.pk, cache, ctrl_buf });
+
+        // Frontière §4.3 : le DERNIER pas d'absorption est appelé avec wait=true, puis t_absorb s'arrête.
+        const last_absorb = (step + 1 == n);
+        if (last_absorb) exe.callOpts(io, call_args, &call_results, .{ .wait = true }) else exe.call(call_args, &call_results);
+        var o_t5v, var o_t5i, var o_zc, var o_lse, const slk, const slv, const flk, const flv = call_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer, zml.Buffer });
+        if (last_absorb) r.t.absorb_ns = nsSince(io, t0);
+
+        var old = cache;
+        cache = .{ .sl_k = slk, .sl_v = slv, .fl_k = flk, .fl_v = flv };
+        deinitCache(&old);
+        tok_buf.deinit();
+        step_buf.deinit();
+        call_args.deinit(allocator);
+        call_results.deinit(allocator);
+        defer {
+            o_t5v.deinit();
+            o_t5i.deinit();
+            o_zc.deinit();
+            o_lse.deinit();
+        }
+
+        if (step + 1 < n) { // absorption, pas qui n'est PAS le dernier : lecture bloquante du top-5 (comme gen_auto), ignoré
+            var s = try o_t5i.toSliceAlloc(allocator, io);
+            s.free(allocator);
+            fed = c.ids[step + 1];
+            continue;
+        }
+
+        if (last_absorb and arm == .letter) {
+            try readBC(allocator, io, &r, &o_t5v, &o_t5i, &o_zc, &o_lse, b_first);
+            const t_p: std.Io.Timestamp = .now(io, .awake);
+            r.decision = policy.evaluate(.{ .zc = r.zc, .lse = r.lse, .label_ids = c.label_ids, .classes = c.classes, .vocab = @intCast(vocab) });
+            r.t.policy_ns = nsSince(io, t_p);
+            break;
+        }
+
+        // Bras json : top1 = token suivant ; t_gen du retour du dernier pas d'absorption à la lecture de l'EOT.
+        if (last_absorb) t_gen0 = .now(io, .awake);
+        var sv = try o_t5i.toSliceAlloc(allocator, io);
+        defer sv.free(allocator);
+        if (sv.dtype() != .i32) return error.UnexpectedDtype;
+        const nxt: u32 = @intCast(sv.items(i32)[0]);
+        try r.gen.append(allocator, nxt);
+        if (nxt == eot_id) {
+            r.stop = "eot";
+            r.t.gen_ns = nsSince(io, t_gen0);
+            break;
+        }
+        if (r.gen.items.len >= max_gen) {
+            r.stop = "max_tokens";
+            r.t.gen_ns = nsSince(io, t_gen0);
+            break;
+        }
+        fed = nxt;
+    }
+    return r;
+}
+
+/// Les deux lectures du dernier pas, chronométrées séparément, dans l'ordre demandé :
+/// B = top-5 (t_read_B), C = zc + lse (t_read_C).
+fn readBC(allocator: std.mem.Allocator, io: std.Io, r: *CaseResult, t5v: *zml.Buffer, t5i: *zml.Buffer, zc: *zml.Buffer, lse: *zml.Buffer, b_first: bool) !void {
+    for (0..2) |k| {
+        const do_b = (k == 0) == b_first;
+        const t: std.Io.Timestamp = .now(io, .awake);
+        if (do_b) {
+            var v = try t5v.toSliceAlloc(allocator, io);
+            defer v.free(allocator);
+            var ix = try t5i.toSliceAlloc(allocator, io);
+            defer ix.free(allocator);
+            if (ix.dtype() != .i32 or v.dtype() != .f32) return error.UnexpectedDtype;
+            for (0..5) |j| {
+                r.top5_val[j] = v.items(f32)[j];
+                r.top5_idx[j] = ix.items(i32)[j];
+            }
+            r.t.read_b_ns = nsSince(io, t);
+        } else {
+            var z = try zc.toSliceAlloc(allocator, io);
+            defer z.free(allocator);
+            var l = try lse.toSliceAlloc(allocator, io);
+            defer l.free(allocator);
+            if (z.dtype() != .f32 or l.dtype() != .f32) return error.UnexpectedDtype;
+            for (0..policy.N) |j| r.zc[j] = z.items(f32)[j];
+            r.lse = l.items(f32)[0];
+            r.t.read_c_ns = nsSince(io, t);
+        }
+    }
+}
+
+// ---- JSONL (tableaux et objets écrits À LA MAIN : `{any}` imprime `{ 2, 105 }`, pas du JSON) ----
+fn w(a: std.mem.Allocator, b: *std.ArrayList(u8), comptime fmt: []const u8, x: anytype) !void {
+    const s = try std.fmt.allocPrint(a, fmt, x);
+    defer a.free(s);
+    try b.appendSlice(a, s);
+}
+
+/// Flottant JSON : fini → notation scientifique ; non fini → null (les *_bits gardent la valeur exacte).
+fn wf(a: std.mem.Allocator, b: *std.ArrayList(u8), x: f32) !void {
+    if (std.math.isFinite(x)) try w(a, b, "{e}", .{x}) else try b.appendSlice(a, "null");
+}
+
+fn wfs(a: std.mem.Allocator, b: *std.ArrayList(u8), xs: []const f32) !void {
+    try b.append(a, '[');
+    for (xs, 0..) |x, j| {
+        if (j != 0) try b.append(a, ',');
+        try wf(a, b, x);
+    }
+    try b.append(a, ']');
+}
+
+fn appendLine(al: std.mem.Allocator, buf: *std.ArrayList(u8), arm: Arm, rep: usize, order: []const u8, c: Case, r: *const CaseResult) !void {
+    try w(al, buf, "{{\"arm\":\"{s}\",\"rep\":{d},\"order\":\"{s}\",\"case_id\":\"{s}\",\"perm\":\"{s}\",\"step0\":{d},\"n_prompt\":{d}", .{ @tagName(arm), rep, order, c.case_id, c.perm, r.step0, c.ids.len });
+    try w(al, buf, ",\"t_reset_ns\":{d},\"t_absorb_ns\":{d},\"t_read_b_ns\":{d},\"t_read_c_ns\":{d},\"t_policy_ns\":{d},\"t_gen_ns\":{d},\"read_order\":\"{s}\"", .{ r.t.reset_ns, r.t.absorb_ns, r.t.read_b_ns, r.t.read_c_ns, r.t.policy_ns, r.t.gen_ns, r.read_order });
+    try w(al, buf, ",\"top5_idx\":[{d},{d},{d},{d},{d}],\"top5_val\":", .{ r.top5_idx[0], r.top5_idx[1], r.top5_idx[2], r.top5_idx[3], r.top5_idx[4] });
+    try wfs(al, buf, &r.top5_val);
+    try buf.appendSlice(al, ",\"zc\":{"); // indexé par ID de token, comme l'oracle
+    for (0..policy.N) |j| {
+        try w(al, buf, "{s}\"{d}\":", .{ if (j == 0) "" else ",", c.label_ids[j] });
+        try wf(al, buf, r.zc[j]);
+    }
+    try buf.appendSlice(al, "},\"zc_bits\":{");
+    for (0..policy.N) |j| try w(al, buf, "{s}\"{d}\":\"{x:0>8}\"", .{ if (j == 0) "" else ",", c.label_ids[j], @as(u32, @bitCast(r.zc[j])) });
+    try buf.appendSlice(al, "},\"lse\":");
+    try wf(al, buf, r.lse);
+    try w(al, buf, ",\"lse_bits\":\"{x:0>8}\"", .{@as(u32, @bitCast(r.lse))});
+    if (r.decision) |d| {
+        switch (d) {
+            .decision => |x| {
+                try w(al, buf, ",\"decision\":{{\"kind\":\"decision\",\"option\":\"{s}\",\"p\":", .{@tagName(x.option)});
+                try wfs(al, buf, &x.p);
+                try buf.appendSlice(al, ",\"p_max\":");
+                try wf(al, buf, x.p_max);
+                try buf.appendSlice(al, ",\"margin\":");
+                try wf(al, buf, x.margin);
+                try buf.appendSlice(al, ",\"mass_in\":");
+                try wf(al, buf, x.mass_in);
+                try buf.append(al, '}');
+            },
+            .abstain => |x| {
+                try w(al, buf, ",\"decision\":{{\"kind\":\"abstain\",\"option\":\"{s}\",\"reason\":\"{s}\",\"p\":", .{ @tagName(x.option), @tagName(x.reason) });
+                try wfs(al, buf, &x.p);
+                try buf.appendSlice(al, ",\"margin\":");
+                try wf(al, buf, x.margin);
+                try buf.appendSlice(al, ",\"mass_in\":");
+                try wf(al, buf, x.mass_in);
+                try buf.append(al, '}');
+            },
+            .err => |e| try w(al, buf, ",\"decision\":{{\"kind\":\"err\",\"err\":\"{s}\"}}", .{@tagName(e)}),
+        }
+    }
+    try w(al, buf, ",\"n_gen\":{d},\"stop\":\"{s}\",\"gen_ids\":[", .{ r.gen.items.len, r.stop });
+    for (r.gen.items, 0..) |t, j| try w(al, buf, "{s}{d}", .{ if (j == 0) "" else ",", t });
+    try buf.appendSlice(al, "]}\n");
+}
+
 pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(200000); // piège quota comptime (cf gemma4_gchunk_auto.zig:96)
     const arena = init.arena;
@@ -621,6 +854,8 @@ pub fn main(init: std.process.Init) !void {
     reg_ck.deinit();
     mem_probe.logMem(io, "post-load (poids + Packed/Cache sur device)");
     // ---- fin des copies verbatim ----
+    // Chaque cas remonte son propre cache à zéro (uploadZeroCache) : celui de la copie verbatim est inutile.
+    deinitCache(&cache_buf);
 
     const cand_sym = zml.Tensor.init(.{policy.N}, .u32).withTags(.{.c});
     log.info("Compiling StepDec.forward (gather+forwardStep+topK+gather candidats+logSumExp) ...", .{});
@@ -629,10 +864,40 @@ pub fn main(init: std.process.Init) !void {
     defer exe.deinit();
     log.info("  compile: {f}", .{t_compile.untilNow(io, .awake)});
     mem_probe.logMem(io, "post-compile");
-    // (Task 6 : boucle des cas)
-    _ = .{ eng_buf, tabs_buf, pk_buf, out_path };
-    cache_buf.sl_k.deinit();
-    cache_buf.sl_v.deinit();
-    cache_buf.fl_k.deinit();
-    cache_buf.fl_v.deinit();
+
+    const bufs = .{ .eng = eng_buf, .tabs = tabs_buf, .pk = pk_buf, .tok_shape = tok_sym.shape(), .cand_shape = cand_sym.shape() };
+    const vocab = model.embed_tokens.dim(.voc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    // Échauffement : prompt hors liste, froid, journalisé (order="warmup"), exclu des statistiques (spec §6).
+    {
+        var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, mani.warmup, .letter, mani.eot_id, vocab, true);
+        defer r.gen.deinit(allocator);
+        try appendLine(allocator, &out, .letter, 0, "warmup", mani.warmup, &r);
+        log.info("warmup : t_absorb={d} µs ({d} ids)", .{ r.t.absorb_ns / 1000, mani.warmup.ids.len });
+    }
+    for (1..args.reps + 1) |rep| { // la répétition parcourt TOUTE la liste (C-SD-D)
+        for (mani.cases) |c| {
+            var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, c, args.arm, mani.eot_id, vocab, rep % 2 == 1);
+            defer r.gen.deinit(allocator);
+            try appendLine(allocator, &out, args.arm, rep, "fwd", c, &r);
+        }
+        log.info("rep {d}/{d} terminée ({d} cas)", .{ rep, args.reps, mani.cases.len });
+    }
+    if (args.order == .both) { // UNE passe INVERSE, même processus, même compile (C-SD-D) ; rep=1 → B puis C
+        var k = mani.cases.len;
+        while (k > 0) {
+            k -= 1;
+            const c = mani.cases[k];
+            var r = try runCase(allocator, io, platform, sharding, &exe, bufs, cache_sym, &host, c, args.arm, mani.eot_id, vocab, true);
+            defer r.gen.deinit(allocator);
+            try appendLine(allocator, &out, args.arm, 1, "rev", c, &r);
+        }
+        log.info("passe inverse terminée ({d} cas)", .{mani.cases.len});
+    }
+    const f = try std.Io.Dir.createFile(.cwd(), io, out_path, .{});
+    defer f.close(io);
+    try f.writePositionalAll(io, out.items, 0);
+    log.info("écrit {s} ({d} octets)", .{ out_path, out.items.len });
 }

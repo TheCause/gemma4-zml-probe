@@ -1,0 +1,16 @@
+# gemma4_decide fumée bras json (2 cas, --reps 2), binaire sha256 09dcf42a4311aad2…, 24 sept. 2026 16:49:12–16:49:35 CEST
+info: BUILD: mode=ReleaseFast
+info: manifest : 2 cas (json), eot_id=106, warmup=49 ids
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=1641812 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Compiling StepDec.forward (gather+forwardStep+topK+gather candidats+logSumExp) ...
+info:   compile: 14.064s
+info: [mem] post-compile: RSS=2006928 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: warmup : t_absorb=488476 µs (49 ids)
+info: rep 1/2 terminée (2 cas)
+info: rep 2/2 terminée (2 cas)
+info: écrit /tmp/sd_smoke_j.jsonl (2919 octets)
+rc=0
