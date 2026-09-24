@@ -1,0 +1,6 @@
+mutant a : C-SD-B = FAIL (attendu {'FAIL'}) → CONDAMNÉ
+mutant b : C-SD-D = FAIL (attendu {'FAIL'}) → CONDAMNÉ
+mutant c : C-SD-F(86) = FAIL (attendu {'FAIL'}) → CONDAMNÉ
+mutant d : exit = 3 (attendu {3}) → CONDAMNÉ
+mutant e : C-SD-D = FAIL (attendu {'FAIL'}) → CONDAMNÉ
+87 PASS — le dépouilleur condamne les 5 mutants
