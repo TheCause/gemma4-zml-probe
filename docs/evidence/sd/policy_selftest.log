@@ -1,0 +1,14 @@
+# gemma4_decide --policy-selftest (Task 5 binary, sha256 prefix 3460bbb403e0e487), 24 sept 2026 16:44:46 CEST
+3460bbb403e0e487
+rc=0
+info: BUILD: mode=ReleaseFast
+info: policy-selftest empty_set : got=err:empty_set want=err:empty_set OK
+info: policy-selftest duplicate_label : got=err:duplicate_label want=err:duplicate_label OK
+info: policy-selftest label_out_of_vocab : got=err:label_out_of_vocab want=err:label_out_of_vocab OK
+info: policy-selftest non_finite : got=err:non_finite want=err:non_finite OK
+info: policy-selftest argmax_pos0 : got=decision:direct want=decision:direct OK
+info: policy-selftest argmax_pos3_insufficient : got=abstain:insufficient want=abstain:insufficient OK
+info: policy-selftest argmax_pos1_rev : got=decision:calculate want=decision:calculate OK
+info: policy-selftest argmax_pos2 : got=decision:calculate want=decision:calculate OK
+info: policy-selftest argmax_pos3_rev : got=decision:direct want=decision:direct OK
+info: C-SD-F PASS — 9/9

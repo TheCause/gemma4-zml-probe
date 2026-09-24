@@ -14,3 +14,7 @@
 - 24 sept. 2026 16:37:54–16:38:08 CEST — sd_policy_test, evaluate implémenté : PASSED, 2/2 tests, rc=0.
 - 24 sept. 2026 16:38:14–16:38:29 CEST — mutant argmin : FAILED (argmax_pos0 : got abstain:low_margin want decision:direct ; 2/2 échouent), rc=3.
 - 24 sept. 2026 16:38:29–16:38:43 CEST — mutant retiré : PASSED, 2/2 tests, rc=0. Logs : `docs/evidence/sd/policy_test.log`.
+- 24 sept. 2026 16:43 CEST — Task 5 : VRAM 0 MiB. ÉCART AU PLAN maintenu : pas de `deploy_to_3090.sh` ; copie `rsync -a zml_runner/gemma4_decide.zig zml_runner/sd_policy.zig zml_runner/BUILD.bazel` SANS --delete.
+- 24 sept. 2026 16:43:28–16:44:38 CEST — build `//examples/rqz:gemma4_decide` (build_3090.sh, ReleaseFast+CUDA), 69,9 s, rc=0, compilé au 1er essai ; sha256 binaire 3460bbb403e0e487…
+- 24 sept. 2026 16:44:46 CEST — `gemma4_decide x --policy-selftest` : `BUILD: mode=ReleaseFast`, C-SD-F PASS 9/9, rc=0 (`policy_selftest.log`).
+- 24 sept. 2026 16:44:47 CEST — test de démarrage, manifest sans `letter[0].label_ids` : `manifest : champ 'label_ids' absent ou invalide`, `error: BadManifest`, rc=1, en 3 ms (avant plateforme et poids) (`bad_manifest.log`).
