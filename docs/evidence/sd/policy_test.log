@@ -1,0 +1,96 @@
+# sd_policy_test — Task 4 (C-SD-F). Commande sur la machine de calcul, dans le workspace ZML :
+#   ./bazel.sh test -c opt --@rules_zig//zig/settings:mode=release_fast //examples/rqz:sd_policy_test --test_output=all
+# rules_zig 0.12.2, Zig 0.16.0-dev.2722 ; sources copiées par rsync SANS --delete (écart au plan, cf RUN_LOG.md).
+
+################ Phase 1 — échec initial attendu (evaluate = @panic not implemented)
+# début 24 sept. 2026 16:37:14 CEST, fin 16:37:46
+==================== Test output for //examples/rqz:sd_policy_test:
+1/2 sd_policy.test.C-SD-F : chaque cas fabriqué rend la variante attendue...thread 1668486 panic: not implemented
+/data/cache/bazel/_bazel_ia/7d9928bd75c9ea118f64acfa9c51ccb5/sandbox/processwrapper-sandbox/5/execroot/_main/examples/rqz/sd_policy.zig:28:5: 0x6331c25a474b in evaluate (sd_policy_test)
+/data/cache/bazel/_bazel_ia/7d9928bd75c9ea118f64acfa9c51ccb5/sandbox/processwrapper-sandbox/5/execroot/_main/external/rules_zig++zig+zig_0.16.0-dev.2722_Pf16eb18ce_x86_64-linux/lib/compiler/test_runner.zig:255:25: 0x6331c2598a85 in mainTerminal (sd_policy_test)
+???:?:?: 0x7b272082a1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
+???:?:?: 0x7b272082a28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
+???:?:?: 0x6331c255cde9 in ??? (???)
+================================================================================
+INFO: Found 1 test target...
+Target //examples/rqz:sd_policy_test up-to-date:
+  bazel-bin/examples/rqz/sd_policy_test
+INFO: Elapsed time: 31.505s, Critical Path: 19.59s
+INFO: 9 processes: 363 action cache hit, 4 internal, 5 processwrapper-sandbox.
+INFO: Build completed, 1 test FAILED, 9 total actions
+//examples/rqz:sd_policy_test                                            FAILED in 1.0s
+  /data/cache/bazel/_bazel_ia/7d9928bd75c9ea118f64acfa9c51ccb5/execroot/_main/bazel-out/host_glibc-opt/testlogs/examples/rqz/sd_policy_test/test.log
+
+Executed 1 out of 1 test: 1 fails locally.
+rc=3
+
+################ Phase 2 — evaluate implémenté : PASS attendu
+# début 24 sept. 2026 16:37:54 CEST, fin 16:38:08
+==================== Test output for //examples/rqz:sd_policy_test:
+1/2 sd_policy.test.C-SD-F : chaque cas fabriqué rend la variante attendue...OK
+2/2 sd_policy.test.p somme à 1 et mass_in dans ]0,1]...OK
+All 2 tests passed.
+================================================================================
+INFO: Found 1 test target...
+Target //examples/rqz:sd_policy_test up-to-date:
+  bazel-bin/examples/rqz/sd_policy_test
+INFO: Elapsed time: 13.877s, Critical Path: 13.47s
+INFO: 5 processes: 5 processwrapper-sandbox.
+INFO: Build completed successfully, 5 total actions
+//examples/rqz:sd_policy_test                                            PASSED in 0.0s
+
+Executed 1 out of 1 test: 1 test passes.
+rc=0
+
+################ Phase 3 — mutant argmin (e[i] < e[best]) : FAIL attendu sur argmax_pos0
+# début 24 sept. 2026 16:38:14 CEST, fin 16:38:29
+==================== Test output for //examples/rqz:sd_policy_test:
+1/2 sd_policy.test.C-SD-F : chaque cas fabriqué rend la variante attendue...
+====== expected this output: =========
+decision:direct␃
+
+======== instead found this: =========
+abstain:low_margin␃
+
+======================================
+First difference occurs on line 1:
+expected:
+decision:direct
+^ ('\x64')
+found:
+abstain:low_margin
+^ ('\x61')
+cas argmax_pos0 : got abstain:low_margin want decision:direct
+FAIL (TestExpectedEqual)
+2/2 sd_policy.test.p somme à 1 et mass_in dans ]0,1]...FAIL (TestUnexpectedResult)
+0 passed; 0 skipped; 2 failed.
+================================================================================
+INFO: Found 1 test target...
+Target //examples/rqz:sd_policy_test up-to-date:
+  bazel-bin/examples/rqz/sd_policy_test
+INFO: Elapsed time: 14.029s, Critical Path: 13.55s
+INFO: 5 processes: 5 processwrapper-sandbox.
+INFO: Build completed, 1 test FAILED, 5 total actions
+//examples/rqz:sd_policy_test                                            FAILED in 0.0s
+  /data/cache/bazel/_bazel_ia/7d9928bd75c9ea118f64acfa9c51ccb5/execroot/_main/bazel-out/host_glibc-opt/testlogs/examples/rqz/sd_policy_test/test.log
+
+Executed 1 out of 1 test: 1 fails locally.
+rc=3
+
+################ Phase 4 — mutant retiré (fichier restauré) : PASS attendu
+# début 24 sept. 2026 16:38:29 CEST, fin 16:38:43
+==================== Test output for //examples/rqz:sd_policy_test:
+1/2 sd_policy.test.C-SD-F : chaque cas fabriqué rend la variante attendue...OK
+2/2 sd_policy.test.p somme à 1 et mass_in dans ]0,1]...OK
+All 2 tests passed.
+================================================================================
+INFO: Found 1 test target...
+Target //examples/rqz:sd_policy_test up-to-date:
+  bazel-bin/examples/rqz/sd_policy_test
+INFO: Elapsed time: 14.040s, Critical Path: 13.56s
+INFO: 5 processes: 5 processwrapper-sandbox.
+INFO: Build completed successfully, 5 total actions
+//examples/rqz:sd_policy_test                                            PASSED in 0.0s
+
+Executed 1 out of 1 test: 1 test passes.
+rc=0

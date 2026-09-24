@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "gemma4_ple_fixture",
@@ -580,4 +580,10 @@ zig_binary(
     srcs = ["engine.zig", "mem_probe.zig"],
     visibility = ["//visibility:public"],
     deps = ["//bazel", "//zml"],
+)
+
+# SD (spec docs/superpowers/specs/2026-09-24-decision-layer-design.md §4.4) — évaluateur pur, sans ZML.
+zig_test(
+    name = "sd_policy_test",
+    main = "sd_policy.zig",
 )
