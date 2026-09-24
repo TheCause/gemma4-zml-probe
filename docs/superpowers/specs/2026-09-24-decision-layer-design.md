@@ -315,6 +315,8 @@ M1 : fixtures/sd_cases.json (committé)
   `L3_INGRAPH_DESIGN.md:113`) est **publié**, pas absorbé. La part attribuable à la méthode
   elle-même est le **second terme** (génération évitée) ; le premier est un artefact de
   format du prompt, rapporté comme tel. *Réfutée si* (a), (b) ou (c) échoue.
+  *24 sept 2026* — Longueurs mesurées en SD0 (`docs/evidence/sd/84_oracle.log`) : lettre
+  médiane 77 (min 69, max 93), JSON médiane 86 (min 78, max 102).
 - **P3** — **aucune prédiction de qualité.** On mesure.
 - **Lecture attendue si P1 et P2 tiennent** : sur ce moteur, la vitesse vient de « une
   étiquette au lieu d'un JSON », que B obtient déjà ; l'apport propre de C est
