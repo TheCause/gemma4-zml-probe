@@ -25,6 +25,19 @@ README **anglais**, **GO** D1/D2, **GO** K8) :
 | **Phase 1 repetition penalty** | **SOLDÉE le 10 août** — **7 gates verts** (RP0-RP6) + round-trip, mergée sur `main` (PR #22 `86a46c9`, PR #23 `38a0888`). RP7 et M1 : mesures publiées sans verdict. Source de vérité : `SAMPLING_RESULTS.md` **§8** |
 | K3 · K4 · K5 · Triton paged attention | **CADRÉS** (10 août) — fiches dans `docs/superpowers/specs/2026-08-10-cadrage-dettes-restantes.md` ; ordre reco : K5 → K4, K3 et Triton indépendants |
 
+## 🔬 Chantier SD — couche de décision typée (24 sept 2026, branche `sd-decision-layer`, non poussée)
+
+Spec `docs/superpowers/specs/2026-09-24-decision-layer-design.md` · plan
+`docs/superpowers/plans/2026-09-24-decision-layer.md` · résultats `docs/SD_RESULTS.md` · lecture
+`docs/SD_LECTURE.md`. Runner `zml_runner/gemma4_decide.zig`, `engine.zig` et `gemma4_gen_auto.zig`
+intouchés (empreinte HLO identique).
+**Verdicts** : C-SD-A/B/C/D/E/F PASS · P1 confirmée · **P2 réfutée sur l'amplitude** (gain 176 ms
+contre 261 prévus : les coûts publiés de 14 et 9 ms par pas sont en réalité 8,8 et 8,4) ; signe et
+part (20,6 % < 25 %) tiennent · aucun signal d'abstention (20 erreurs, toutes à marge ≥ 0,82) ·
+le JSON est plus exact que le format lettre sur ce jeu (24/24 contre 220/240).
+**Suites non planifiées** : Score/Noul, questions en lot, projection réduite de la tête, prefill
+S>1, E2B décideur devant Qwen 27B, jeu de cas non écrit par l'auteur.
+
 ## 🏁 Chantier K5 « prefill partiel » — EXÉCUTÉ, 7 GATES VERTS (10 août 2026)
 
 **La capacité gagnée** : `--load-cache F --prompt "tour 2"` — reprendre un cache dumpé **et
