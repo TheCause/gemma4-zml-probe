@@ -1,0 +1,97 @@
+== 2026-09-24 16:19:37 CEST — preuve d'identité des sources (rsync -nc à blanc, zml_runner/ local -> examples/rqz/ distant)
+*deleting   .claude-handoff.md
+.d..t...... ./
+.f..t...... gemma4_g12auto.zig
+deploy sauté : sources distantes identiques à zml_runner/ local par checksum (rsync -nc), aucun fichier à transférer ; deploy --delete aurait supprimé un .claude-handoff.md distant du 30 juillet
+
+== build 16:19:38
+== Commande canonique ==
+cd '/data/rqz_workspace/zml' && ./bazel.sh build   -c opt   --@rules_zig//zig/settings:mode=release_fast   --@zml//platforms:cuda=true   //examples/rqz:gemma4_gen_auto
+
+Starting local Bazel server (8.5.1) and connecting to it...
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 6 packages loaded
+Analyzing: target //examples/rqz:gemma4_gen_auto (11 packages loaded)
+Analyzing: target //examples/rqz:gemma4_gen_auto (11 packages loaded, 8 targets configured)
+Analyzing: target //examples/rqz:gemma4_gen_auto (11 packages loaded, 8 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (55 packages loaded, 11 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (136 packages loaded, 3024 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (210 packages loaded, 4948 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (237 packages loaded, 6591 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (272 packages loaded, 15523 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (338 packages loaded, 20033 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (391 packages loaded, 39020 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (421 packages loaded, 58141 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (426 packages loaded, 60806 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (426 packages loaded, 60806 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (439 packages loaded, 63624 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (441 packages loaded, 63971 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (443 packages loaded, 66495 targets configured)
+
+Analyzing: target //examples/rqz:gemma4_gen_auto (455 packages loaded, 67276 targets configured)
+
+INFO: Analyzed target //examples/rqz:gemma4_gen_auto (455 packages loaded, 69484 targets configured).
+[1 / 1] no actions running
+[28 / 1,485] checking cached actions
+[239 / 2,768] checking cached actions
+[356 / 3,487] [Prepa] Writing file examples/rqz/gemma4_gen_auto_c.h
+[427 / 3,979] checking cached actions
+[3,561 / 5,186] [Scann] Compiling examples/rqz/gemma4_gen_auto.toolchain_defines_hdr.c
+[3,633 / 5,186] checking cached actions
+[4,945 / 5,186] [Prepa] zig translate-c //examples/rqz:gemma4_gen_auto; 4s
+INFO: From zig translate-c //examples/rqz:gemma4_gen_auto:
+warning: unknown argument '-no-canonical-prefixes'
+warning: unknown argument '-ffile-compilation-dir=.'
+warning: unknown argument '-fno-cxx-modules'
+warning: unknown warning 'module-import-in-extern-c' [-Wunknown-warning-option]
+warning: unknown warning 'incomplete-umbrella' [-Wunknown-warning-option]
+warning: unknown argument '-fstack-protector'
+warning: unknown warning 'thread-safety' [-Wunknown-warning-option]
+warning: unknown warning 'self-assign' [-Wunknown-warning-option]
+warning: unknown warning 'unused-but-set-parameter' [-Wunknown-warning-option]
+warning: unknown warning 'free-nonheap-object' [-Wunknown-warning-option]
+warning: unknown argument '-fno-omit-frame-pointer'
+warning: unknown argument '-ffunction-sections'
+warning: unknown argument '-fdata-sections'
+[4,990 / 5,186] checking cached actions
+[5,182 / 5,186] [Prepa] zig build-lib //examples/rqz:gemma4_gen_auto; 7s
+[5,184 / 5,186] zig build-lib //examples/rqz:gemma4_gen_auto; 1s processwrapper-sandbox
+[5,184 / 5,186] zig build-lib //examples/rqz:gemma4_gen_auto; 11s processwrapper-sandbox
+[5,184 / 5,186] zig build-lib //examples/rqz:gemma4_gen_auto; 41s processwrapper-sandbox
+
+INFO: From zig build-lib //examples/rqz:gemma4_gen_auto:
+warning: add 'external/+xla+eigen_archive' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'bazel-out/host_glibc-opt/bin/external/+xla+eigen_archive' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'external/libbacktrace+' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'bazel-out/host_glibc-opt/bin/external/libbacktrace+' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'external/+non_module_deps+com_google_sentencepiece' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'bazel-out/host_glibc-opt/bin/external/+non_module_deps+com_google_sentencepiece' to header searchlist '-isystem' conflicts with '-I'
+[5,185 / 5,186] [Prepa] Linking examples/rqz/gemma4_gen_auto
+INFO: From Linking examples/rqz/gemma4_gen_auto:
+clang++: warning: argument unused during compilation: '-static-libgcc' [-Wunused-command-line-argument]
+INFO: Found 1 target...
+Target //examples/rqz:gemma4_gen_auto up-to-date:
+  bazel-bin/examples/rqz/gemma4_gen_auto
+INFO: Elapsed time: 301.719s, Critical Path: 77.82s
+INFO: 9 processes: 5206 action cache hit, 5 internal, 4 processwrapper-sandbox.
+INFO: Build completed successfully, 9 total actions
+
+OK. Rappel : vérifier 'BUILD: mode=ReleaseFast' dans le log de CHAQUE run de gate.
+== build rc=0 durée=302 s
+3d34c0b0aec0eebbdea0a19d2dde9101c505f7bd79f7ef16190fdb5032382085  /data/rqz_workspace/zml/bazel-bin/examples/rqz/gemma4_gen_auto

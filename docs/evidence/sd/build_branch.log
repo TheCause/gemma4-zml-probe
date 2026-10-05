@@ -1,0 +1,18 @@
+== Commande canonique ==
+cd '/data/rqz_workspace/zml' && ./bazel.sh build   -c opt   --@rules_zig//zig/settings:mode=release_fast   --@zml//platforms:cuda=true   //examples/rqz:gemma4_decide //examples/rqz:gemma4_gen_auto
+
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed 2 targets (0 packages loaded, 2 targets configured).
+INFO: Found 2 targets...
+INFO: Elapsed time: 0.531s, Critical Path: 0.08s
+INFO: 1 process: 12 action cache hit, 1 internal.
+INFO: Build completed successfully, 1 total action
+
+OK. Rappel : vérifier 'BUILD: mode=ReleaseFast' dans le log de CHAQUE run de gate.
+3d34c0b0aec0eebbdea0a19d2dde9101c505f7bd79f7ef16190fdb5032382085  /data/rqz_workspace/zml/bazel-bin/examples/rqz/gemma4_gen_auto
+c13dea12888be8a59ce3a1d08bc800356a481899d4878b0942c4f10fec464ee6  /data/rqz_workspace/zml/bazel-bin/examples/rqz/gemma4_decide

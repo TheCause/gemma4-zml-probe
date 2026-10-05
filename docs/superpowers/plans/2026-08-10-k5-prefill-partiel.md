@@ -51,11 +51,11 @@ Règles non négociables du repo, toutes déjà payées :
 
 ```bash
 # Déploiement + build (depuis M1, racine du repo) :
-export ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz
+export ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz
 ./zml_runner/deploy_to_3090.sh
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 
-# Runner (sur la VM ia@192.168.1.163) :
+# Runner (sur la VM user@gpu-host) :
 cd /data/rqz_workspace/zml
 B1=./bazel-bin/examples/rqz/gemma4_g12auto     # variante 1280
 B4=./bazel-bin/examples/rqz/gemma4_g12a4k      # variante 4k
@@ -120,7 +120,7 @@ python3 scripts/69_u8_gen_oracle.py --weights ~/ml-data/weights_12b_dq --compute
 ```bash
 cd ~/dev/gemma4-zml-probe && git status --porcelain && git log --oneline -1
 git checkout -b k5-prefill-partiel
-ssh ia@192.168.1.163 'nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv'
+ssh user@gpu-host 'nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv'
 ```
 
 Expected : arbre propre sur `f184c46` (ou descendant), VRAM libre (sinon `ollama stop`).
@@ -135,9 +135,9 @@ Expected : arbre propre sur `f184c46` (ou descendant), VRAM libre (sinon `ollama
 
 ```bash
 # depuis M1 :
-export ZML_REMOTE=ia@192.168.1.163 ZML_DST=/data/rqz_workspace/zml/examples/rqz
+export ZML_REMOTE=user@gpu-host ZML_DST=/data/rqz_workspace/zml/examples/rqz
 ./zml_runner/deploy_to_3090.sh
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 # sur la VM :
 mkdir -p /data/gemma4-zml-probe/k5
 XLA_FLAGS="--xla_dump_to=/data/gemma4-zml-probe/k5/hlo_avant" \
@@ -158,8 +158,8 @@ Tout autre md5 ⇒ **STOP** (le graphe a bougé avant nous).
 
 ```bash
 mkdir -p ~/dev/gemma4-zml-probe/docs/evidence/k5   # le répertoire n'existe PAS encore
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/hlo_witness_avant.md5 \
-    ia@192.168.1.163:/data/gemma4-zml-probe/k5/binaire_avant.md5 \
+scp user@gpu-host:/data/gemma4-zml-probe/k5/hlo_witness_avant.md5 \
+    user@gpu-host:/data/gemma4-zml-probe/k5/binaire_avant.md5 \
     ~/dev/gemma4-zml-probe/docs/evidence/k5/
 git add docs/evidence/k5/ && git commit -m "k5(PF0) : témoins HLO + binaire AVANT la première ligne de code"
 ```
@@ -465,7 +465,7 @@ Déclaration `ids_only_turn2: bool = false` dans `Args`, parsing
 - [ ] **Step 3.8 : build + commit**
 
 ```bash
-ZML_REMOTE=ia@192.168.1.163 ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
+ZML_REMOTE=user@gpu-host ZML_WS=/data/rqz_workspace/zml ./zml_runner/build_3090.sh
 git add zml_runner/gemma4_g12auto.zig
 git commit -m "k5 : prefill partiel — ids_full = ids_fed ++ [fed_next] ++ tour2, top5@ctx, ctx_ids, --ids-only-turn2"
 ```
@@ -682,7 +682,7 @@ $B1 $W/model.safetensors $W/tokenizer.json --ids-only-turn2 --prompt "What is my
   > $K/pf6.out.log 2> $K/pf6.err.log
 md5sum ./bazel-bin/examples/rqz/gemma4_g12auto >> $K/pf6.err.log
 # M1 :
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf6.err.log docs/evidence/k5/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf6.err.log docs/evidence/k5/
 python3 scripts/79_t2_render_check.py docs/evidence/k5/rendu_tour2_hf.json docs/evidence/k5/pf6.err.log
 ```
 
@@ -791,7 +791,7 @@ grep -E "K5:|KVLOAD:|ALLOC-LOOP" $K/pf1_runB.err.log
 - [ ] **Step 7.3 : oracle fp32 (M4)**
 
 ```bash
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf1_outB.safetensors /tmp/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf1_outB.safetensors /tmp/
 scp /tmp/pf1_outB.safetensors macmini:/tmp/ && scp scripts/69_u8_gen_oracle.py macmini:/tmp/
 ssh macmini '~/ml-venvs/g12b/bin/python3 /tmp/69_u8_gen_oracle.py \
   --weights ~/ml-data/weights_12b_dq --compute-fp32 \
@@ -803,7 +803,7 @@ scp macmini:/tmp/pf1.json docs/evidence/k5/
 - [ ] **Step 7.4 : verdict machine + discriminance**
 
 ```bash
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf1_runB.err.log docs/evidence/k5/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf1_runB.err.log docs/evidence/k5/
 python3 scripts/80_pf1_bridge.py docs/evidence/k5/pf1.json docs/evidence/k5/pf1_runB.err.log
 python3 - <<'EOF'
 import json, statistics
@@ -839,7 +839,7 @@ git add docs/evidence/k5/ && git commit -m "gate(pf1) : équivalence teacher-for
 
 ```bash
 # M1 → VM (le 74 tourne où vit le dump) :
-scp scripts/74_kvdump_inspect.py ia@192.168.1.163:/data/gemma4-zml-probe/
+scp scripts/74_kvdump_inspect.py user@gpu-host:/data/gemma4-zml-probe/
 # VM :
 python3 /data/gemma4-zml-probe/74_kvdump_inspect.py shift-fwd $K/pf1.kvdump $K/pf2_shift.kvdump
 $B1 $W/model.safetensors $W/tokenizer.json --load-cache $K/pf2_shift.kvdump \
@@ -851,7 +851,7 @@ md5sum ./bazel-bin/examples/rqz/gemma4_g12auto >> $K/pf2_runB.err.log
 - [ ] **Step 8.2 : verdict — le mutant DOIT mordre contre l'oracle NOMINAL**
 
 ```bash
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf2_runB.err.log docs/evidence/k5/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf2_runB.err.log docs/evidence/k5/
 python3 scripts/80_pf1_bridge.py docs/evidence/k5/pf1.json docs/evidence/k5/pf2_runB.err.log --expect-fail
 ```
 
@@ -896,7 +896,7 @@ p0=$($B1 $W/model.safetensors $W/tokenizer.json --ids-only \
 echo "p0=$p0"    # sanity : ~25-35 ids ; 0 ou vide = STOP, le grep n'a pas matché
 # CLI POSITIONNELLE du 74 (74:331-336) : make-fixture <n> <p0> <out> [--source] ;
 # --source défaut /data/gemma4-zml-probe/u9_ids.safetensors (présent sur la VM, ~3900 ids)
-scp scripts/74_kvdump_inspect.py ia@192.168.1.163:/data/gemma4-zml-probe/  # si pas déjà fait
+scp scripts/74_kvdump_inspect.py user@gpu-host:/data/gemma4-zml-probe/  # si pas déjà fait
 python3 /data/gemma4-zml-probe/74_kvdump_inspect.py make-fixture \
   $((1005 - p0)) $p0 $K/pf3_fixture.safetensors
 nohup $B1 $W/model.safetensors $W/tokenizer.json \
@@ -919,8 +919,8 @@ $B1 $W/model.safetensors $W/tokenizer.json --load-cache $K/pf3.kvdump \
   > $K/pf3_runB.out.log 2> $K/pf3_runB.err.log
 md5sum ./bazel-bin/examples/rqz/gemma4_g12auto >> $K/pf3_runB.err.log
 # M1 — rapatrier PUIS pousser vers M4 (chaîne complète, patron Task 7.3) :
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf3_outB.safetensors /tmp/
-scp ia@192.168.1.163:/data/gemma4-zml-probe/k5/pf3_runB.err.log docs/evidence/k5/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf3_outB.safetensors /tmp/
+scp user@gpu-host:/data/gemma4-zml-probe/k5/pf3_runB.err.log docs/evidence/k5/
 scp /tmp/pf3_outB.safetensors macmini:/tmp/
 # M4 — nohup OBLIGATOIRE : prefill fp32 CPU à T≈1078 ≈ 15× l'oracle du scénario court
 # (grandeur prédite spec §2bis) :

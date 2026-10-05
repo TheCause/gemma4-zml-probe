@@ -1,0 +1,17 @@
+# fumée lettre, run B, même binaire c13dea12888be8a5…, 24 sept. 2026 (test discriminant inter-processus)
+info: BUILD: mode=ReleaseFast
+info: manifest : 3 cas (letter), eot_id=106, warmup=49 ids
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=1641832 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Compiling StepDec.forward (gather+forwardStep+topK+gather candidats+logSumExp) ...
+info:   compile: 13.852s
+info: [mem] post-compile: RSS=2007376 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: warmup : t_absorb=507710 µs (49 ids)
+info: rep 1/2 terminée (3 cas)
+info: rep 2/2 terminée (3 cas)
+info: passe inverse terminée (3 cas)
+info: écrit /tmp/smoke_fix_runB.jsonl (7604 octets)
+rc=0

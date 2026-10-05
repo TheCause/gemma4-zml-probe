@@ -470,7 +470,7 @@ dégradé : 2ᵉ requalification du même type ⇒ STOP, diff l'instrument).
 - La bannière `BUILD: mode=ReleaseFast` est greppée dans CHAQUE log de gate — critère **fixe** :
   un log qui porte un autre mode est INEXÉCUTABLE, pas PASS ;
 - Déploiement : `zml_runner/deploy_to_3090.sh` (rsync, inchangé) ;
-- Runs : `ssh ia@192.168.1.163`, nohup + log distant + stdin fermé pour les runs longs (leçon
+- Runs : `ssh user@gpu-host`, nohup + log distant + stdin fermé pour les runs longs (leçon
   26 juil), capture `> out.log 2> err.log` systématique.
 
 ## 9. Ce que ce chantier NE proclame PAS

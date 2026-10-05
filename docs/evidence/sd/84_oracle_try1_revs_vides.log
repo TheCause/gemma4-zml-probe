@@ -1,0 +1,5 @@
+template: enable_thinking PRÉSENT → False
+C-SD-A PASS — 48 prompts lettre × 4 lettres, 24 prompts JSON, BOS unique partout
+longueurs prompts lettre min/med/max = 69/77/93
+longueurs prompts JSON   min/med/max = 78/86/102
+wrote /data/gemma4-zml-probe/fixtures/sd_manifest.json + /data/gemma4-zml-probe/fixtures/sd_oracle.json

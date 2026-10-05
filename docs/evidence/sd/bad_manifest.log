@@ -1,0 +1,9 @@
+# gemma4_decide, manifest sans letter[0].label_ids (/tmp/sd_bad.json), 24 sept 2026 16:44:47 CEST
+info: BUILD: mode=ReleaseFast
+error: manifest : champ 'label_ids' absent ou invalide
+rc=1
+error: BadManifest
+
+real	0m0.003s
+user	0m0.001s
+sys	0m0.002s

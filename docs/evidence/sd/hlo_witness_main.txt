@@ -1,0 +1,12 @@
+info:   compile: 13.847s
+info: [mem] post-compile (go/no-go): RSS=2075784 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 21 steps de prefill, puis génération (limite 48 = fed.len, oracle)
+info: L3 PERF : prefill 21 steps en 0.264s (79.4 tok/s) ; génération 48 tokens en 0.430s (111.5 tok/s)
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)
+sha256 9465c21da7fa997bebac08c4ffd248debd4812f408e68da632ba4b9ac02d47c1 module_0001.zml.before_optimizations.txt
+
+== modules pré-opt du dump (liste complète, tailles en octets)
+673622 module_0001.zml.before_optimizations.txt
+fichiers dans le dump : 308
+ENTRY %main.314 (Arg_0.627: bf16[262144,
+module retenu = seul pré-opt du dump = StepTok.forward (log : « Compiling StepTok.forward … mono-graphe », une seule compile)

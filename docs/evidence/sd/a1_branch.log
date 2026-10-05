@@ -1,0 +1,13 @@
+info: EOT_ID = 106 (mesuré depuis le tokenizer)
+info: --oracle : 48 steps de génération attendus (fed.len), prompt vérifié (ids.len=21 == positions[0])
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so
+info: A1 — backend = cuda (cible : cuda)
+info: Materializing weights (store_ck) + Packed/Cache (HostInputs, zéros hors positions/cos/sin/masques) ...
+info: [mem] post-load (poids + Packed/Cache sur device): RSS=1692108 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Compiling StepTok.forward (gather+forwardStep+topK, mono-graphe 35 couches, 1er compile GPU du mono autonome L3) ...
+info:   compile: 13.945s
+info: [mem] post-compile (go/no-go): RSS=2067456 KiB (~1 GiB) swap=0 KiB (~0 GiB)
+info: Boucle autonome : 21 steps de prefill, puis génération (limite 48 = fed.len, oracle)
+info: L3 PERF : prefill 21 steps en 0.272s (77.1 tok/s) ; génération 48 tokens en 0.441s (108.8 tok/s)
+info: A1 PASS — 48/48 argmax-match (autonome complet, zéro input fixture)

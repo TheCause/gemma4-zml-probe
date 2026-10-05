@@ -1,0 +1,6 @@
+template: enable_thinking PRÉSENT → False
+C-SD-A PASS — 48 prompts lettre × 4 lettres, 24 prompts JSON, BOS unique partout
+révisions du modèle en cache : ['905e84b50c4d2a365ebde34e685027578e6728db'] (source : snapshots_dir (scan_cache_dir: Blob missing (broken symlink): /data/hf_cache/hub/models--google--gemma-4-E2B-it/blobs/2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550))
+longueurs prompts lettre min/med/max = 69/77/93
+longueurs prompts JSON   min/med/max = 78/86/102
+wrote /data/gemma4-zml-probe/fixtures/sd_manifest.json + /data/gemma4-zml-probe/fixtures/sd_oracle.json
